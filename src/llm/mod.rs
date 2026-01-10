@@ -8,8 +8,7 @@ pub mod client;
 pub mod chat;
 
 pub use client::{LlmClient, LlmProvider};
-pub use chat::{ChatMessage, ChatRequest, ChatResponse, MessageRole, StreamEvent, TokenUsage, Usage};
-pub use chat::{ChatMessage, ChatRequest, ChatResponse, StreamEvent};
+pub use chat::ChatResponse;
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -31,7 +30,16 @@ pub struct LlmConfig {
     pub temperature: Option<f32>,
     /// System prompt for the model
     pub system_prompt: Option<String>,
+    /// Cost per 1000 input tokens
+    pub input_price_per_1k: f64,
+    /// Cost per 1000 output tokens
+    pub output_price_per_1k: f64,
+    /// Maximum context tokens
+    pub max_context_tokens: usize,
+    /// Condense threshold (0.0 - 1.0)
+    pub condense_threshold: f64,
     /// Additional provider-specific parameters
+    #[allow(dead_code)]
     pub extra_params: HashMap<String, String>,
 }
 
@@ -51,23 +59,44 @@ impl LlmConfig {
             max_tokens: Some(4096),
             temperature: Some(0.7),
             system_prompt: None,
+            input_price_per_1k: 0.0,
+            output_price_per_1k: 0.0,
+            max_context_tokens: 32768,
+            condense_threshold: 0.8,
             extra_params: HashMap::new(),
         }
     }
 
+    /// Set pricing
+    pub fn with_pricing(mut self, input_1k: f64, output_1k: f64) -> Self {
+        self.input_price_per_1k = input_1k;
+        self.output_price_per_1k = output_1k;
+        self
+    }
+
+    /// Set context management settings
+    pub fn with_context_management(mut self, max_tokens: usize, threshold: f64) -> Self {
+        self.max_context_tokens = max_tokens;
+        self.condense_threshold = threshold;
+        self
+    }
+
     /// Set maximum tokens
+    #[allow(dead_code)]
     pub fn with_max_tokens(mut self, tokens: u32) -> Self {
         self.max_tokens = Some(tokens);
         self
     }
 
     /// Set temperature
+    #[allow(dead_code)]
     pub fn with_temperature(mut self, temp: f32) -> Self {
         self.temperature = Some(temp.clamp(0.0, 2.0));
         self
     }
 
     /// Set system prompt
+    #[allow(dead_code)]
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         self.system_prompt = Some(prompt);
         self
@@ -75,7 +104,7 @@ impl LlmConfig {
 }
 
 /// Token usage information
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TokenUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -94,11 +123,13 @@ impl std::fmt::Display for TokenUsage {
 }
 
 /// Create a default LLM client with the given configuration
+#[allow(dead_code)]
 pub fn create_client(config: LlmConfig) -> Result<LlmClient> {
     LlmClient::new(config).context("Failed to create LLM client")
 }
 
 /// Get the system prompt for terminal AI assistant
+#[allow(dead_code)]
 pub fn get_terminal_system_prompt() -> String {
     String::from(
         "You are a helpful AI assistant that helps with terminal operations and system administration. \

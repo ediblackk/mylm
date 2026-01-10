@@ -4,13 +4,13 @@
 //! file listing, command history, and process information.
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 /// Terminal context information
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TerminalContext {
     /// Current working directory
     pub current_dir: PathBuf,
@@ -29,7 +29,7 @@ pub struct TerminalContext {
 }
 
 /// Process information
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ProcessInfo {
     /// Process ID
     pub pid: String,
@@ -44,7 +44,7 @@ pub struct ProcessInfo {
 }
 
 /// Network connection information
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NetworkInfo {
     /// Protocol (TCP/UDP)
     pub proto: String,
@@ -128,13 +128,15 @@ impl TerminalContext {
             .take(20)
             .map(|line| {
                 // Remove line numbers and trim
-                let parts: Vec<&str> = line.splitn(2, ' ').collect();
+                let parts: Vec<&str> = line.trim().splitn(2, ' ').collect();
                 if parts.len() > 1 {
                     parts[1].to_string()
                 } else {
-                    line.trim_start().to_string()
+                    line.trim().to_string()
                 }
             })
+            .collect::<Vec<_>>()
+            .into_iter()
             .rev()
             .collect();
 
@@ -239,6 +241,7 @@ impl TerminalContext {
     }
 
     /// Get a formatted summary for AI context
+    #[allow(dead_code)]
     pub fn get_summary(&self) -> String {
         let mut summary = vec![
             format!("Current Directory: {}", self.current_dir_str),
@@ -301,7 +304,7 @@ impl TerminalContext {
 
 impl Default for TerminalContext {
     fn default() -> Self {
-        Self::new().unwrap_or_else(|_| TerminalContext {
+        TerminalContext {
             current_dir: PathBuf::from("/"),
             current_dir_str: String::from("/"),
             directory_listing: String::new(),
@@ -309,17 +312,25 @@ impl Default for TerminalContext {
             shell_history: Vec::new(),
             processes: Vec::new(),
             network_connections: Vec::new(),
-        })
+        }
     }
 }
 
 /// Get terminal context (lightweight, non-blocking)
+#[allow(dead_code)]
 pub fn get_terminal_context() -> Result<TerminalContext> {
     TerminalContext::new()
         .context("Failed to collect terminal context")
 }
 
 /// Get current working directory
+#[allow(dead_code)]
 pub fn get_current_dir() -> Result<PathBuf> {
     env::current_dir().context("Failed to get current directory")
+}
+
+pub async fn collect_terminal_context() -> Result<TerminalContext> {
+    tokio::task::spawn_blocking(TerminalContext::new)
+        .await
+        .unwrap_or_else(|e| Err(anyhow::anyhow!("Task failed: {}", e)))
 }

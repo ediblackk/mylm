@@ -5,12 +5,11 @@
 //! - Google Generative AI (Gemini)
 
 use super::{
-    chat::{ChatMessage, ChatRequest, ChatResponse, StreamEvent},
+    chat::{ChatMessage, ChatRequest, ChatResponse, Choice, StreamEvent, Usage},
     LlmConfig, TokenUsage,
 };
 use anyhow::{bail, Context, Result};
-use async_stream::stream;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use reqwest::{
     header::{HeaderMap, CONTENT_TYPE},
     Client as HttpClient, StatusCode,
@@ -25,6 +24,8 @@ pub enum LlmProvider {
     OpenAiCompatible,
     /// Google Generative AI (Gemini)
     GoogleGenerativeAi,
+    /// Moonshot AI (Kimi)
+    MoonshotKimi,
 }
 
 impl std::str::FromStr for LlmProvider {
@@ -32,8 +33,9 @@ impl std::str::FromStr for LlmProvider {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "openai" | "ollama" | "lmstudio" | "local" => Ok(LlmProvider::OpenAiCompatible),
-            "google" | "gemini" | "google-ai" => Ok(LlmProvider::GoogleGenerativeAi),
+            "openai" | "ollama" | "lmstudio" | "local" | "openrouter" => Ok(LlmProvider::OpenAiCompatible),
+            "google" | "gemini" | "google-ai" | "google-generativeai" => Ok(LlmProvider::GoogleGenerativeAi),
+            "moonshot" | "kimi" => Ok(LlmProvider::MoonshotKimi),
             _ => Err(format!("Unknown LLM provider: {}", s)),
         }
     }
@@ -44,6 +46,7 @@ impl std::fmt::Display for LlmProvider {
         match self {
             LlmProvider::OpenAiCompatible => write!(f, "OpenAI Compatible"),
             LlmProvider::GoogleGenerativeAi => write!(f, "Google Generative AI"),
+            LlmProvider::MoonshotKimi => write!(f, "Moonshot AI (Kimi)"),
         }
     }
 }
@@ -71,18 +74,25 @@ impl LlmClient {
     /// Send a chat request and get a response
     pub async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse> {
         match self.config.provider {
-            LlmProvider::OpenAiCompatible => self.chat_openai(request).await,
+            LlmProvider::OpenAiCompatible | LlmProvider::MoonshotKimi => self.chat_openai(request).await,
             LlmProvider::GoogleGenerativeAi => self.chat_gemini(request).await,
         }
     }
 
+    /// Helper for main.rs and others
+    pub async fn complete(&self, prompt: &str) -> Result<ChatResponse> {
+        let request = ChatRequest::new(self.config.model.clone(), vec![ChatMessage::user(prompt)]);
+        self.chat(&request).await
+    }
+
     /// Send a chat request with streaming response
+    #[allow(dead_code)]
     pub fn chat_stream<'a>(
         &'a self,
         request: &'a ChatRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send + 'a>> {
         match self.config.provider {
-            LlmProvider::OpenAiCompatible => self.chat_stream_openai(request),
+            LlmProvider::OpenAiCompatible | LlmProvider::MoonshotKimi => self.chat_stream_openai(request),
             LlmProvider::GoogleGenerativeAi => self.chat_stream_gemini(request),
         }
     }
@@ -97,6 +107,14 @@ impl LlmClient {
             max_tokens: self.config.max_tokens,
             temperature: self.config.temperature,
             stream: Some(false),
+            tools: request.tools.as_ref().map(|t| t.iter().map(|tool| OpenAiTool {
+                type_: tool.type_.clone(),
+                function: OpenAiFunction {
+                    name: tool.function.name.clone(),
+                    description: tool.function.description.clone(),
+                    parameters: tool.function.parameters.clone(),
+                },
+            }).collect()),
         };
 
         let response = self
@@ -114,16 +132,36 @@ impl LlmClient {
                     .json()
                     .await
                     .context("Failed to parse OpenAI response")?;
+                
+                let choices = response_body.choices.into_iter().map(|c| Choice {
+                    index: c.index,
+                    message: ChatMessage {
+                        role: super::chat::MessageRole::Assistant,
+                        content: c.message.content,
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: c.message.tool_calls.as_ref().map(|tcs| tcs.iter().map(|tc| crate::llm::chat::ToolCall {
+                            id: tc.id.clone(),
+                            type_: tc.type_.clone(),
+                            function: crate::llm::chat::ToolCallFunction {
+                                name: tc.function.name.clone(),
+                                arguments: tc.function.arguments.clone(),
+                            },
+                        }).collect()),
+                    },
+                    finish_reason: c.finish_reason,
+                }).collect();
+
                 Ok(ChatResponse {
-                    content: response_body
-                        .choices
-                        .first()
-                        .map(|c| c.message.content.clone())
-                        .unwrap_or_default(),
-                    usage: Some(TokenUsage {
-                        prompt_tokens: response_body.usage.prompt_tokens as u32,
-                        completion_tokens: response_body.usage.completion_tokens as u32,
-                        total_tokens: response_body.usage.total_tokens as u32,
+                    id: response_body.id,
+                    object: response_body.object,
+                    created: response_body.created,
+                    model: response_body.model,
+                    choices,
+                    usage: Some(Usage {
+                        prompt_tokens: response_body.usage.prompt_tokens,
+                        completion_tokens: response_body.usage.completion_tokens,
+                        total_tokens: response_body.usage.total_tokens,
                     }),
                 })
             }
@@ -167,14 +205,21 @@ impl LlmClient {
 
         // If there's a system prompt, prepend it to the first user message
         let contents = if let Some(sys_prompt) = &self.config.system_prompt {
-            let mut with_system = vec![GeminiContent {
-                role: "user".to_string(),
-                parts: vec![GeminiPart {
-                    text: format!("System: {}\n\nUser: {}", sys_prompt, contents[0].parts[0].text),
-                }],
-            }];
-            with_system.extend_from_slice(&contents[1..]);
-            with_system
+            if contents.is_empty() {
+                vec![GeminiContent {
+                    role: "user".to_string(),
+                    parts: vec![GeminiPart { text: sys_prompt.clone() }],
+                }]
+            } else {
+                let mut with_system = vec![GeminiContent {
+                    role: "user".to_string(),
+                    parts: vec![GeminiPart {
+                        text: format!("System: {}\n\nUser: {}", sys_prompt, contents[0].parts[0].text),
+                    }],
+                }];
+                with_system.extend(contents.into_iter().skip(1));
+                with_system
+            }
         } else {
             contents
         };
@@ -188,10 +233,10 @@ impl LlmClient {
 
         let body = GeminiRequest {
             contents,
-            generation_config: GeminiGenerationConfig {
+            generation_config: Some(GeminiGenerationConfig {
                 max_output_tokens: self.config.max_tokens,
                 temperature: self.config.temperature,
-            },
+            }),
         };
 
         let response = self
@@ -209,13 +254,31 @@ impl LlmClient {
                     .json()
                     .await
                     .context("Failed to parse Gemini response")?;
-                let content = response_body
-                    .candidates
-                    .first()
-                    .and_then(|c| c.content.parts.first())
-                    .map(|p| p.text.clone())
-                    .unwrap_or_default();
-                Ok(ChatResponse { content, usage: None })
+                
+                let choices = response_body.candidates.into_iter().map(|c| Choice {
+                    index: c.index,
+                    message: ChatMessage {
+                        role: super::chat::MessageRole::Assistant,
+                        content: c.content.parts.first().map(|p| p.text.clone()).unwrap_or_default(),
+                        name: None,
+                        tool_call_id: None,
+                        tool_calls: None,
+                    },
+                    finish_reason: c.finish_reason,
+                }).collect();
+
+                Ok(ChatResponse {
+                    id: "gemini".to_string(),
+                    object: "chat.completion".to_string(),
+                    created: 0,
+                    model: self.config.model.clone(),
+                    choices,
+                    usage: response_body.usage_metadata.map(|u| Usage {
+                        prompt_tokens: u.prompt_token_count,
+                        completion_tokens: u.candidates_token_count,
+                        total_tokens: u.total_token_count,
+                    }),
+                })
             }
             StatusCode::UNAUTHORIZED => {
                 bail!("Authentication failed. Check your API key.");
@@ -236,6 +299,7 @@ impl LlmClient {
     }
 
     /// OpenAI-compatible streaming chat
+    #[allow(dead_code)]
     fn chat_stream_openai<'a>(
         &'a self,
         request: &'a ChatRequest,
@@ -248,82 +312,89 @@ impl LlmClient {
             max_tokens: self.config.max_tokens,
             temperature: self.config.temperature,
             stream: Some(true),
+            tools: request.tools.as_ref().map(|t| t.iter().map(|tool| OpenAiTool {
+                type_: tool.type_.clone(),
+                function: OpenAiFunction {
+                    name: tool.function.name.clone(),
+                    description: tool.function.description.clone(),
+                    parameters: tool.function.parameters.clone(),
+                },
+            }).collect()),
         };
 
         let http_client = self.http_client.clone();
-        let headers = self.build_headers();
+        let headers_res = self.build_headers();
 
-        Box::pin(stream(move || {
-            async_stream::try_stream! {
-                let response = http_client
-                    .post(&url)
-                    .headers(headers?)
-                    .json(&body)
-                    .send()
-                    .await
-                    .context("Failed to send streaming request")?;
+        Box::pin(async_stream::try_stream! {
+            let headers = headers_res?;
+            let response = http_client
+                .post(&url)
+                .headers(headers)
+                .json(&body)
+                .send()
+                .await
+                .context("Failed to send streaming request")?;
 
-                if !response.status().is_success() {
-                    bail!("API request failed with status: {}", response.status());
-                }
+            if !response.status().is_success() {
+                let status = response.status();
+                Err(anyhow::anyhow!("API request failed with status: {}", status))?;
+            }
 
-                let mut stream = response.bytes_stream();
-                let mut buffer = String::new();
-                let mut in_message = false;
+            let mut stream = response.bytes_stream();
+            let mut buffer = String::new();
 
-                while let Some(chunk) = stream.next().await {
-                    let chunk = chunk.context("Failed to read chunk")?;
-                    buffer.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(chunk_res) = stream.next().await {
+                let chunk = chunk_res.context("Failed to read chunk")?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
 
-                    // Process complete SSE events
-                    loop {
-                        if let Some(newline_pos) = buffer.find('\n') {
-                            let line = buffer[..newline_pos].to_string();
-                            buffer = buffer[newline_pos + 1..].to_string();
+                // Process complete SSE events
+                loop {
+                    if let Some(newline_pos) = buffer.find('\n') {
+                        let line = buffer[..newline_pos].to_string();
+                        buffer = buffer[newline_pos + 1..].to_string();
 
-                            if line.starts_with("data: ") {
-                                let data = &line[6..];
-                                if data == "[DONE]" {
-                                    yield StreamEvent::Done;
-                                    return;
+                        if line.starts_with("data: ") {
+                            let data = &line[6..];
+                            if data == "[DONE]" {
+                                yield StreamEvent::Done;
+                                return;
+                            }
+
+                            if let Ok(parsed) = serde_json::from_str::<OpenAiStreamResponse>(data) {
+                                if let Some(delta) = parsed.choices.first().and_then(|c| c.delta.content.as_ref()) {
+                                    yield StreamEvent::Content(delta.clone());
                                 }
-
-                                if let Ok(parsed) = serde_json::from_str::<OpenAiStreamResponse>(data) {
-                                    if let Some(delta) = parsed.choices.first().and_then(|c| c.delta.content.as_ref()) {
-                                        yield StreamEvent::Content(delta.clone());
-                                    }
-                                    if let Some(usage) = parsed.usage {
-                                        yield StreamEvent::Usage(TokenUsage {
-                                            prompt_tokens: usage.prompt_tokens as u32,
-                                            completion_tokens: usage.completion_tokens as u32,
-                                            total_tokens: usage.total_tokens as u32,
-                                        });
-                                    }
+                                if let Some(usage) = parsed.usage {
+                                    yield StreamEvent::Usage(TokenUsage {
+                                        prompt_tokens: usage.prompt_tokens,
+                                        completion_tokens: usage.completion_tokens,
+                                        total_tokens: usage.total_tokens,
+                                    });
                                 }
                             }
-                        } else {
-                            break;
                         }
+                    } else {
+                        break;
                     }
                 }
-
-                yield StreamEvent::Done;
             }
-        }))
+
+            yield StreamEvent::Done;
+        })
     }
 
     /// Gemini streaming chat
+    #[allow(dead_code)]
     fn chat_stream_gemini<'a>(
         &'a self,
         _request: &'a ChatRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send + 'a>> {
         // Gemini API streaming is more complex, return a simple message
-        // For now, fall back to non-streaming
-        Box::pin(stream(async move {
-            Ok::<_, anyhow::Error>(StreamEvent::Content(
+        Box::pin(async_stream::try_stream! {
+            yield StreamEvent::Content(
                 "Streaming for Gemini is not yet implemented. Use non-streaming mode.".to_string(),
-            ))
-        }))
+            );
+        })
     }
 
     /// Build headers for API requests
@@ -331,7 +402,7 @@ impl LlmClient {
         let mut headers = HeaderMap::new();
 
         match self.config.provider {
-            LlmProvider::OpenAiCompatible => {
+            LlmProvider::OpenAiCompatible | LlmProvider::MoonshotKimi => {
                 headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
                 if let Some(api_key) = &self.config.api_key {
                     if api_key != "none" && !api_key.is_empty() {
@@ -352,13 +423,20 @@ impl LlmClient {
     }
 
     /// Get the model name
+    #[allow(dead_code)]
     pub fn model(&self) -> &str {
         &self.config.model
     }
 
     /// Get the provider type
+    #[allow(dead_code)]
     pub fn provider(&self) -> LlmProvider {
         self.config.provider
+    }
+
+    /// Get the configuration
+    pub fn config(&self) -> &LlmConfig {
+        &self.config
     }
 }
 
@@ -372,9 +450,28 @@ struct OpenAiRequest<'a> {
     temperature: Option<f32>,
     #[serde(default)]
     stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<OpenAiTool>>,
+}
+
+#[derive(Serialize)]
+struct OpenAiTool {
+    #[serde(rename = "type")]
+    type_: String,
+    function: OpenAiFunction,
+}
+
+#[derive(Serialize)]
+struct OpenAiFunction {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parameters: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct OpenAiResponse {
     id: String,
     object: String,
@@ -385,6 +482,7 @@ struct OpenAiResponse {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct OpenAiChoice {
     index: u32,
     message: OpenAiMessage,
@@ -392,12 +490,30 @@ struct OpenAiChoice {
 }
 
 #[derive(Deserialize, Serialize)]
+#[allow(dead_code)]
 struct OpenAiMessage {
     role: String,
     content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OpenAiResponseToolCall>>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct OpenAiResponseToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    type_: String,
+    function: OpenAiResponseToolFunction,
+}
+
+#[derive(Deserialize, Serialize)]
+struct OpenAiResponseToolFunction {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct OpenAiUsage {
     prompt_tokens: u32,
     completion_tokens: u32,
@@ -405,6 +521,7 @@ struct OpenAiUsage {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct OpenAiStreamResponse {
     id: String,
     object: String,
@@ -415,6 +532,7 @@ struct OpenAiStreamResponse {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct OpenAiStreamChoice {
     index: u32,
     delta: OpenAiDelta,
@@ -422,6 +540,7 @@ struct OpenAiStreamChoice {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct OpenAiDelta {
     role: Option<String>,
     content: Option<String>,
@@ -435,18 +554,20 @@ struct GeminiRequest {
     generation_config: Option<GeminiGenerationConfig>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct GeminiContent {
     role: String,
     parts: Vec<GeminiPart>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct GeminiPart {
     text: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct GeminiGenerationConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
@@ -455,6 +576,7 @@ struct GeminiGenerationConfig {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GeminiResponse {
     candidates: Vec<GeminiCandidate>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -462,6 +584,7 @@ struct GeminiResponse {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GeminiCandidate {
     content: GeminiContent,
     finish_reason: Option<String>,
@@ -469,6 +592,7 @@ struct GeminiCandidate {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GeminiUsageMetadata {
     prompt_token_count: u32,
     candidates_token_count: u32,

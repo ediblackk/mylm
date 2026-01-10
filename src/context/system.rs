@@ -5,7 +5,8 @@
 
 use anyhow::{Context, Result};
 use serde::Serialize;
-use sysinfo::{CpuExt, DiskExt, System, SystemExt};
+use sysinfo::{Disks, System};
+use crate::context::SystemContext;
 
 /// System information container
 #[derive(Debug, Serialize, Clone)]
@@ -73,7 +74,8 @@ impl SystemInfo {
         let used_swap = system.used_swap();
 
         // Get disk information
-        let disks = system.disks()
+        let disks_obj = Disks::new_with_refreshed_list();
+        let disks = disks_obj
             .iter()
             .map(|d| DiskInfo {
                 name: d.name().to_string_lossy().to_string(),
@@ -90,18 +92,14 @@ impl SystemInfo {
             .collect();
 
         Ok(SystemInfo {
-            os_name: system.name()
-                .unwrap_or_else(|| String::from("Unknown"))
-                .to_string(),
-            os_version: system.os_version()
-                .unwrap_or_else(|| String::from("Unknown"))
-                .to_string(),
-            kernel_version: system.kernel_version()
-                .unwrap_or_else(|| String::from("Unknown"))
-                .to_string(),
-            hostname: system.host_name()
-                .unwrap_or_else(|| String::from("Unknown"))
-                .to_string(),
+            os_name: System::name()
+                .unwrap_or_else(|| String::from("Unknown")),
+            os_version: System::os_version()
+                .unwrap_or_else(|| String::from("Unknown")),
+            kernel_version: System::kernel_version()
+                .unwrap_or_else(|| String::from("Unknown")),
+            hostname: System::host_name()
+                .unwrap_or_else(|| String::from("Unknown")),
             cpu_model,
             cpu_cores,
             cpu_usage,
@@ -114,6 +112,7 @@ impl SystemInfo {
     }
 
     /// Get memory usage as a formatted string
+    #[allow(dead_code)]
     pub fn memory_usage(&self) -> String {
         format!(
             "Memory: {}/{} ({:.1}%)",
@@ -128,6 +127,7 @@ impl SystemInfo {
     }
 
     /// Get swap usage as a formatted string
+    #[allow(dead_code)]
     pub fn swap_usage(&self) -> String {
         format!(
             "Swap: {}/{} ({:.1}%)",
@@ -142,6 +142,7 @@ impl SystemInfo {
     }
 
     /// Get disk usage as a formatted string
+    #[allow(dead_code)]
     pub fn disk_usage(&self) -> Vec<String> {
         self.disks
             .iter()
@@ -159,6 +160,7 @@ impl SystemInfo {
     }
 
     /// Format bytes to human readable format
+    #[allow(dead_code)]
     pub fn format_bytes(bytes: u64) -> String {
         const KB: u64 = 1024;
         const MB: u64 = KB * 1024;
@@ -199,12 +201,14 @@ impl Default for SystemInfo {
 }
 
 /// Get basic system information (lightweight, non-blocking)
+#[allow(dead_code)]
 pub fn get_system_info() -> Result<SystemInfo> {
     SystemInfo::new()
         .context("Failed to collect system information")
 }
 
 /// Get a brief system summary for AI context
+#[allow(dead_code)]
 pub fn get_system_summary() -> Result<String> {
     let info = SystemInfo::new()?;
 
@@ -226,4 +230,23 @@ pub fn get_system_summary() -> Result<String> {
     }
 
     Ok(summary.join("\n"))
+}
+
+/// Collect system context for terminal AI
+pub async fn collect_system_context() -> Result<SystemContext> {
+    let mut system = System::new_all();
+    system.refresh_all();
+
+    Ok(SystemContext {
+        total_memory: Some(system.total_memory()),
+        used_memory: Some(system.used_memory()),
+        total_swap: Some(system.total_swap()),
+        used_swap: Some(system.used_swap()),
+        cpu_count: Some(system.cpus().len()),
+        cpu_usage: Some(system.global_cpu_info().cpu_usage()),
+        process_count: Some(system.processes().len() as u32),
+        load_average_1m: Some(System::load_average().one),
+        load_average_5m: Some(System::load_average().five),
+        load_average_15m: Some(System::load_average().fifteen),
+    })
 }

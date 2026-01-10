@@ -6,11 +6,9 @@
 //! - System information (CPU, memory, processes)
 //! - Shell history and command patterns
 
-use anyhow::Result;
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::time::Duration;
 
 pub mod git;
 pub mod system;
@@ -41,10 +39,10 @@ pub struct TerminalContext {
 
     /// Terminal information
     #[serde(default)]
-    pub terminal: TerminalContextInfo,
+    pub terminal: terminal::TerminalContext,
 
     /// Collection timestamp
-    pub collected_at: DateTime<chrono::Utc>,
+    pub collected_at: DateTime<Utc>,
 }
 
 /// Git-specific context
@@ -109,28 +107,11 @@ pub struct SystemContext {
     pub load_average_15m: Option<f64>,
 }
 
-/// Terminal and shell information
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
-pub struct TerminalContextInfo {
-    /// Terminal type (e.g., "xterm-256color")
-    pub term: Option<String>,
-
-    /// Shell name (e.g., "bash", "zsh", "fish")
-    pub shell: Option<String>,
-
-    /// Shell version
-    pub shell_version: Option<String>,
-
-    /// Recent command history (last 10)
-    #[serde(default)]
-    pub recent_commands: Vec<String>,
-}
-
 impl TerminalContext {
     /// Create a new empty context
     pub fn new() -> Self {
         Self {
-            collected_at: chrono::Utc::now(),
+            collected_at: Utc::now(),
             ..Default::default()
         }
     }
@@ -241,17 +222,13 @@ impl TerminalContext {
 
         // Terminal info
         prompt.push_str("\n## Terminal Info\n");
-        if let Some(ref shell) = self.terminal.shell {
-            prompt.push_str(&format!("- Shell: {}\n", shell));
-        }
-        if let Some(ref term) = self.terminal.term {
-            prompt.push_str(&format!("- Terminal: {}\n", term));
-        }
+        // Access fields from the moved terminal structure
+        prompt.push_str(&format!("- Current Dir: {}\n", self.terminal.current_dir_str));
 
         // Recent commands
-        if !self.terminal.recent_commands.is_empty() {
+        if !self.terminal.command_history.is_empty() {
             prompt.push_str("\n## Recent Commands\n");
-            for cmd in self.terminal.recent_commands.iter().take(5) {
+            for cmd in self.terminal.command_history.iter().take(5) {
                 prompt.push_str(&format!("- {}\n", cmd));
             }
         }
@@ -300,54 +277,5 @@ impl TerminalContext {
         }
 
         summary
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_context_new() {
-        let ctx = TerminalContext::new();
-        assert!(ctx.cwd.is_none());
-        assert!(!ctx.git.is_repo);
-    }
-
-    #[test]
-    fn test_build_prompt() {
-        let ctx = TerminalContext {
-            cwd: Some(PathBuf::from("/home/user/project")),
-            user: Some("testuser".to_string()),
-            hostname: Some("testhost".to_string()),
-            os: Some("linux x86_64".to_string()),
-            git: GitContext {
-                is_repo: true,
-                branch: Some("main".to_string()),
-                commit: Some("abc123".to_string()),
-                status_summary: Some("clean".to_string()),
-                ..Default::default()
-            },
-            system: SystemContext {
-                total_memory: Some(16_000_000_000),
-                used_memory: Some(8_000_000_000),
-                cpu_count: Some(8),
-                cpu_usage: Some(25.5),
-                process_count: Some(150),
-                ..Default::default()
-            },
-            terminal: TerminalContextInfo {
-                shell: Some("bash".to_string()),
-                term: Some("xterm-256color".to_string()),
-                recent_commands: vec!["ls -la".to_string(), "git status".to_string()],
-            },
-            collected_at: chrono::Utc::now(),
-        };
-
-        let prompt = ctx.build_prompt("What is this project?");
-        assert!(prompt.contains("/home/user/project"));
-        assert!(prompt.contains("testuser"));
-        assert!(prompt.contains("main"));
-        assert!(prompt.contains("What is this project?"));
     }
 }

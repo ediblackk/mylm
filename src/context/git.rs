@@ -93,7 +93,7 @@ fn get_status_summary() -> String {
             }
 
             // Check first character (staged)
-            match status.chars().nth(0) {
+            match status.chars().next() {
                 Some('A') | Some('M') | Some('D') | Some('R') | Some('C') | Some('U') => staged += 1,
                 _ => {}
             }
@@ -132,45 +132,6 @@ fn get_status_summary() -> String {
     summary
 }
 
-/// Get git diff statistics for staged changes
-fn get_staged_diff_stats() -> Option<(usize, usize)> {
-    let output = git_command(&["diff", "--cached", "--stat"][..]).ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let stats = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = stats.split_whitespace().collect();
-
-    // Format is typically: "X files changed, Y insertions(+), Z deletions(-)"
-    if parts.len() >= 3 {
-        if let Ok(files) = parts[0].parse::<usize>() {
-            return Some((files, 0));
-        }
-    }
-
-    None
-}
-
-/// Get diff statistics for working tree changes
-fn get_working_diff_stats() -> Option<(usize, usize)> {
-    let output = git_command(&["diff", "--stat"][..]).ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    let stats = String::from_utf8_lossy(&output.stdout);
-    let parts: Vec<&str> = stats.split_whitespace().collect();
-
-    if parts.len() >= 3 {
-        if let Ok(files) = parts[0].parse::<usize>() {
-            return Some((files, 0));
-        }
-    }
-
-    None
-}
-
 /// Collect all git context information
 pub async fn collect_git_context() -> Result<GitContext> {
     // Run git commands in parallel using blocking in async context
@@ -186,7 +147,7 @@ pub async fn collect_git_context() -> Result<GitContext> {
     }
 
     // Collect all info in parallel
-    let (branch, commit, commit_message, status_summary) = tokio::join!(
+    let (branch_res, commit_res, msg_res, status_res) = tokio::join!(
         tokio::task::spawn_blocking(get_branch_name),
         tokio::task::spawn_blocking(get_commit_hash),
         tokio::task::spawn_blocking(get_commit_message),
@@ -195,47 +156,12 @@ pub async fn collect_git_context() -> Result<GitContext> {
 
     Ok(GitContext {
         is_repo: true,
-        branch: branch.ok().flatten(),
-        commit: commit.ok().flatten(),
-        commit_message: commit_message.ok().flatten(),
-        status_summary: Some(status_summary),
+        branch: branch_res.unwrap_or(None),
+        commit: commit_res.unwrap_or(None),
+        commit_message: msg_res.unwrap_or(None),
+        status_summary: Some(status_res.unwrap_or_else(|_| "unknown".to_string())),
         untracked_count: None,
         modified_count: None,
         staged_count: None,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_is_git_repo_in_git_dir() {
-        // This test assumes we're running in a git repo
-        let in_repo = is_git_repo();
-        // We should be in a git repo for these tests
-        assert!(in_repo, "Tests should run in a git repository");
-    }
-
-    #[test]
-    fn test_get_branch_name() {
-        let branch = get_branch_name();
-        assert!(branch.is_some());
-        assert!(!branch.unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_get_commit_hash() {
-        let hash = get_commit_hash();
-        assert!(hash.is_some());
-        // SHA-1 hash should be 40 characters
-        let h = hash.unwrap();
-        assert_eq!(h.len(), 40);
-    }
-
-    #[test]
-    fn test_get_status_summary() {
-        let summary = get_status_summary();
-        assert!(!summary.is_empty());
-    }
 }

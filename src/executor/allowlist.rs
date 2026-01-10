@@ -110,6 +110,7 @@ impl Default for CommandAllowlist {
     }
 }
 
+#[allow(dead_code)]
 impl CommandAllowlist {
     /// Create a new allowlist with defaults
     pub fn new() -> Self {
@@ -203,6 +204,7 @@ impl CommandAllowlist {
 
 /// Allowlist safety levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum AllowlistLevel {
     /// Completely blocked
     Blocked,
@@ -220,10 +222,14 @@ pub enum AllowlistLevel {
     Unknown,
 }
 
+#[allow(dead_code)]
 impl AllowlistLevel {
     /// Check if this level requires force
     pub fn requires_force(&self) -> bool {
-        matches!(self, AllowlistLevel::RequiresForce | AllowlistLevel::Unknown)
+        match self {
+            AllowlistLevel::RequiresForce | AllowlistLevel::Unknown => true,
+            _ => false,
+        }
     }
 
     /// Get a human-readable description

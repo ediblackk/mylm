@@ -5,18 +5,21 @@
 pub mod allowlist;
 pub mod safety;
 
-use crate::context::Context;
+use crate::context::TerminalContext;
 use allowlist::CommandAllowlist;
 use anyhow::{Context as _, Result};
-use safety::{CommandSafety, SafetyChecker};
-use std::process::{Command, Output};
+use safety::SafetyChecker;
+use std::process::Output;
+use tokio::process::Command;
 
 /// Command executor with safety checks
+#[allow(dead_code)]
 pub struct CommandExecutor {
     allowlist: CommandAllowlist,
     safety_checker: SafetyChecker,
 }
 
+#[allow(dead_code)]
 impl CommandExecutor {
     /// Create a new executor
     pub fn new(allowlist: CommandAllowlist, safety_checker: SafetyChecker) -> Self {
@@ -30,7 +33,7 @@ impl CommandExecutor {
     pub async fn execute_from_llm(
         &self,
         command_str: &str,
-        context: &Context,
+        context: &TerminalContext,
         force: bool,
     ) -> Result<ExecutionResult> {
         // Parse the command
@@ -45,7 +48,7 @@ impl CommandExecutor {
         }
 
         // Perform safety checks
-        let safety_level = self.safety_checker.assess(command_str, &parsed);
+        let safety_level = self.safety_checker.assess(command_str, &parsed.command, &parsed.args);
 
         if safety_level.is_dangerous() && !force {
             return Err(anyhow::anyhow!(
@@ -72,7 +75,7 @@ impl CommandExecutor {
     pub async fn execute_unsafe(
         &self,
         command_str: &str,
-        context: &Context,
+        context: &TerminalContext,
     ) -> Result<ExecutionResult> {
         let parsed = self.parse_command(command_str)?;
         let output = self.execute(&parsed, context).await?;
@@ -88,19 +91,16 @@ impl CommandExecutor {
 
     /// Parse a command string into components
     fn parse_command(&self, command_str: &str) -> Result<ParsedCommand> {
-        // Simple parsing - split by whitespace
-        let parts: Vec<&str> = command_str
-            .trim()
-            .split_whitespace()
-            .filter(|s| !s.is_empty())
-            .collect();
+        // Use shell-words for proper parsing of quoted arguments
+        let parts = shell_words::split(command_str.trim())
+            .map_err(|e| anyhow::anyhow!("Failed to parse command: {}", e))?;
 
         if parts.is_empty() {
             return Err(anyhow::anyhow!("Empty command"));
         }
 
         Ok(ParsedCommand {
-            command: parts[0].to_string(),
+            command: parts[0].clone(),
             args: parts[1..].to_vec(),
         })
     }
@@ -109,7 +109,7 @@ impl CommandExecutor {
     async fn execute(
         &self,
         parsed: &ParsedCommand,
-        context: &Context,
+        context: &TerminalContext,
     ) -> Result<Output> {
         let mut cmd = Command::new(&parsed.command);
 
@@ -117,11 +117,11 @@ impl CommandExecutor {
         cmd.args(&parsed.args);
 
         // Set working directory
-        if let Some(cwd) = &context.current_dir {
+        if let Some(cwd) = &context.cwd {
             cmd.current_dir(cwd);
         }
 
-        // Execute with timeout
+        // Execute
         let output = cmd
             .output()
             .await
@@ -132,13 +132,15 @@ impl CommandExecutor {
 }
 
 /// Parsed command structure
-struct ParsedCommand {
-    command: String,
-    args: Vec<&'static str>,
+#[allow(dead_code)]
+pub struct ParsedCommand {
+    pub command: String,
+    pub args: Vec<String>,
 }
 
 /// Result of command execution
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ExecutionResult {
     /// The command that was executed
     pub command: String,
@@ -152,6 +154,7 @@ pub struct ExecutionResult {
     pub exit_code: Option<i32>,
 }
 
+#[allow(dead_code)]
 impl ExecutionResult {
     /// Check if execution was successful
     pub fn is_success(&self) -> bool {

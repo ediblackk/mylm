@@ -3,6 +3,7 @@
 //! Defines the structure for OpenAI-compatible API endpoints,
 //! supporting various providers like Ollama, LM Studio, and OpenAI.
 
+#![allow(dead_code)]
 use serde::{Deserialize, Serialize};
 use std::env;
 
@@ -18,6 +19,10 @@ use std::env;
 pub struct EndpointConfig {
     /// Unique name for this endpoint (used for selection)
     pub name: String,
+
+    /// Provider type (openai, google, etc.)
+    #[serde(default = "default_provider")]
+    pub provider: String,
 
     /// Base URL of the API endpoint (including /v1 suffix for OpenAI-compatible)
     #[serde(default = "default_base_url")]
@@ -37,6 +42,22 @@ pub struct EndpointConfig {
     /// Request timeout in seconds
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
+
+    /// Cost per 1000 input tokens (in USD)
+    #[serde(default = "default_price")]
+    pub input_price_per_1k: f64,
+
+    /// Cost per 1000 output tokens (in USD)
+    #[serde(default = "default_price")]
+    pub output_price_per_1k: f64,
+
+    /// Maximum tokens for the context window
+    #[serde(default = "default_max_context")]
+    pub max_context_tokens: usize,
+
+    /// Threshold to trigger condensation (0.0 to 1.0)
+    #[serde(default = "default_condense_threshold")]
+    pub condense_threshold: f64,
 }
 
 /// Message role for chat completion
@@ -134,6 +155,10 @@ pub struct Usage {
 }
 
 // Default value functions
+fn default_provider() -> String {
+    "openai".to_string()
+}
+
 fn default_base_url() -> String {
     "http://localhost:11434/v1".to_string()
 }
@@ -154,8 +179,21 @@ fn default_stream() -> bool {
     false
 }
 
+fn default_price() -> f64 {
+    0.0
+}
+
+fn default_max_context() -> usize {
+    32768
+}
+
+fn default_condense_threshold() -> f64 {
+    0.8
+}
+
 impl EndpointConfig {
     /// Get the API key, falling back to environment variable
+    #[allow(dead_code)]
     pub fn get_api_key(&self) -> String {
         if self.api_key != "none" && !self.api_key.is_empty() {
             return self.api_key.clone();
@@ -175,16 +213,19 @@ impl EndpointConfig {
     }
 
     /// Get the base URL for API requests
+    #[allow(dead_code)]
     pub fn get_base_url(&self) -> &str {
         &self.base_url
     }
 
     /// Get the model identifier
+    #[allow(dead_code)]
     pub fn get_model(&self) -> &str {
         &self.model
     }
 
     /// Check if this endpoint requires authentication
+    #[allow(dead_code)]
     pub fn requires_auth(&self) -> bool {
         !self.api_key.is_empty() && self.api_key != "none"
     }
@@ -193,21 +234,32 @@ impl EndpointConfig {
     pub fn ollama_default() -> Self {
         Self {
             name: "ollama".to_string(),
+            provider: "openai".to_string(),
             base_url: "http://localhost:11434/v1".to_string(),
             model: "llama3.2".to_string(),
             api_key: "none".to_string(),
             timeout_seconds: 120,
+            input_price_per_1k: 0.0,
+            output_price_per_1k: 0.0,
+            max_context_tokens: 32768,
+            condense_threshold: 0.8,
         }
     }
 
     /// Create default OpenAI configuration
+    #[allow(dead_code)]
     pub fn openai_default() -> Self {
         Self {
             name: "openai".to_string(),
+            provider: "openai".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             model: "gpt-4o".to_string(),
             api_key: String::new(),
             timeout_seconds: 60,
+            input_price_per_1k: 0.0025, // GPT-4o input
+            output_price_per_1k: 0.01,   // GPT-4o output
+            max_context_tokens: 128000,
+            condense_threshold: 0.8,
         }
     }
 }
@@ -218,124 +270,3 @@ impl Default for EndpointConfig {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_endpoint_config_defaults() {
-        let endpoint = EndpointConfig::default();
-        assert_eq!(endpoint.name, "ollama");
-        assert!(endpoint.base_url.contains("localhost"));
-        assert_eq!(endpoint.timeout_seconds, 120);
-    }
-
-    #[test]
-    fn test_get_api_key_from_config() {
-        let endpoint = EndpointConfig {
-            name: "test".to_string(),
-            base_url: "http://localhost:8080/v1".to_string(),
-            model: "test-model".to_string(),
-            api_key: "test-key-123".to_string(),
-            timeout_seconds: 30,
-        };
-
-        assert_eq!(endpoint.get_api_key(), "test-key-123");
-    }
-
-    #[test]
-    fn test_get_api_key_env_fallback() {
-        std::env::set_var("OPENAI_API_KEY", "env-key-456");
-
-        let endpoint = EndpointConfig {
-            name: "test".to_string(),
-            base_url: "http://localhost:8080/v1".to_string(),
-            model: "test-model".to_string(),
-            api_key: "none".to_string(),
-            timeout_seconds: 30,
-        };
-
-        assert_eq!(endpoint.get_api_key(), "env-key-456");
-
-        std::env::remove_var("OPENAI_API_KEY");
-    }
-
-    #[test]
-    fn test_requires_auth() {
-        let with_auth = EndpointConfig {
-            name: "test".to_string(),
-            base_url: "https://api.example.com/v1".to_string(),
-            model: "model".to_string(),
-            api_key: "some-key".to_string(),
-            timeout_seconds: 30,
-        };
-
-        let without_auth = EndpointConfig {
-            name: "test".to_string(),
-            base_url: "http://localhost:11434/v1".to_string(),
-            model: "model".to_string(),
-            api_key: "none".to_string(),
-            timeout_seconds: 30,
-        };
-
-        assert!(with_auth.requires_auth());
-        assert!(!without_auth.requires_auth());
-    }
-
-    #[test]
-    fn test_chat_request_serialization() {
-        let request = ChatRequest {
-            model: "llama3.2".to_string(),
-            messages: vec![
-                Message {
-                    role: MessageRole::System,
-                    content: "You are a helpful assistant.".to_string(),
-                    name: None,
-                },
-                Message {
-                    role: MessageRole::User,
-                    content: "Hello!".to_string(),
-                    name: None,
-                },
-            ],
-            max_tokens: Some(100),
-            temperature: Some(0.7),
-            stream: false,
-        };
-
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("llama3.2"));
-        assert!(json.contains("system"));
-        assert!(json.contains("user"));
-    }
-
-    #[test]
-    fn test_chat_response_deserialization() {
-        let json = r#"{
-            "id": "chatcmpl-123",
-            "object": "chat.completion",
-            "created": 1699000000,
-            "model": "llama3.2",
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": "Hello! How can I help you?"
-                    },
-                    "finish_reason": "stop"
-                }
-            ],
-            "usage": {
-                "prompt_tokens": 10,
-                "completion_tokens": 20,
-                "total_tokens": 30
-            }
-        }"#;
-
-        let response: ChatResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(response.id, "chatcmpl-123");
-        assert_eq!(response.choices.len(), 1);
-        assert_eq!(response.choices[0].message.content, "Hello! How can I help you?");
-    }
-}

@@ -1,7 +1,8 @@
 //! CLI argument parsing using clap 4.x derive macros
 
+pub mod hub;
+
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
 
 /// A globally available, high-performance terminal AI assistant
 ///
@@ -11,10 +12,15 @@ use std::path::PathBuf;
 #[command(name = "ai")]
 #[command(author, version, about, long_about = None)]
 #[command(propagate_version = true)]
+#[command(disable_version_flag = true)]
 pub struct Cli {
     /// The command to execute
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
+
+    /// Direct query (alternative to 'query' subcommand)
+    #[arg(num_args = 1..)]
+    pub query: Vec<String>,
 
     /// Endpoint name to use (overrides default)
     #[arg(short, long)]
@@ -61,10 +67,70 @@ pub enum Commands {
     /// List available endpoints
     Endpoints,
 
+    /// Interactive configuration setup
+    Setup {
+        /// Only perform model warmup (downloading models)
+        #[arg(short, long)]
+        warmup: bool,
+    },
+
     /// Show system information
     System {
         /// Brief output (summary only)
         #[arg(short, long)]
         brief: bool,
+    },
+
+    /// Start interactive TUI mode with terminal and AI chat
+    Interactive,
+
+    /// Manage persistent memory (RAG)
+    Memory {
+        #[command(subcommand)]
+        cmd: MemoryCommand,
+    },
+
+    /// Manage configuration
+    Config {
+        #[command(subcommand)]
+        cmd: Option<ConfigCommand>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ConfigCommand {
+    /// Edit configuration files
+    Edit {
+        #[command(subcommand)]
+        cmd: EditCommand,
+    },
+
+    /// Select active profile
+    Select,
+
+    /// Create new profile
+    New,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum EditCommand {
+    /// Edit the system prompt instructions
+    Prompt,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MemoryCommand {
+    /// Add content to memory
+    Add {
+        /// Content to remember
+        content: String,
+    },
+    /// Search through memory
+    Search {
+        /// Search query
+        query: String,
+        /// Number of results to return
+        #[arg(short, long, default_value = "5")]
+        limit: usize,
     },
 }
