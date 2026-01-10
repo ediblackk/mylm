@@ -1,0 +1,142 @@
+//! Chat types and structures for LLM communication
+
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+/// Chat message role
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MessageRole {
+    #[serde(rename = "system")]
+    System,
+    #[serde(rename = "user")]
+    User,
+    #[serde(rename = "assistant")]
+    Assistant,
+    #[serde(rename = "function")]
+    Function,
+}
+
+impl fmt::Display for MessageRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MessageRole::System => write!(f, "system"),
+            MessageRole::User => write!(f, "user"),
+            MessageRole::Assistant => write!(f, "assistant"),
+            MessageRole::Function => write!(f, "function"),
+        }
+    }
+}
+
+impl From<&str> for MessageRole {
+    fn from(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "system" => MessageRole::System,
+            "user" => MessageRole::User,
+            "assistant" => MessageRole::Assistant,
+            "function" => MessageRole::Function,
+            _ => MessageRole::User,
+        }
+    }
+}
+
+/// A chat message
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatMessage {
+    /// Message role (system, user, assistant)
+    pub role: String,
+    /// Message content
+    pub content: String,
+}
+
+impl ChatMessage {
+    /// Create a new user message
+    pub fn user(content: impl Into<String>) -> Self {
+        ChatMessage {
+            role: "user".to_string(),
+            content: content.into(),
+        }
+    }
+
+    /// Create a new system message
+    pub fn system(content: impl Into<String>) -> Self {
+        ChatMessage {
+            role: "system".to_string(),
+            content: content.into(),
+        }
+    }
+
+    /// Create a new assistant message
+    pub fn assistant(content: impl Into<String>) -> Self {
+        ChatMessage {
+            role: "assistant".to_string(),
+            content: content.into(),
+        }
+    }
+}
+
+/// Chat request
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatRequest {
+    /// Messages to send
+    pub messages: Vec<ChatMessage>,
+}
+
+impl ChatRequest {
+    /// Create a new chat request
+    pub fn new(messages: Vec<ChatMessage>) -> Self {
+        ChatRequest { messages }
+    }
+
+    /// Add a message to the request
+    pub fn add_message(&mut self, message: ChatMessage) {
+        self.messages.push(message);
+    }
+}
+
+/// Chat response
+#[derive(Debug, Clone)]
+pub struct ChatResponse {
+    /// Response content
+    pub content: String,
+    /// Token usage information
+    pub usage: Option<TokenUsage>,
+}
+
+/// Token usage statistics
+#[derive(Debug, Clone)]
+pub struct TokenUsage {
+    /// Tokens in prompt
+    pub prompt_tokens: u32,
+    /// Tokens in completion
+    pub completion_tokens: u32,
+    /// Total tokens
+    pub total_tokens: u32,
+}
+
+/// Streaming events
+#[derive(Debug, Clone)]
+pub enum StreamEvent {
+    /// New content chunk
+    Content(String),
+    /// Streaming completed
+    Done,
+    /// Token usage update
+    Usage(TokenUsage),
+    /// Error occurred
+    Error(String),
+}
+
+impl StreamEvent {
+    /// Check if this is a content event
+    pub fn is_content(&self) -> bool {
+        matches!(self, StreamEvent::Content(_))
+    }
+
+    /// Extract content if this is a content event
+    pub fn content(&self) -> Option<&str> {
+        match self {
+            StreamEvent::Content(s) => Some(s),
+            _ => None,
+        }
+    }
+}
