@@ -157,7 +157,7 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
 
     for m in &app.chat_history {
         // Filter logic based on verbose_mode
-        if !app.verbose_mode {
+        let content_to_show = if !app.verbose_mode {
             if m.role == MessageRole::Tool {
                 continue;
             }
@@ -167,12 +167,24 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
                     continue;
                 }
                 
-                // If it contains "Final Answer:", we might want to only show the final answer part.
-                // But for now, let's just show it if it has "Final Answer:".
+                // If it contains "Final Answer:", we show only that part
+                if let Some(pos) = m.content.find("Final Answer:") {
+                     &m.content[pos + "Final Answer:".len()..]
+                } else {
+                     // Filter out any lingering Thought/Action lines if mixed
+                     if m.content.contains("Thought:") || m.content.contains("Action:") {
+                        continue;
+                     }
+                     &m.content
+                }
+            } else {
+                &m.content
             }
-        }
+        } else {
+            &m.content
+        };
 
-        if m.role == MessageRole::Assistant && m.content.is_empty() {
+        if m.role == MessageRole::Assistant && content_to_show.trim().is_empty() {
             continue;
         }
 
@@ -185,7 +197,7 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
 
         // Wrap the content
         let content_width = available_width.saturating_sub(prefix.len());
-        let wrapped = wrap_text(&m.content, content_width);
+        let wrapped = wrap_text(content_to_show.trim(), content_width);
         
         for (i, line) in wrapped.into_iter().enumerate() {
             if i == 0 {

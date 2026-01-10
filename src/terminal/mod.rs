@@ -168,7 +168,8 @@ async fn run_loop(
                     app.terminal_parser.process(&data);
                 }
                 TuiEvent::PtyWrite(data) => {
-                    let _ = app.pty_manager.write_all(&data);
+                    // Send directly to the parser for rendering, bypassing PTY execution
+                    app.terminal_parser.process(&data);
                 }
                 TuiEvent::AgentResponse(response, usage) => {
                     app.add_assistant_message(response, usage);
@@ -243,7 +244,7 @@ async fn run_loop(
                                     }
                                     KeyCode::Char('c') => {
                                         if app.state == AppState::Processing {
-                                            app.interrupt_flag.store(true, Ordering::SeqCst);
+                                            app.abort_current_task();
                                             continue;
                                         } else {
                                             return Ok(());

@@ -55,6 +55,7 @@ pub struct App {
     pub status_message: Option<String>,
     pub interrupt_flag: Arc<AtomicBool>,
     pub verbose_mode: bool,
+    pub active_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl App {
@@ -85,6 +86,7 @@ impl App {
             status_message: None,
             interrupt_flag: Arc::new(AtomicBool::new(false)),
             verbose_mode,
+            active_task: None,
         }
     }
 
@@ -190,7 +192,7 @@ impl App {
             let interrupt_flag = self.interrupt_flag.clone();
             interrupt_flag.store(false, Ordering::SeqCst);
 
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let mut agent = agent.lock().await;
                 
                 // Automatic condensation check
@@ -213,6 +215,16 @@ impl App {
                     }
                 }
             });
+            
+            self.active_task = Some(task);
+        }
+    }
+
+    pub fn abort_current_task(&mut self) {
+        if let Some(task) = self.active_task.take() {
+            task.abort();
+            self.state = AppState::Idle;
+            self.status_message = Some("⛔ Task interrupted by user.".to_string());
         }
     }
 

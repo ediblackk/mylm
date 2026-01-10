@@ -112,6 +112,7 @@ impl Agent {
                     let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate(format!("Executing {}...", tool_name)));
 
                     // Mirror command to PTY for visibility
+                    // NOTE: This now sends directly to Parser in App due to PtyWrite redirection in mod.rs
                     if tool_name == "execute_command" {
                         let mirror = format!("\x1b[33m$ {}\x1b[0m\r\n", args.trim_matches('"'));
                         let _ = event_tx.send(crate::terminal::app::TuiEvent::PtyWrite(mirror.into_bytes()));
@@ -148,6 +149,7 @@ impl Agent {
                 let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate(format!("Executing {}...", tool_name)));
 
                 // Mirror command to PTY for visibility
+                // NOTE: This now sends directly to Parser in App due to PtyWrite redirection in mod.rs
                 if tool_name == "execute_command" {
                     let mirror = format!("\x1b[33m$ {}\x1b[0m\r\n", args.trim());
                     let _ = event_tx.send(crate::terminal::app::TuiEvent::PtyWrite(mirror.into_bytes()));
