@@ -20,7 +20,7 @@ get_current_version() {
 
 get_installed_version() {
     if [ -f "$BINARY_DEST" ]; then
-        "$BINARY_DEST" --version 2>/dev/null | awk '{print $NF}' || echo "none"
+        "$BINARY_DEST" --version 2>/dev/null | awk '{print $2}' || echo "none"
     else
         echo "none"
     fi

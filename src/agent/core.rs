@@ -133,8 +133,11 @@ impl Agent {
                 // Extract only the Final Answer part, not the full ReAct protocol
                 if let Some(pos) = content.find("Final Answer:") {
                     let final_answer = content[pos + "Final Answer:".len()..].trim().to_string();
+                    eprintln!("[DEBUG] Final Answer extracted: '{}'", final_answer);
+                    eprintln!("[DEBUG] Returning early with Final Answer, skipping history.push");
                     return Ok((final_answer, total_usage));
                 }
+                eprintln!("[DEBUG] Final Answer found but extraction failed, returning full content");
                 return Ok((content, total_usage));
             }
 
@@ -161,9 +164,13 @@ impl Agent {
                 // Observation mirroring is now handled by the ShellTool itself
 
                 let observation = format!("Observation: {}", observation_text);
+                eprintln!("[DEBUG] Adding Assistant message to history: {}", &content[..content.len().min(50)]);
                 history.push(ChatMessage::assistant(content));
+                eprintln!("[DEBUG] Adding User/Observation message to history");
                 history.push(ChatMessage::user(observation));
             } else {
+                eprintln!("[DEBUG] No Action/Action Input found, returning content and adding to history");
+                history.push(ChatMessage::assistant(content.clone()));
                 return Ok((content, total_usage));
             }
         }

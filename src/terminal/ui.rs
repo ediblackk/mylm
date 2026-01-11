@@ -169,13 +169,13 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
                 
                 // If it contains "Final Answer:", we show only that part
                 if let Some(pos) = m.content.find("Final Answer:") {
-                     &m.content[pos + "Final Answer:".len()..]
+                    &m.content[pos + "Final Answer:".len()..]
                 } else {
-                     // Filter out any lingering Thought/Action lines if mixed
-                     if m.content.contains("Thought:") || m.content.contains("Action:") {
+                    // Filter out any lingering Thought/Action lines if mixed
+                    if m.content.contains("Thought:") || m.content.contains("Action:") {
                         continue;
-                     }
-                     &m.content
+                    }
+                    &m.content
                 }
             } else {
                 &m.content

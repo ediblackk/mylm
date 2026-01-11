@@ -322,7 +322,14 @@ impl App {
     }
 
     pub fn add_assistant_message(&mut self, content: String, usage: TokenUsage) {
-        self.chat_history.push(ChatMessage::assistant(content));
+        // Extract only the Final Answer part if present, otherwise use the full content
+        let clean_content = if let Some(pos) = content.find("Final Answer:") {
+            content[pos + "Final Answer:".len()..].trim().to_string()
+        } else {
+            content
+        };
+        
+        self.chat_history.push(ChatMessage::assistant(clean_content));
         
         // Get pricing from agent's LLM client config
         let (input_price, output_price) = {
