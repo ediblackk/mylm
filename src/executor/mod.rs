@@ -129,6 +129,31 @@ impl CommandExecutor {
 
         Ok(output)
     }
+
+    pub fn check_safety(&self, command_str: &str) -> Result<()> {
+        let parsed = self.parse_command(command_str)?;
+
+        // Check if command is in allowlist
+        if !self.allowlist.is_allowed(&parsed.command) {
+            return Err(anyhow::anyhow!(
+                "Command '{}' is not in the allowlist",
+                parsed.command
+            ));
+        }
+
+        // Perform safety checks
+        let safety_level = self.safety_checker.assess(command_str, &parsed.command, &parsed.args);
+
+        if safety_level.is_dangerous() {
+            return Err(anyhow::anyhow!(
+                "Command '{}' is marked as dangerous.\nReason: {}",
+                command_str,
+                safety_level.reason()
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 /// Parsed command structure

@@ -41,7 +41,11 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         "unknown".to_string()
     };
 
-    let verbose_text = if app.verbose_mode { " [VERBOSE] " } else { "" };
+    let (verbose_text, verbose_color) = if app.verbose_mode {
+        (" [VERBOSE: ON] ", Color::Magenta)
+    } else {
+        (" [VERBOSE: OFF] ", Color::DarkGray)
+    };
     let auto_approve_text = if app.auto_approve { " [AUTO-APPROVE: ON] " } else { " [AUTO-APPROVE: OFF] " };
 
     let stats_text = vec![
@@ -67,8 +71,8 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(format!("${:.2}", stats.cost), Style::default().fg(Color::Green)),
             Span::raw(" | "),
             Span::styled("Time: ", Style::default().fg(Color::Gray)),
-            Span::styled(duration, Style::default().fg(Color::Yellow)),
-            Span::styled(verbose_text, Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(duration, Style::default().fg(Color::Gray)),
+            Span::styled(verbose_text, Style::default().fg(verbose_color).add_modifier(Modifier::BOLD)),
             Span::styled(auto_approve_text, Style::default().fg(if app.auto_approve { Color::Green } else { Color::Red }).add_modifier(Modifier::BOLD)),
         ])
     ];
@@ -150,7 +154,8 @@ fn render_terminal(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let vt100_screen = app.terminal_parser.screen();
-    let terminal = PseudoTerminal::new(vt100_screen).block(block);
+    let terminal = PseudoTerminal::new(vt100_screen)
+        .block(block);
 
     frame.render_widget(terminal, area);
 }
@@ -171,8 +176,21 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut list_items = Vec::new();
 
     for m in &app.chat_history {
-        // Skip Tool messages if not verbose
-        if !app.verbose_mode && m.role == MessageRole::Tool {
+        // Aggressively hide command outputs in non-verbose mode
+        if !app.verbose_mode && m.content.contains("CMD_OUTPUT:") {
+            // Only show the placeholder for the observation/tool result itself, not for every message containing the string
+            if m.role == MessageRole::Tool || (m.role == MessageRole::User && m.content.contains("Observation:")) {
+                list_items.push(ListItem::new(Line::from(vec![
+                    Span::styled("AI: ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled("Command executed. Check terminal.", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
+                ])));
+                list_items.push(ListItem::new(Line::from("")));
+            }
+            continue;
+        }
+
+        // Skip Tool messages for commands in non-verbose mode (redundant with above but safe)
+        if !app.verbose_mode && m.role == MessageRole::Tool && m.name.as_deref() == Some("execute_command") {
             continue;
         }
 
@@ -201,16 +219,22 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
             }
 
             if trimmed.starts_with("Action:") {
+                if !app.verbose_mode {
+                    continue;
+                }
                 lines_to_render.push((line.to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
                 continue;
             }
 
             if trimmed.starts_with("Action Input:") {
+                if !app.verbose_mode {
+                    continue;
+                }
                 lines_to_render.push((line.to_string(), Style::default().fg(Color::DarkGray)));
                 continue;
             }
 
-            if trimmed.starts_with("Observation:") && !app.verbose_mode {
+            if !app.verbose_mode && (trimmed.starts_with("Observation:") || trimmed.contains("CMD_OUTPUT:")) {
                 continue;
             }
 

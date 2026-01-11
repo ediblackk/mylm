@@ -5,12 +5,12 @@ use crate::terminal::app::TuiEvent;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 /// A tool for executing shell commands safely.
 pub struct ShellTool {
     executor: Arc<CommandExecutor>,
-    context: TerminalContext,
+    _context: TerminalContext,
     event_tx: mpsc::UnboundedSender<TuiEvent>,
 }
 
@@ -21,7 +21,7 @@ impl ShellTool {
         context: TerminalContext,
         event_tx: mpsc::UnboundedSender<TuiEvent>
     ) -> Self {
-        Self { executor, context, event_tx }
+        Self { executor, _context: context, event_tx }
     }
 }
 
@@ -40,25 +40,34 @@ impl Tool for ShellTool {
     }
 
     async fn call(&self, args: &str) -> Result<String> {
-        // Mirror the command to PTY for visibility before execution
-        let mirror = format!("\x1b[33m$ {}\x1b[0m\r\n", args.trim());
-        let _ = self.event_tx.send(TuiEvent::PtyWrite(mirror.into_bytes()));
+        // 1. Safety Check (performed by executor)
+        self.executor.check_safety(args)?;
+
+        // 2. Read Terminal Screen Context
+        let (screen_tx, screen_rx) = oneshot::channel();
+        let _ = self.event_tx.send(TuiEvent::GetTerminalScreen(screen_tx));
+        let mut screen_content = screen_rx.await.unwrap_or_default();
         
-        let result = self.executor.execute_from_llm(args, &self.context, false).await?;
-        
-        // Mirror the output to PTY for visibility
-        let obs_log = format!("\x1b[32m[Observation]:\x1b[0m {}\r\n", result.combined_output().trim());
-        let _ = self.event_tx.send(TuiEvent::PtyWrite(obs_log.into_bytes()));
-        
-        if result.success {
-            Ok(result.combined_output())
-        } else {
-            let error_msg = format!(
-                "Command failed with exit code {:?}\nOutput:\n{}",
-                result.exit_code,
-                result.combined_output()
-            );
-            Err(anyhow::anyhow!(error_msg))
+        // Hard limit at ~50k tokens (heuristic: 1 token ~= 4 chars) -> 200,000 chars
+        let char_limit = 200_000;
+        if screen_content.len() > char_limit {
+            screen_content = screen_content.chars().rev().take(char_limit).collect::<String>().chars().rev().collect();
         }
+        
+        // 3. Request execution via TUI Event
+        let (tx, rx) = oneshot::channel();
+        let _ = self.event_tx.send(TuiEvent::ExecuteTerminalCommand(args.to_string(), tx));
+        
+        // 4. Await result from PTY capture
+        let output = rx.await.map_err(|_| anyhow::anyhow!("Failed to receive command output from TUI"))?;
+        
+        // Combine screen context with command output
+        let combined = format!(
+            "--- TERMINAL CONTEXT ---\n{}\n--- COMMAND EXECUTION ---\n{}",
+            screen_content,
+            output
+        );
+        
+        Ok(combined)
     }
 }

@@ -185,44 +185,61 @@ impl LlmClient {
 
     /// Google Gemini API chat
     async fn chat_gemini(&self, request: &ChatRequest) -> Result<ChatResponse> {
-        // Convert messages to Gemini format
-        let contents: Vec<GeminiContent> = request
-            .messages
-            .iter()
-            .map(|m| GeminiContent {
-                role: match m.role.as_str() {
-                    "user" => "user",
-                    "assistant" => "model",
-                    "system" => "user", // Gemini doesn't have system role, prepend to user
-                    _ => "user",
-                }
-                .to_string(),
-                parts: vec![GeminiPart {
-                    text: m.content.clone(),
-                }],
-            })
-            .collect();
+        // Convert messages to Gemini format, merging consecutive messages of the same role
+        let mut contents: Vec<GeminiContent> = Vec::new();
+        let mut system_parts = Vec::new();
 
-        // If there's a system prompt, prepend it to the first user message
-        let contents = if let Some(sys_prompt) = &self.config.system_prompt {
-            if contents.is_empty() {
-                vec![GeminiContent {
-                    role: "user".to_string(),
-                    parts: vec![GeminiPart { text: sys_prompt.clone() }],
-                }]
-            } else {
-                let mut with_system = vec![GeminiContent {
-                    role: "user".to_string(),
-                    parts: vec![GeminiPart {
-                        text: format!("System: {}\n\nUser: {}", sys_prompt, contents[0].parts[0].text),
-                    }],
-                }];
-                with_system.extend(contents.into_iter().skip(1));
-                with_system
+        for m in &request.messages {
+            match m.role.as_str() {
+                "system" => {
+                    system_parts.push(GeminiPart { text: m.content.clone() });
+                }
+                _ => {
+                    let role = match m.role.as_str() {
+                        "assistant" => "model",
+                        "user" | "tool" => "user",
+                        _ => "user",
+                    };
+
+                    if let Some(last) = contents.last_mut() {
+                        if last.role == role {
+                            last.parts.push(GeminiPart { text: m.content.clone() });
+                            continue;
+                        }
+                    }
+                    
+                    contents.push(GeminiContent {
+                        role: role.to_string(),
+                        parts: vec![GeminiPart { text: m.content.clone() }],
+                    });
+                }
             }
+        }
+
+        // Add system prompt from config if present
+        if let Some(sys_prompt) = &self.config.system_prompt {
+            system_parts.insert(0, GeminiPart { text: sys_prompt.clone() });
+        }
+
+        let system_instruction_text = if system_parts.is_empty() {
+            None
         } else {
-            contents
+            Some(system_parts.iter().map(|p| p.text.as_str()).collect::<Vec<_>>().join("\n\n"))
         };
+
+        // For Gemini, we also prepend the system instruction to the first user message
+        // as some models/proxies ignore system_instruction.
+        if let (Some(sys_text), Some(first_msg)) = (&system_instruction_text, contents.first_mut()) {
+            if first_msg.role == "user" {
+                let original_text = first_msg.parts[0].text.clone();
+                first_msg.parts[0].text = format!("SYSTEM INSTRUCTIONS:\n{}\n\nUSER MESSAGE:\n{}", sys_text, original_text);
+            }
+        }
+
+        let system_instruction = system_instruction_text.map(|text| GeminiContent {
+            role: "system".to_string(),
+            parts: vec![GeminiPart { text }],
+        });
 
         let url = format!(
             "{}/v1beta/models/{}:generateContent?key={}",
@@ -233,6 +250,7 @@ impl LlmClient {
 
         let body = GeminiRequest {
             contents,
+            system_instruction,
             generation_config: Some(GeminiGenerationConfig {
                 max_output_tokens: self.config.max_tokens,
                 temperature: self.config.temperature,
@@ -250,10 +268,13 @@ impl LlmClient {
 
         match response.status() {
             StatusCode::OK => {
-                let response_body: GeminiResponse = response
-                    .json()
-                    .await
-                    .context("Failed to parse Gemini response")?;
+                let text = response.text().await.context("Failed to read Gemini response text")?;
+                let response_body: GeminiResponse = match serde_json::from_str(&text) {
+                    Ok(body) => body,
+                    Err(e) => {
+                        bail!("Failed to parse Gemini response: {}. Response body: {}", e, text);
+                    }
+                };
                 
                 let choices = response_body.candidates.into_iter().map(|c| Choice {
                     index: c.index,
@@ -550,6 +571,8 @@ struct OpenAiDelta {
 #[derive(Serialize)]
 struct GeminiRequest {
     contents: Vec<GeminiContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_instruction: Option<GeminiContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     generation_config: Option<GeminiGenerationConfig>,
 }

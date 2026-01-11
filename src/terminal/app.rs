@@ -26,6 +26,8 @@ pub enum TuiEvent {
     CondensedHistory(Vec<ChatMessage>),
     ConfigUpdate(crate::config::Config),
     SuggestCommand(String),
+    ExecuteTerminalCommand(String, tokio::sync::oneshot::Sender<String>),
+    GetTerminalScreen(tokio::sync::oneshot::Sender<String>),
     Tick,
 }
 
@@ -59,11 +61,19 @@ pub struct App {
     pub show_thoughts: bool,
     pub auto_approve: bool,
     pub active_task: Option<tokio::task::JoinHandle<()>>,
+    pub capturing_command_output: bool,
+    pub command_output_buffer: String,
+    pub pending_command_tx: Option<tokio::sync::oneshot::Sender<String>>,
+    pub input_price: f64,
+    pub output_price: f64,
 }
 
 impl App {
     pub fn new(pty_manager: PtyManager, agent: Agent, config: crate::config::Config) -> Self {
         let max_ctx = agent.llm_client.config().max_context_tokens;
+        let input_price = agent.llm_client.config().input_price_per_1k;
+        let output_price = agent.llm_client.config().output_price_per_1k;
+        
         let mut session_monitor = SessionMonitor::new();
         session_monitor.set_max_context(max_ctx as u32);
         let verbose_mode = config.verbose_mode;
@@ -93,6 +103,11 @@ impl App {
             show_thoughts: true,
             auto_approve,
             active_task: None,
+            capturing_command_output: false,
+            command_output_buffer: String::new(),
+            pending_command_tx: None,
+            input_price,
+            output_price,
         }
     }
 
@@ -376,13 +391,8 @@ impl App {
     pub fn add_assistant_message(&mut self, content: String, usage: TokenUsage) {
         self.chat_history.push(ChatMessage::assistant(content));
         
-        // Get pricing from agent's LLM client config
-        let (input_price, output_price) = {
-            // We use a block to limit the borrow of agent
-            let agent = futures::executor::block_on(self.agent.lock());
-            let config = agent.llm_client.config();
-            (config.input_price_per_1k, config.output_price_per_1k)
-        };
+        let input_price = self.input_price;
+        let output_price = self.output_price;
 
         self.session_monitor.add_usage(&usage, input_price, output_price);
         self.state = AppState::Idle;

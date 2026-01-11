@@ -166,6 +166,33 @@ async fn run_loop(
             match event {
                 TuiEvent::Pty(data) => {
                     app.terminal_parser.process(&data);
+                    
+                    if app.capturing_command_output {
+                        let text = String::from_utf8_lossy(&data);
+                        app.command_output_buffer.push_str(&text);
+                        
+                        if let Some(pos) = app.command_output_buffer.find("_MYLM_EOF_") {
+                            let marker_line = &app.command_output_buffer[pos..];
+                            if let Some(end_pos) = marker_line.find('\r').or_else(|| marker_line.find('\n')) {
+                                let full_marker = &marker_line[..end_pos];
+                                let exit_code = full_marker.strip_prefix("_MYLM_EOF_").unwrap_or("0");
+                                
+                                let final_output = app.command_output_buffer[..pos].to_string();
+                                
+                                if let Some(tx) = app.pending_command_tx.take() {
+                                    let result = if exit_code == "0" {
+                                        final_output
+                                    } else {
+                                        format!("Command failed (exit {}):\n{}", exit_code, final_output)
+                                    };
+                                    let _ = tx.send(result);
+                                }
+                                
+                                app.capturing_command_output = false;
+                                app.command_output_buffer.clear();
+                            }
+                        }
+                    }
                 }
                 TuiEvent::PtyWrite(data) => {
                     // Send to both the parser for rendering AND the actual PTY for execution
@@ -183,6 +210,13 @@ async fn run_loop(
                     app.set_history(history);
                 }
                 TuiEvent::SuggestCommand(cmd) => {
+                    // Show suggestion in Terminal
+                    let suggestion = format!("\r\n\x1b[33m[Suggestion]:\x1b[0m AI wants to run: \x1b[1;36m{}\x1b[0m\r\n", cmd);
+                    let prompt = "\x1b[33mExecute? (Press Enter in Chat to confirm)\x1b[0m\r\n";
+                    app.terminal_parser.process(suggestion.as_bytes());
+                    app.terminal_parser.process(prompt.as_bytes());
+                    
+                    // Populate Chat Input
                     app.chat_input = format!("/exec {}", cmd);
                     app.cursor_position = app.chat_input.chars().count();
                     app.focus = Focus::Chat;
@@ -203,6 +237,9 @@ async fn run_loop(
                         .with_context_management(endpoint_config.max_context_tokens, endpoint_config.condense_threshold);
                         
                         if let Ok(llm_client) = LlmClient::new(llm_config) {
+                            app.input_price = endpoint_config.input_price_per_1k;
+                            app.output_price = endpoint_config.output_price_per_1k;
+                            
                             let llm_client = std::sync::Arc::new(llm_client);
                             
                             let prompt_name = new_config.get_active_profile().map(|p| p.prompt.as_str()).unwrap_or("default");
@@ -235,6 +272,29 @@ async fn run_loop(
                     if let Some(path) = crate::config::find_config_file() {
                         let _ = new_config.save(path);
                     }
+                }
+                TuiEvent::ExecuteTerminalCommand(cmd, tx) => {
+                    app.capturing_command_output = true;
+                    app.command_output_buffer.clear();
+                    app.pending_command_tx = Some(tx);
+                    
+                    // Wrap command to get exit code and marker
+                    let wrapped_cmd = format!("{{ {}; }} ; echo \"_MYLM_EOF_$?\"\r", cmd.trim());
+                    let _ = app.pty_manager.write_all(wrapped_cmd.as_bytes());
+                }
+                TuiEvent::GetTerminalScreen(tx) => {
+                    let screen = app.terminal_parser.screen();
+                    let mut content = String::new();
+                    let (rows, cols) = screen.size();
+                    for row in 0..rows {
+                        for col in 0..cols {
+                            if let Some(cell) = screen.cell(row, col) {
+                                content.push_str(&cell.contents());
+                            }
+                        }
+                        content.push('\n');
+                    }
+                    let _ = tx.send(content);
                 }
                 TuiEvent::Tick => {}
                 TuiEvent::Input(ev) => {

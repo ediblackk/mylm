@@ -1,5 +1,7 @@
+//! TESTING BUILD NUMBER CHANGE
 use crate::llm::{LlmClient, chat::{ChatMessage, ChatRequest, MessageRole}, TokenUsage};
 use crate::agent::tool::Tool;
+use serde_json;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
@@ -106,15 +108,28 @@ impl Agent {
                         return Ok(("Interrupted by user during tool execution.".to_string(), total_usage));
                     }
 
-                    let tool_name = &tool_call.function.name;
+                    let tool_name = tool_call.function.name.trim();
                     let args = &tool_call.function.arguments;
 
-                    let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate(format!("Executing {}...", tool_name)));
+                    let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate(format!("Tool: '{}' (Auto: {})", tool_name, auto_approve)));
 
                     // Check for auto-approve intercept
                     if tool_name == "execute_command" && !auto_approve {
-                        let _ = event_tx.send(crate::terminal::app::TuiEvent::SuggestCommand(args.to_string()));
-                        return Ok(("[Command Suggestion]".to_string(), total_usage));
+                        let cmd = if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
+                            v.get("command").and_then(|c| c.as_str())
+                                 .or_else(|| v.get("args").and_then(|c| c.as_str()))
+                                 .unwrap_or(args).to_string()
+                        } else {
+                            args.to_string()
+                        };
+                        let _ = event_tx.send(crate::terminal::app::TuiEvent::SuggestCommand(cmd));
+                        
+                        // Return a cleaned version of the assistant message up to the Action Input
+                        let mut truncated = assistant_msg.content.clone();
+                        if let Some(pos) = truncated.find("Observation:") {
+                            truncated.truncate(pos);
+                        }
+                        return Ok((truncated.trim().to_string(), total_usage));
                     }
 
                     let observation_text = match self.tools.get(tool_name) {
@@ -125,10 +140,13 @@ impl Agent {
                         None => format!("Error: Tool '{}' not found.", tool_name),
                     };
 
-                    let obs_log = format!("\x1b[32m[Observation]:\x1b[0m {}\r\n", observation_text.trim());
-                    let _ = event_tx.send(crate::terminal::app::TuiEvent::PtyWrite(obs_log.into_bytes()));
+                    // Mirror to PTY if NOT a ShellTool (which handles its own mirroring via visible PTY execution)
+                    if tool_name != "execute_command" {
+                        let obs_log = format!("\x1b[32m[Observation]:\x1b[0m {}\r\n", observation_text.trim());
+                        let _ = event_tx.send(crate::terminal::app::TuiEvent::PtyWrite(obs_log.into_bytes()));
+                    }
 
-                    history.push(ChatMessage::tool(tool_call.id.clone(), tool_name.clone(), observation_text));
+                    history.push(ChatMessage::tool(tool_call.id.clone(), tool_name.to_string(), observation_text));
                 }
                 continue;
             }
@@ -141,20 +159,34 @@ impl Agent {
             let action = action_re.captures(&content).map(|c| c[1].trim().to_string());
             let action_input = action_input_re.captures(&content).map(|c| c[1].trim().to_string());
 
-            if let (Some(tool_name), Some(args)) = (action, action_input) {
+            if let (Some(tool_name_raw), Some(args)) = (action, action_input) {
                 if interrupt_flag.load(Ordering::SeqCst) {
                     return Ok(("Interrupted by user.".to_string(), total_usage));
                 }
 
-                let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate(format!("Executing {}...", tool_name)));
+                let tool_name = tool_name_raw.trim();
+                let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate(format!("Tool: '{}' (Auto: {})", tool_name, auto_approve)));
 
                 // Check for auto-approve intercept
                 if tool_name == "execute_command" && !auto_approve {
-                    let _ = event_tx.send(crate::terminal::app::TuiEvent::SuggestCommand(args.clone()));
-                    return Ok((content, total_usage));
+                    let cmd = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&args) {
+                        v.get("command").and_then(|c| c.as_str())
+                         .or_else(|| v.get("args").and_then(|c| c.as_str()))
+                         .unwrap_or(&args).to_string()
+                    } else {
+                        args.clone()
+                    };
+                    let _ = event_tx.send(crate::terminal::app::TuiEvent::SuggestCommand(cmd));
+                    
+                    // Truncate LLM response if it hallucinated an observation
+                    let mut truncated = content.clone();
+                    if let Some(pos) = truncated.find("Observation:") {
+                        truncated.truncate(pos);
+                    }
+                    return Ok((truncated.trim().to_string(), total_usage));
                 }
 
-                let observation_text = match self.tools.get(&tool_name) {
+                let observation_text = match self.tools.get(tool_name) {
                     Some(tool) => match tool.call(&args).await {
                         Ok(output) => output,
                         Err(e) => format!("Error: {}", e),
@@ -162,7 +194,11 @@ impl Agent {
                     None => format!("Error: Tool '{}' not found.", tool_name),
                 };
 
-                // Observation mirroring is now handled by the ShellTool itself
+                // Mirror to PTY if NOT a ShellTool (which handles its own mirroring via visible PTY execution)
+                if tool_name != "execute_command" {
+                    let obs_log = format!("\x1b[32m[Observation]:\x1b[0m {}\r\n", observation_text.trim());
+                    let _ = event_tx.send(crate::terminal::app::TuiEvent::PtyWrite(obs_log.into_bytes()));
+                }
 
                 let observation = format!("Observation: {}", observation_text);
                 history.push(ChatMessage::assistant(content));
@@ -281,10 +317,19 @@ impl Agent {
             Thought: you should always think about what to do\n\
             Action: the action to take, should be one of [{}]\n\
             Action Input: the input to the action\n\
-            Observation: the result of the action\n\
+            Observation: the result of the action (STOP after providing Action Input and wait for this)\n\
             ... (this Thought/Action/Action Input/Observation can repeat N times)\n\
             Thought: I now know the final answer\n\
             Final Answer: the final answer to the original input question\n\n\
+            ## Example\n\
+            Question: list files in current directory\n\
+            Thought: I need to use the ls command to list files.\n\
+            Action: execute_command\n\
+            Action Input: ls -la\n\
+            Observation: total 0\n\
+            Thought: The directory is empty.\n\
+            Final Answer: The directory is empty.\n\n\
+            IMPORTANT: After providing an Action and Action Input, you MUST stop generating and wait for the Observation. Do not hallucinate or predict the Observation. You MUST use the tools to interact with the system.\n\n\
             Begin!",
             self.system_prompt_prefix,
             tools_desc,
