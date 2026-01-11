@@ -223,6 +223,7 @@ pub struct ChatResponse {
 
 impl ChatResponse {
     /// Extract memories from the response content using [MEMORY: <content>] tags
+    #[allow(dead_code)]
     pub fn extract_memories(&self) -> Vec<String> {
         let content = self.content();
         let re = Regex::new(r"\[MEMORY:\s*(.*?)]").unwrap();
@@ -233,6 +234,7 @@ impl ChatResponse {
     }
 
     /// Extract search queries from the response content using [SEARCH: <query>] tags
+    #[allow(dead_code)]
     pub fn extract_searches(&self) -> Vec<String> {
         let content = self.content();
         let re = Regex::new(r"\[SEARCH:\s*(.*?)]").unwrap();
@@ -243,6 +245,7 @@ impl ChatResponse {
     }
 
     /// Returns the content with memory/search tags removed for display
+    #[allow(dead_code)]
     pub fn display_content(&self) -> String {
         let content = self.content();
         let re_mem = Regex::new(r"\[MEMORY:\s*.*?]\n?").unwrap();

@@ -14,6 +14,12 @@ echo "📦 Built: $BUILT_VERSION"
 sudo cp target/debug/mylm /usr/local/bin/mylm
 sudo chmod +x /usr/local/bin/mylm
 
+# Also update /usr/local/bin/ai if it exists to maintain compatibility with existing aliases
+if [ -f "/usr/local/bin/ai" ]; then
+    sudo cp target/debug/mylm /usr/local/bin/ai
+    sudo chmod +x /usr/local/bin/ai
+fi
+
 # Verify installation
 INSTALLED_VERSION=$(/usr/local/bin/mylm --version)
 

@@ -103,6 +103,10 @@ lto = true
 codegen-units = 1
 strip = true
 
+[build-dependencies]
+sha2 = "0.10"
+hex = "0.4"
+
 [features]
 # Enable for local/development debugging
 debug-endpoint = []

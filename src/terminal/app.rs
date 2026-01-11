@@ -25,6 +25,7 @@ pub enum TuiEvent {
     StatusUpdate(String),
     CondensedHistory(Vec<ChatMessage>),
     ConfigUpdate(crate::config::Config),
+    SuggestCommand(String),
     Tick,
 }
 
@@ -55,6 +56,8 @@ pub struct App {
     pub status_message: Option<String>,
     pub interrupt_flag: Arc<AtomicBool>,
     pub verbose_mode: bool,
+    pub show_thoughts: bool,
+    pub auto_approve: bool,
     pub active_task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -64,6 +67,7 @@ impl App {
         let mut session_monitor = SessionMonitor::new();
         session_monitor.set_max_context(max_ctx as u32);
         let verbose_mode = config.verbose_mode;
+        let auto_approve = config.commands.allow_execution;
 
         Self {
             terminal_parser: Parser::new(24, 80, 1000), // 1000 lines of scrollback
@@ -86,6 +90,8 @@ impl App {
             status_message: None,
             interrupt_flag: Arc::new(AtomicBool::new(false)),
             verbose_mode,
+            show_thoughts: true,
+            auto_approve,
             active_task: None,
         }
     }
@@ -190,6 +196,7 @@ impl App {
             let monitor_ratio = self.session_monitor.get_context_ratio();
             let event_tx_clone = event_tx.clone();
             let interrupt_flag = self.interrupt_flag.clone();
+            let auto_approve = self.auto_approve;
             interrupt_flag.store(false, Ordering::SeqCst);
 
             let task = tokio::spawn(async move {
@@ -205,7 +212,7 @@ impl App {
                     history
                 };
 
-                let result = agent.run(final_history, event_tx_clone, interrupt_flag).await;
+                let result = agent.run(final_history, event_tx_clone, interrupt_flag, auto_approve).await;
                 match result {
                     Ok((response, usage)) => {
                         let _ = event_tx.send(TuiEvent::AgentResponse(response, usage));
@@ -284,8 +291,53 @@ impl App {
                     self.chat_history.push(ChatMessage::assistant(format!("Updated {} to {}", key, value)));
                 }
             }
+            "/exec" => {
+                if parts.len() < 2 {
+                    self.chat_history.push(ChatMessage::assistant("Usage: /exec <command>".to_string()));
+                    return;
+                }
+                let command = parts[1..].join(" ");
+                self.chat_history.push(ChatMessage::user(&format!("/exec {}", command)));
+                
+                self.state = AppState::Processing;
+                let agent = self.agent.clone();
+                let history = self.chat_history.clone();
+                let event_tx_clone = event_tx.clone();
+                let interrupt_flag = self.interrupt_flag.clone();
+                interrupt_flag.store(false, Ordering::SeqCst);
+
+                let task = tokio::spawn(async move {
+                    let mut agent_lock = agent.lock().await;
+                    
+                    // 1. Execute the command using ShellTool
+                    let output = if let Some(tool) = agent_lock.tools.get("execute_command") {
+                        match tool.call(&command).await {
+                            Ok(out) => out,
+                            Err(e) => format!("Error executing command: {}", e),
+                        }
+                    } else {
+                        "Error: execute_command tool not found".to_string()
+                    };
+
+                    // 2. Add output to history
+                    let mut history_with_output = history.clone();
+                    history_with_output.push(ChatMessage::user(format!("Observation: {}", output)));
+                    
+                    // 3. Trigger agent to continue
+                    let result = agent_lock.run(history_with_output, event_tx_clone.clone(), interrupt_flag, true).await; // /exec is manual approval
+                    match result {
+                        Ok((response, usage)) => {
+                            let _ = event_tx_clone.send(TuiEvent::AgentResponse(response, usage));
+                        }
+                        Err(e) => {
+                            let _ = event_tx_clone.send(TuiEvent::AgentResponse(format!("Error: {}", e), TokenUsage::default()));
+                        }
+                    }
+                });
+                self.active_task = Some(task);
+            }
             "/help" => {
-                self.chat_history.push(ChatMessage::assistant("Available commands:\n/profile <name> - Switch profile\n/config <key> <value> - Update active profile\n/help - Show this help".to_string()));
+                self.chat_history.push(ChatMessage::assistant("Available commands:\n/profile <name> - Switch profile\n/config <key> <value> - Update active profile\n/exec <command> - Execute shell command\n/help - Show this help".to_string()));
             }
             _ => {
                 self.chat_history.push(ChatMessage::assistant(format!("Unknown command: {}", cmd)));
@@ -322,14 +374,7 @@ impl App {
     }
 
     pub fn add_assistant_message(&mut self, content: String, usage: TokenUsage) {
-        // Extract only the Final Answer part if present, otherwise use the full content
-        let clean_content = if let Some(pos) = content.find("Final Answer:") {
-            content[pos + "Final Answer:".len()..].trim().to_string()
-        } else {
-            content
-        };
-        
-        self.chat_history.push(ChatMessage::assistant(clean_content));
+        self.chat_history.push(ChatMessage::assistant(content));
         
         // Get pricing from agent's LLM client config
         let (input_price, output_price) = {

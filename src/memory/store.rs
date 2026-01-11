@@ -13,6 +13,7 @@ use tokio::task;
 use futures::TryStreamExt;
 
 #[derive(Debug, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct Memory {
     pub id: i64,
     pub content: String,

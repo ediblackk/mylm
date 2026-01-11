@@ -12,7 +12,7 @@ use tui_term::widget::PseudoTerminal;
 pub fn render(frame: &mut Frame, app: &mut App) {
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .constraints([Constraint::Length(2), Constraint::Min(0)])
         .split(frame.area());
 
     render_top_bar(frame, app, main_layout[0]);
@@ -42,11 +42,10 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let verbose_text = if app.verbose_mode { " [VERBOSE] " } else { "" };
+    let auto_approve_text = if app.auto_approve { " [AUTO-APPROVE: ON] " } else { " [AUTO-APPROVE: OFF] " };
 
     let stats_text = vec![
         Line::from(vec![
-            Span::styled(format!(" myLM v{}-{} ({}) ", env!("CARGO_PKG_VERSION"), env!("BUILD_NUMBER"), env!("GIT_HASH")), Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::raw(" | "),
             Span::styled("Profile: ", Style::default().fg(Color::Gray)),
             Span::styled(active_profile, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
             Span::raw(" ("),
@@ -70,6 +69,7 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
             Span::styled("Time: ", Style::default().fg(Color::Gray)),
             Span::styled(duration, Style::default().fg(Color::Yellow)),
             Span::styled(verbose_text, Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(auto_approve_text, Style::default().fg(if app.auto_approve { Color::Green } else { Color::Red }).add_modifier(Modifier::BOLD)),
         ])
     ];
 
@@ -88,13 +88,27 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         ratio * 100.0
     );
 
-    let top_chunks = Layout::default()
-        .direction(Direction::Horizontal)
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(50),
-            Constraint::Percentage(50),
+            Constraint::Length(1),
+            Constraint::Length(1),
         ])
         .split(area);
+
+    let top_row_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(18), // Version
+            Constraint::Min(0),     // Gauge
+        ])
+        .split(rows[0]);
+
+    let version_text = format!(" myLM v{}-{} ", env!("CARGO_PKG_VERSION"), env!("BUILD_NUMBER"));
+    let version_p = Paragraph::new(Span::styled(
+        version_text,
+        Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
+    ));
     
     let gauge = Gauge::default()
         .block(Block::default())
@@ -104,8 +118,9 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let stats_p = Paragraph::new(stats_text).alignment(ratatui::layout::Alignment::Right);
 
-    frame.render_widget(gauge, top_chunks[0]);
-    frame.render_widget(stats_p, top_chunks[1]);
+    frame.render_widget(version_p, top_row_chunks[0]);
+    frame.render_widget(gauge, top_row_chunks[1]);
+    frame.render_widget(stats_p, rows[1]);
 }
 
 fn render_terminal(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -156,35 +171,8 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut list_items = Vec::new();
 
     for m in &app.chat_history {
-        // Filter logic based on verbose_mode
-        let content_to_show = if !app.verbose_mode {
-            if m.role == MessageRole::Tool {
-                continue;
-            }
-            if m.role == MessageRole::Assistant {
-                // Heuristic: If it contains "Action:" or "Thought:" but not "Final Answer:", skip it
-                if (m.content.contains("Action:") || m.content.contains("Thought:")) && !m.content.contains("Final Answer:") {
-                    continue;
-                }
-                
-                // If it contains "Final Answer:", we show only that part
-                if let Some(pos) = m.content.find("Final Answer:") {
-                    &m.content[pos + "Final Answer:".len()..]
-                } else {
-                    // Filter out any lingering Thought/Action lines if mixed
-                    if m.content.contains("Thought:") || m.content.contains("Action:") {
-                        continue;
-                    }
-                    &m.content
-                }
-            } else {
-                &m.content
-            }
-        } else {
-            &m.content
-        };
-
-        if m.role == MessageRole::Assistant && content_to_show.trim().is_empty() {
+        // Skip Tool messages if not verbose
+        if !app.verbose_mode && m.role == MessageRole::Tool {
             continue;
         }
 
@@ -195,23 +183,72 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
             _ => ("AI: ", Color::Green),
         };
 
-        // Wrap the content
-        let content_width = available_width.saturating_sub(prefix.len());
-        let wrapped = wrap_text(content_to_show.trim(), content_width);
+        let mut lines_to_render = Vec::new();
+        let raw_lines: Vec<&str> = m.content.split('\n').collect();
         
-        for (i, line) in wrapped.into_iter().enumerate() {
-            if i == 0 {
-                list_items.push(ListItem::new(Line::from(vec![
-                    Span::styled(prefix.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                    Span::raw(line),
-                ])));
-            } else {
-                // Indent wrapped lines to align with the prefix
-                let indent = " ".repeat(prefix.len());
-                list_items.push(ListItem::new(Line::from(vec![
-                    Span::raw(indent),
-                    Span::raw(line),
-                ])));
+        for line in raw_lines {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                lines_to_render.push((line.to_string(), Style::default()));
+                continue;
+            }
+
+            if trimmed.starts_with("Thought:") {
+                if app.show_thoughts {
+                    lines_to_render.push((line.to_string(), Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)));
+                }
+                continue;
+            }
+
+            if trimmed.starts_with("Action:") {
+                lines_to_render.push((line.to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+                continue;
+            }
+
+            if trimmed.starts_with("Action Input:") {
+                lines_to_render.push((line.to_string(), Style::default().fg(Color::DarkGray)));
+                continue;
+            }
+
+            if trimmed.starts_with("Observation:") && !app.verbose_mode {
+                continue;
+            }
+
+            if trimmed.starts_with("Final Answer:") {
+                let content = line.replace("Final Answer:", "");
+                lines_to_render.push((content.trim().to_string(), Style::default()));
+                continue;
+            }
+
+            lines_to_render.push((line.to_string(), Style::default()));
+        }
+
+        if m.role == MessageRole::Assistant && lines_to_render.iter().all(|(l, _)| l.trim().is_empty()) {
+            continue;
+        }
+
+        // Wrap and render the lines
+        let content_width = available_width.saturating_sub(prefix.len());
+        let mut first_line = true;
+
+        for (text, style) in lines_to_render {
+            if text.is_empty() && !first_line {
+                list_items.push(ListItem::new(Line::from("")));
+                continue;
+            }
+            
+            let wrapped = wrap_text(&text, content_width);
+            for line in wrapped {
+                let mut spans = Vec::new();
+                if first_line {
+                    spans.push(Span::styled(prefix.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)));
+                    first_line = false;
+                } else {
+                    spans.push(Span::raw(" ".repeat(prefix.len())));
+                }
+                
+                spans.push(Span::styled(line, style));
+                list_items.push(ListItem::new(Line::from(spans)));
             }
         }
         // Add separator line
@@ -336,9 +373,10 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 
             if current_line.is_empty() {
                 let mut w = word;
-                while w.len() > width {
-                    lines.push(w[..width].to_string());
-                    w = &w[width..];
+                while w.chars().count() > width {
+                    let split_idx = w.char_indices().nth(width).map(|(i, _)| i).unwrap_or(w.len());
+                    lines.push(w[..split_idx].to_string());
+                    w = &w[split_idx..];
                 }
                 current_line = w.to_string();
             } else if current_line.len() + 1 + word.len() <= width {
@@ -347,9 +385,10 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
             } else {
                 lines.push(current_line);
                 let mut w = word;
-                while w.len() > width {
-                    lines.push(w[..width].to_string());
-                    w = &w[width..];
+                while w.chars().count() > width {
+                    let split_idx = w.char_indices().nth(width).map(|(i, _)| i).unwrap_or(w.len());
+                    lines.push(w[..split_idx].to_string());
+                    w = &w[split_idx..];
                 }
                 current_line = w.to_string();
             }

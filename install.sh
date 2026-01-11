@@ -158,6 +158,13 @@ install_binary() {
     echo "📦 Installing/Updating binary to $BINARY_DEST..."
     sudo cp target/$profile/mylm "$BINARY_DEST"
     sudo chmod +x "$BINARY_DEST"
+    
+    # Also update /usr/local/bin/ai if it exists to maintain compatibility
+    if [ -f "/usr/local/bin/ai" ]; then
+        sudo cp target/$profile/mylm /usr/local/bin/ai
+        sudo chmod +x /usr/local/bin/ai
+    fi
+    
     echo "✅ Binary installed successfully."
 }
 

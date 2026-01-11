@@ -18,6 +18,10 @@ impl Agent {
     ///
     /// The tools are registered by their name for easy lookup during the loop.
     pub fn new(client: Arc<LlmClient>, tools: Vec<Box<dyn Tool>>, system_prompt_prefix: String) -> Self {
+        Self::new_with_iterations(client, tools, system_prompt_prefix, 10)
+    }
+
+    pub fn new_with_iterations(client: Arc<LlmClient>, tools: Vec<Box<dyn Tool>>, system_prompt_prefix: String, max_iterations: usize) -> Self {
         let mut tool_map = HashMap::new();
         for tool in tools {
             tool_map.insert(tool.name().to_string(), tool);
@@ -26,16 +30,11 @@ impl Agent {
         Self {
             llm_client: client,
             tools: tool_map,
-            max_iterations: 10, // Default max iterations
+            max_iterations,
             system_prompt_prefix,
         }
     }
 
-    /// Set the maximum number of iterations for the agentic loop.
-    pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
-        self.max_iterations = max_iterations;
-        self
-    }
 
     /// Run the agentic loop for a given user input and conversation history.
     pub async fn run(
@@ -43,6 +42,7 @@ impl Agent {
         history: Vec<ChatMessage>,
         event_tx: tokio::sync::mpsc::UnboundedSender<crate::terminal::app::TuiEvent>,
         interrupt_flag: Arc<AtomicBool>,
+        auto_approve: bool,
     ) -> Result<(String, TokenUsage), Box<dyn std::error::Error>> {
         let mut history = history;
 
@@ -111,7 +111,11 @@ impl Agent {
 
                     let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate(format!("Executing {}...", tool_name)));
 
-                    // Command mirroring is now handled by the ShellTool itself
+                    // Check for auto-approve intercept
+                    if tool_name == "execute_command" && !auto_approve {
+                        let _ = event_tx.send(crate::terminal::app::TuiEvent::SuggestCommand(args.to_string()));
+                        return Ok(("[Command Suggestion]".to_string(), total_usage));
+                    }
 
                     let observation_text = match self.tools.get(tool_name) {
                         Some(tool) => match tool.call(args).await {
@@ -130,14 +134,7 @@ impl Agent {
             }
 
             if content.contains("Final Answer:") {
-                // Extract only the Final Answer part, not the full ReAct protocol
-                if let Some(pos) = content.find("Final Answer:") {
-                    let final_answer = content[pos + "Final Answer:".len()..].trim().to_string();
-                    eprintln!("[DEBUG] Final Answer extracted: '{}'", final_answer);
-                    eprintln!("[DEBUG] Returning early with Final Answer, skipping history.push");
-                    return Ok((final_answer, total_usage));
-                }
-                eprintln!("[DEBUG] Final Answer found but extraction failed, returning full content");
+                // Return full content to preserve thoughts/actions for the UI
                 return Ok((content, total_usage));
             }
 
@@ -151,7 +148,11 @@ impl Agent {
 
                 let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate(format!("Executing {}...", tool_name)));
 
-                // Command mirroring is now handled by the ShellTool itself
+                // Check for auto-approve intercept
+                if tool_name == "execute_command" && !auto_approve {
+                    let _ = event_tx.send(crate::terminal::app::TuiEvent::SuggestCommand(args.clone()));
+                    return Ok((content, total_usage));
+                }
 
                 let observation_text = match self.tools.get(&tool_name) {
                     Some(tool) => match tool.call(&args).await {
@@ -164,12 +165,9 @@ impl Agent {
                 // Observation mirroring is now handled by the ShellTool itself
 
                 let observation = format!("Observation: {}", observation_text);
-                eprintln!("[DEBUG] Adding Assistant message to history: {}", &content[..content.len().min(50)]);
                 history.push(ChatMessage::assistant(content));
-                eprintln!("[DEBUG] Adding User/Observation message to history");
                 history.push(ChatMessage::user(observation));
             } else {
-                eprintln!("[DEBUG] No Action/Action Input found, returning content and adding to history");
                 history.push(ChatMessage::assistant(content.clone()));
                 return Ok((content, total_usage));
             }
@@ -191,7 +189,7 @@ impl Agent {
             total_chars += msg.content.len();
         }
 
-        let mut approx_tokens = total_chars / 4;
+        let approx_tokens = total_chars / 4;
         if approx_tokens <= limit {
             return history;
         }

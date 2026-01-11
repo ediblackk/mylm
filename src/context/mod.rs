@@ -168,6 +168,7 @@ impl TerminalContext {
     }
 
     /// Build a prompt for the LLM with all context
+    #[allow(dead_code)]
     pub fn build_prompt(&self, user_query: &str) -> String {
         let mut prompt = String::new();
 

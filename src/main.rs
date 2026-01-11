@@ -323,6 +323,13 @@ async fn handle_one_shot(
 
     // Initialize dependencies for tools
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<crate::terminal::app::TuiEvent>();
+    
+    // Determine auto-approve based on CLI flags
+    let auto_approve = match &cli.command {
+        Some(Commands::Query { execute, .. }) => *execute,
+        _ => false, // Default to false for direct queries for safety
+    };
+
     let allowlist = crate::executor::allowlist::CommandAllowlist::new();
     let safety_checker = crate::executor::safety::SafetyChecker::new();
     let executor = Arc::new(crate::executor::CommandExecutor::new(
@@ -344,6 +351,10 @@ async fn handle_one_shot(
                     if !status.is_empty() {
                         println!("\x1b[2m[mylm]: {}\x1b[0m", status);
                     }
+                }
+                crate::terminal::app::TuiEvent::SuggestCommand(cmd) => {
+                    println!("\n\x1b[33m[Suggestion]:\x1b[0m AI suggests running: \x1b[1m{}\x1b[0m", cmd);
+                    println!("\x1b[2mRun with --execute to allow safe commands or --force to bypass safety checks.\x1b[0m");
                 }
                 _ => {}
             }
@@ -374,7 +385,7 @@ async fn handle_one_shot(
     // Dummy interrupt flag for one-shot
     let interrupt_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    match agent.run(messages, event_tx, interrupt_flag).await {
+    match agent.run(messages, event_tx, interrupt_flag, auto_approve).await {
         Ok((response, _usage)) => {
             // Stop the log task
             log_handle.abort();

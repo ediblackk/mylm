@@ -144,8 +144,8 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>) -> Result<()> {
     )?;
     terminal.show_cursor()?;
 
-    if let Err(err) = res {
-        println!("{err:?}");
+    if let Err(_err) = res {
+        // Silently exit or log to file in the future
     }
 
     Ok(())
@@ -181,6 +181,13 @@ async fn run_loop(
                 }
                 TuiEvent::CondensedHistory(history) => {
                     app.set_history(history);
+                }
+                TuiEvent::SuggestCommand(cmd) => {
+                    app.chat_input = format!("/exec {}", cmd);
+                    app.cursor_position = app.chat_input.chars().count();
+                    app.focus = Focus::Chat;
+                    app.state = AppState::Idle;
+                    app.status_message = None;
                 }
                 TuiEvent::ConfigUpdate(new_config) => {
                     app.config = new_config.clone();
@@ -241,6 +248,14 @@ async fn run_loop(
                                     }
                                     KeyCode::Char('v') => {
                                         app.verbose_mode = !app.verbose_mode;
+                                        continue;
+                                    }
+                                    KeyCode::Char('t') => {
+                                        app.show_thoughts = !app.show_thoughts;
+                                        continue;
+                                    }
+                                    KeyCode::Char('a') => {
+                                        app.auto_approve = !app.auto_approve;
                                         continue;
                                     }
                                     KeyCode::Char('c') => {

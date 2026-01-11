@@ -2,7 +2,7 @@
 //!
 //! Handles formatting and display of AI responses, context information,
 //! and system status using colored output.
-
+//! test debug
 use crate::context::TerminalContext;
 use crate::config::endpoints::EndpointConfig;
 use crate::llm::ChatResponse;
@@ -32,6 +32,7 @@ impl OutputFormatter {
     }
 
     /// Print the AI response
+    #[allow(dead_code)]
     pub fn print_response(&self, response: &ChatResponse) {
         println!();
         println!("{}", self.bold.apply_to("AI Response:"));
