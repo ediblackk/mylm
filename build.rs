@@ -38,19 +38,15 @@ fn main() {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|| "unknown".to_string());
 
-    // Only increment when git hash actually changes
-    let build_number = get_build_number_for_hash(&git_hash);
+    // Always increment build number on rebuild
+    let build_number = increment_build_number();
     
     println!("cargo:rustc-env=GIT_HASH={}", git_hash);
     println!("cargo:rustc-env=BUILD_NUMBER={}", build_number);
 }
 
-fn get_build_number_for_hash(git_hash: &str) -> u64 {
+fn increment_build_number() -> u64 {
     let build_file = Path::new(".build_number");
-    let hash_file = Path::new(".build_hash");
-    
-    // Check if hash has changed
-    let last_hash = fs::read_to_string(hash_file).unwrap_or_default();
     
     let current_build = if build_file.exists() {
         fs::read_to_string(build_file)
@@ -61,13 +57,7 @@ fn get_build_number_for_hash(git_hash: &str) -> u64 {
         0
     };
     
-    // Only increment if hash changed
-    if last_hash.trim() != git_hash {
-        let new_build = current_build + 1;
-        let _ = fs::write(build_file, new_build.to_string());
-        let _ = fs::write(hash_file, git_hash);
-        new_build
-    } else {
-        current_build
-    }
+    let new_build = current_build + 1;
+    let _ = fs::write(build_file, new_build.to_string());
+    new_build
 }

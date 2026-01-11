@@ -168,8 +168,9 @@ async fn run_loop(
                     app.terminal_parser.process(&data);
                 }
                 TuiEvent::PtyWrite(data) => {
-                    // Send directly to the parser for rendering, bypassing PTY execution
+                    // Send to both the parser for rendering AND the actual PTY for execution
                     app.terminal_parser.process(&data);
+                    let _ = app.pty_manager.write_all(&data);
                 }
                 TuiEvent::AgentResponse(response, usage) => {
                     app.add_assistant_message(response, usage);

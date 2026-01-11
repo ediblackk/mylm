@@ -111,12 +111,7 @@ impl Agent {
 
                     let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate(format!("Executing {}...", tool_name)));
 
-                    // Mirror command to PTY for visibility
-                    // NOTE: This now sends directly to Parser in App due to PtyWrite redirection in mod.rs
-                    if tool_name == "execute_command" {
-                        let mirror = format!("\x1b[33m$ {}\x1b[0m\r\n", args.trim_matches('"'));
-                        let _ = event_tx.send(crate::terminal::app::TuiEvent::PtyWrite(mirror.into_bytes()));
-                    }
+                    // Command mirroring is now handled by the ShellTool itself
 
                     let observation_text = match self.tools.get(tool_name) {
                         Some(tool) => match tool.call(args).await {
@@ -153,12 +148,7 @@ impl Agent {
 
                 let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate(format!("Executing {}...", tool_name)));
 
-                // Mirror command to PTY for visibility
-                // NOTE: This now sends directly to Parser in App due to PtyWrite redirection in mod.rs
-                if tool_name == "execute_command" {
-                    let mirror = format!("\x1b[33m$ {}\x1b[0m\r\n", args.trim());
-                    let _ = event_tx.send(crate::terminal::app::TuiEvent::PtyWrite(mirror.into_bytes()));
-                }
+                // Command mirroring is now handled by the ShellTool itself
 
                 let observation_text = match self.tools.get(&tool_name) {
                     Some(tool) => match tool.call(&args).await {
@@ -168,8 +158,7 @@ impl Agent {
                     None => format!("Error: Tool '{}' not found.", tool_name),
                 };
 
-                let obs_log = format!("\x1b[32m[Observation]:\x1b[0m {}\r\n", observation_text.trim());
-                let _ = event_tx.send(crate::terminal::app::TuiEvent::PtyWrite(obs_log.into_bytes()));
+                // Observation mirroring is now handled by the ShellTool itself
 
                 let observation = format!("Observation: {}", observation_text);
                 history.push(ChatMessage::assistant(content));

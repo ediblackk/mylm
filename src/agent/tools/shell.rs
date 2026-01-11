@@ -40,8 +40,15 @@ impl Tool for ShellTool {
     }
 
     async fn call(&self, args: &str) -> Result<String> {
-        // We no longer manually mirror to PTY here, as the Agent handles it.
+        // Mirror the command to PTY for visibility before execution
+        let mirror = format!("\x1b[33m$ {}\x1b[0m\r\n", args.trim());
+        let _ = self.event_tx.send(TuiEvent::PtyWrite(mirror.into_bytes()));
+        
         let result = self.executor.execute_from_llm(args, &self.context, false).await?;
+        
+        // Mirror the output to PTY for visibility
+        let obs_log = format!("\x1b[32m[Observation]:\x1b[0m {}\r\n", result.combined_output().trim());
+        let _ = self.event_tx.send(TuiEvent::PtyWrite(obs_log.into_bytes()));
         
         if result.success {
             Ok(result.combined_output())
