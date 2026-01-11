@@ -1,9 +1,11 @@
 [build]
-# Use sccache to cache build artifacts
 rustc-wrapper = "sccache"
 
 [target.x86_64-unknown-linux-gnu]
-# Use clang as the linker driver
 linker = "clang"
-# Force use of mold linker
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+rustflags = ["-C", "linker=clang", "-C", "link-arg=-fuse-ld=mold"]
+
+# Or try this alternative that forces mold directly:
+# [target.x86_64-unknown-linux-gnu]
+# linker = "/usr/bin/mold"
+# rustflags = ["-C", "link-arg=-Wl,--threads"]

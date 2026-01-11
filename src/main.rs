@@ -35,9 +35,10 @@ async fn main() -> Result<()> {
     if cli.version {
         let blue = Style::new().blue();
         println!(
-            "{} v{} ({})",
+            "{} v{}-{} ({})",
             blue.apply_to("mylm"),
             env!("CARGO_PKG_VERSION"),
+            env!("BUILD_NUMBER"),
             env!("GIT_HASH")
         );
         println!("Built with Rust + Love for terminal productivity");
@@ -394,3 +395,4 @@ async fn handle_one_shot(
 
     Ok(())
 }
+// test change

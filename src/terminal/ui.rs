@@ -45,7 +45,7 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let stats_text = vec![
         Line::from(vec![
-            Span::styled(format!(" myLM v{} ({}) ", env!("CARGO_PKG_VERSION"), env!("GIT_HASH")), Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" myLM v{}-{} ({}) ", env!("CARGO_PKG_VERSION"), env!("BUILD_NUMBER"), env!("GIT_HASH")), Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)),
             Span::raw(" | "),
             Span::styled("Profile: ", Style::default().fg(Color::Gray)),
             Span::styled(active_profile, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),

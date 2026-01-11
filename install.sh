@@ -115,9 +115,10 @@ check_and_install_dependencies() {
 
 build_binary() {
     local force_rebuild=$1
+    local profile=${2:-"release"}  # Default release, dar poate fi schimbat
     
-    if [ "$force_rebuild" != "true" ] && [ -f "./target/release/mylm" ]; then
-        echo "✨ Found an existing release binary at ./target/release/mylm."
+    if [ "$force_rebuild" != "true" ] && [ -f "./target/$profile/mylm" ]; then
+        echo "✨ Found an existing $profile binary at ./target/$profile/mylm."
         read -p "Would you like to rebuild it to ensure it's the latest version? [y/N]: " rebuild
         if [[ ! "$rebuild" =~ ^[Yy]$ ]]; then
             echo "⏭️  Skipping build, using existing binary."
@@ -125,17 +126,37 @@ build_binary() {
         fi
     fi
 
-    echo "🚀 Building mylm in release mode..."
-    if command -v sccache &> /dev/null; then
-        RUSTC_WRAPPER=sccache cargo build --release
+    echo "🚀 Building mylm in $profile mode..."
+    
+    # Întreabă utilizatorul ce profil vrea
+    if [ "$profile" == "release" ]; then
+        read -p "Use optimized release build (20 min) or fast dev build (7 min)? [r/D]: " build_type
+        if [[ "$build_type" =~ ^[Rr]$ ]]; then
+            profile="release"
+        else
+            profile="debug"
+        fi
+    fi
+    
+    if [ "$profile" == "release" ]; then
+        if command -v sccache &> /dev/null; then
+            RUSTC_WRAPPER=sccache cargo build --release
+        else
+            cargo build --release
+        fi
     else
-        cargo build --release
+        if command -v sccache &> /dev/null; then
+            RUSTC_WRAPPER=sccache cargo build
+        else
+            cargo build
+        fi
     fi
 }
 
 install_binary() {
+    local profile=${1:-"release"}
     echo "📦 Installing/Updating binary to $BINARY_DEST..."
-    sudo cp target/release/mylm "$BINARY_DEST"
+    sudo cp target/$profile/mylm "$BINARY_DEST"
     sudo chmod +x "$BINARY_DEST"
     echo "✅ Binary installed successfully."
 }
@@ -218,8 +239,12 @@ full_installation() {
     echo "🌟 Starting Fresh Installation..."
     check_and_install_dependencies
     
-    echo "🧹 Cleaning previous build artifacts..."
-    cargo clean
+    # Only clean if user explicitly wants it
+    read -p "Would you like to clean previous build artifacts? (Forces full rebuild) [y/N]: " do_clean
+    if [[ "$do_clean" =~ ^[Yy]$ ]]; then
+        echo "🧹 Cleaning previous build artifacts..."
+        cargo clean
+    fi
     
     build_binary "true"
     install_binary
@@ -227,7 +252,7 @@ full_installation() {
     run_setup "true"
     
     echo ""
-    echo "✅ Fresh installation complete! mylm is ready for use (via your chosen alias)."
+    echo "✅ Fresh installation complete!"
 }
 
 update_existing() {

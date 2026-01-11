@@ -135,6 +135,11 @@ impl Agent {
             }
 
             if content.contains("Final Answer:") {
+                // Extract only the Final Answer part, not the full ReAct protocol
+                if let Some(pos) = content.find("Final Answer:") {
+                    let final_answer = content[pos + "Final Answer:".len()..].trim().to_string();
+                    return Ok((final_answer, total_usage));
+                }
                 return Ok((content, total_usage));
             }
 

@@ -71,9 +71,29 @@ tempfile = "3.10"
 debug = "line-tables-only"
 # Split debug info is faster on Linux
 split-debuginfo = "unpacked"
+# Minimal optimization for faster compilation
+opt-level = 0
 
-# Optimize dependencies even in dev mode for faster runtime
-[profile.dev.package."*"]
+[profile.dev-opt]
+# New: Fast compile + decent runtime speed
+inherits = "dev"
+opt-level = 2
+lto = false
+
+# Optimize only heavy dependencies that need it
+[profile.dev.package."lancedb"]
+opt-level = 3
+debug = false
+
+[profile.dev.package."fastembed"]
+opt-level = 3
+debug = false
+
+[profile.dev.package."arrow-array"]
+opt-level = 3
+debug = false
+
+[profile.dev.package."arrow-schema"]
 opt-level = 3
 debug = false
 

@@ -2,6 +2,7 @@
 //!
 //! Supports YAML configuration files with support for multiple endpoints,
 //! environment variables, and command-line overrides.
+//! test for ccache
 
 use anyhow::{Context, Result};
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
