@@ -182,8 +182,37 @@ async fn run_loop(
         if let Some(event) = event_rx.recv().await {
             match event {
                 TuiEvent::Pty(data) => {
-                    app.terminal_parser.process(&data);
+                    let screen = app.terminal_parser.screen();
+                    let (rows, _cols) = screen.size();
                     
+                    // Count potential scrolls (newlines in data while cursor is at bottom)
+                    // This is a heuristic but much faster than byte-by-byte
+                    let (cursor_row, _) = screen.cursor_position();
+                    let is_at_bottom = cursor_row >= rows.saturating_sub(1);
+                    
+                    if is_at_bottom {
+                        let newlines = data.iter().filter(|&&b| b == b'\n').count();
+                        if newlines > 0 {
+                            // Collect current visible lines as they will be pushed up
+                            // We only take the top 'newlines' lines
+                            let screen_contents = screen.contents();
+                            let lines: Vec<&str> = screen_contents.split('\n').collect();
+                            for i in 0..newlines.min(lines.len()) {
+                                let line = lines[i].to_string();
+                                if !line.trim().is_empty() {
+                                    app.terminal_history.push(line);
+                                }
+                            }
+                            
+                            if app.terminal_history.len() > 1000 {
+                                let to_remove = app.terminal_history.len() - 1000;
+                                app.terminal_history.drain(0..to_remove);
+                            }
+                        }
+                    }
+
+                    app.terminal_parser.process(&data);
+
                     if app.capturing_command_output {
                         let text = String::from_utf8_lossy(&data);
                         app.command_output_buffer.push_str(&text);

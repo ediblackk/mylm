@@ -169,17 +169,20 @@ fn render_terminal(frame: &mut Frame, app: &mut App, area: Rect) {
     // Since tui-term 0.1.x PseudoTerminal doesn't support manual scrolling offset easily,
     // we implement a basic renderer here to support viewing history.
     
-    let (rows, _) = screen.size();
     let height = inner_height as usize;
     
-    // Fallback: Get full content and slice it
-    // This is less efficient but ensures we see history.
-    // We use contents() which returns plain text because parsing ANSI manually is hard without a helper.
+    // Combine manual history with visible screen
+    let mut all_lines = Vec::new();
+    for h in &app.terminal_history {
+        all_lines.push((h.as_str(), Style::default().fg(Color::DarkGray)));
+    }
     
-    let full_text = screen.contents(); // Plain text
-    let all_lines: Vec<&str> = full_text.split('\n').collect();
-    // all_lines contains history + visible
-    
+    let screen_contents = screen.contents();
+    let screen_lines: Vec<&str> = screen_contents.split('\n').collect();
+    for s in screen_lines {
+        all_lines.push((s, Style::default().fg(Color::White)));
+    }
+
     let total_lines = all_lines.len();
     let max_scroll = total_lines.saturating_sub(height);
     let effective_scroll = app.terminal_scroll.min(max_scroll);
@@ -190,15 +193,8 @@ fn render_terminal(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut list_items = Vec::new();
     
     for i in start_idx..end_idx {
-        if i < all_lines.len() {
-             let line_content = all_lines[i];
-             // Simple styling for history
-             let style = if i < total_lines.saturating_sub(rows as usize) {
-                 Style::default().fg(Color::Gray) // History in gray
-             } else {
-                 Style::default().fg(Color::White) // Visible in white (approximate)
-             };
-             list_items.push(ListItem::new(Line::from(Span::styled(line_content.to_string(), style))));
+        if let Some((line_content, style)) = all_lines.get(i) {
+             list_items.push(ListItem::new(Line::from(Span::styled(line_content.to_string(), *style))));
         }
     }
     

@@ -76,6 +76,7 @@ pub struct App {
     pub output_price: f64,
     pub tick_count: u64,
     pub pending_terminal_context: Option<crate::context::terminal::TerminalContext>,
+    pub terminal_history: Vec<String>,
 }
 
 impl App {
@@ -120,6 +121,7 @@ impl App {
             output_price,
             tick_count: 0,
             pending_terminal_context: None,
+            terminal_history: Vec::new(),
         }
     }
 
