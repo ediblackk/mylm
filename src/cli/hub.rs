@@ -42,6 +42,25 @@ impl std::fmt::Display for ConfigChoice {
     }
 }
 
+#[derive(Debug, PartialEq)]
+pub enum ProfileEditChoice {
+    EditPrompt,
+    SelectEndpoint,
+    EditEndpointDetails,
+    Back,
+}
+
+impl std::fmt::Display for ProfileEditChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProfileEditChoice::EditPrompt => write!(f, "📝 Edit Prompt Instructions"),
+            ProfileEditChoice::SelectEndpoint => write!(f, "🔗 Select Associated Endpoint"),
+            ProfileEditChoice::EditEndpointDetails => write!(f, "⚙️  Edit Endpoint Details (Model/Key)"),
+            ProfileEditChoice::Back => write!(f, "⬅️  Back"),
+        }
+    }
+}
+
 /// Show the interactive hub menu
 pub async fn show_hub(_config: &Config) -> Result<HubChoice> {
     let mut options = Vec::new();
@@ -93,6 +112,41 @@ pub fn show_profile_select(profiles: Vec<String>) -> Result<Option<String>> {
     options.push("⬅️  Back".to_string());
 
     let ans: InquireResult<String> = Select::new("Select Active Profile", options).prompt();
+
+    match ans {
+        Ok(choice) if choice == "⬅️  Back" => Ok(None),
+        Ok(choice) => Ok(Some(choice)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Show profile edit menu
+pub fn show_profile_edit_menu(profile_name: &str) -> Result<ProfileEditChoice> {
+    let options = vec![
+        ProfileEditChoice::EditPrompt,
+        ProfileEditChoice::SelectEndpoint,
+        ProfileEditChoice::EditEndpointDetails,
+        ProfileEditChoice::Back,
+    ];
+
+    let ans: InquireResult<ProfileEditChoice> = Select::new(
+        &format!("Editing Profile: {}", profile_name),
+        options
+    ).prompt();
+
+    match ans {
+        Ok(choice) => Ok(choice),
+        Err(_) => Ok(ProfileEditChoice::Back),
+    }
+}
+
+/// Show endpoint selection menu
+pub fn show_endpoint_select(endpoints: Vec<String>, _current: &str) -> Result<Option<String>> {
+    let mut options = endpoints;
+    options.push("⬅️  Back".to_string());
+
+    let ans: InquireResult<String> = Select::new("Select Endpoint", options)
+        .prompt();
 
     match ans {
         Ok(choice) if choice == "⬅️  Back" => Ok(None),

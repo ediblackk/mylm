@@ -190,6 +190,11 @@ impl LlmClient {
         let mut system_parts = Vec::new();
 
         for m in &request.messages {
+            let content = m.content.trim();
+            if content.is_empty() && m.tool_calls.is_none() {
+                continue; // Skip empty messages that don't have tool calls
+            }
+
             match m.role.as_str() {
                 "system" => {
                     system_parts.push(GeminiPart { text: m.content.clone() });
@@ -203,7 +208,13 @@ impl LlmClient {
 
                     if let Some(last) = contents.last_mut() {
                         if last.role == role {
-                            last.parts.push(GeminiPart { text: m.content.clone() });
+                            // Merge text parts into one to avoid "multiple parts" issues on some proxies
+                            if let Some(first_part) = last.parts.first_mut() {
+                                first_part.text.push_str("\n\n");
+                                first_part.text.push_str(&m.content);
+                            } else {
+                                last.parts.push(GeminiPart { text: m.content.clone() });
+                            }
                             continue;
                         }
                     }
@@ -214,6 +225,12 @@ impl LlmClient {
                     });
                 }
             }
+        }
+
+        // Gemini API Requirement: contents must start with a "user" role.
+        // If pruning or history manipulation left us starting with "model", drop it.
+        while !contents.is_empty() && contents[0].role != "user" {
+            contents.remove(0);
         }
 
         // Add system prompt from config if present

@@ -1,11 +1,26 @@
-//! TESTING BUILD NUMBER CHANGE
+//! Agent Core Implementation
 use crate::llm::{LlmClient, chat::{ChatMessage, ChatRequest, MessageRole}, TokenUsage};
-use crate::agent::tool::Tool;
+use crate::agent::tool::{Tool, ToolKind};
+use std::error::Error as StdError;
 use serde_json;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 use regex::Regex;
+
+/// The decision made by the agent after a step.
+#[derive(Debug, Clone)]
+pub enum AgentDecision {
+    /// The LLM produced a text response (final answer or question).
+    Message(String, TokenUsage),
+    /// The LLM wants to execute a tool.
+    Action {
+        tool: String,
+        args: String,
+        kind: ToolKind,
+    },
+    /// The agent has reached maximum iterations or an error occurred.
+    Error(String),
+}
 
 /// The core Agent that manages the agentic loop.
 pub struct Agent {
@@ -13,12 +28,20 @@ pub struct Agent {
     pub tools: HashMap<String, Box<dyn Tool>>,
     pub max_iterations: usize,
     pub system_prompt_prefix: String,
+    
+    // State maintained between steps
+    pub history: Vec<ChatMessage>,
+    pub iteration_count: usize,
+    pub total_usage: TokenUsage,
+    pub pending_decision: Option<AgentDecision>,
+    
+    // Safety tracking
+    last_tool_call: Option<(String, String)>,
+    repetition_count: usize,
 }
 
 impl Agent {
     /// Create a new Agent with the provided LLM client and tools.
-    ///
-    /// The tools are registered by their name for easy lookup during the loop.
     pub fn new(client: Arc<LlmClient>, tools: Vec<Box<dyn Tool>>, system_prompt_prefix: String) -> Self {
         Self::new_with_iterations(client, tools, system_prompt_prefix, 10)
     }
@@ -34,187 +57,241 @@ impl Agent {
             tools: tool_map,
             max_iterations,
             system_prompt_prefix,
+            history: Vec::new(),
+            iteration_count: 0,
+            total_usage: TokenUsage::default(),
+            pending_decision: None,
+            last_tool_call: None,
+            repetition_count: 0,
         }
     }
 
+    /// Check if the agent has a pending decision to be returned.
+    pub fn has_pending_decision(&self) -> bool {
+        self.pending_decision.is_some()
+    }
 
-    /// Run the agentic loop for a given user input and conversation history.
+    /// Reset the agent's state for a new task.
+    pub fn reset(&mut self, history: Vec<ChatMessage>) {
+        self.history = history;
+        self.iteration_count = 0;
+        self.total_usage = TokenUsage::default();
+        self.pending_decision = None;
+        self.last_tool_call = None;
+        self.repetition_count = 0;
+
+        // Ensure system prompt is present
+        if self.history.is_empty() || self.history[0].role != MessageRole::System {
+            self.history.insert(0, ChatMessage::system(self.generate_system_prompt()));
+        }
+    }
+
+    /// Perform a single step in the agentic loop.
+    pub async fn step(&mut self, observation: Option<String>) -> Result<AgentDecision, Box<dyn StdError + Send + Sync>> {
+        // 1. Hard Iteration Limit Check
+        if self.iteration_count >= self.max_iterations {
+            return Ok(AgentDecision::Error(format!("Maximum iteration limit ({}) reached. Task aborted to prevent infinite loop.", self.max_iterations)));
+        }
+
+        // 2. Return pending decision if we have one (usually an Action queued after a Thought)
+        if let Some(decision) = self.pending_decision.take() {
+            return Ok(decision);
+        }
+
+        if let Some(obs) = observation {
+            // If the last message was an assistant message with tool calls, we should use tool role
+            // Otherwise use user role for "Observation: ..."
+            let is_tool_call_response = self.history.last().map(|m| m.tool_calls.is_some()).unwrap_or(false);
+            
+            if is_tool_call_response {
+                self.history.push(ChatMessage::user(format!("Observation: {}", obs)));
+            } else {
+                self.history.push(ChatMessage::user(format!("Observation: {}", obs)));
+            }
+        }
+
+        // --- Context Pruning ---
+        let context_limit = self.llm_client.config().max_context_tokens.min(100000);
+        self.history = self.prune_history(self.history.clone(), context_limit);
+
+        let request = ChatRequest::new(self.llm_client.model().to_string(), self.history.clone());
+        let response = self.llm_client.chat(&request).await?;
+        let content = response.content();
+
+        if let Some(usage) = &response.usage {
+            self.total_usage.prompt_tokens += usage.prompt_tokens;
+            self.total_usage.completion_tokens += usage.completion_tokens;
+            self.total_usage.total_tokens += usage.total_tokens;
+        }
+
+        self.iteration_count += 1;
+
+        // --- Process Decision ---
+
+        // 1. Handle Tool Calls (Modern API)
+        if let Some(tool_calls) = response.choices[0].message.tool_calls.as_ref() {
+            if let Some(tool_call) = tool_calls.first() {
+                let tool_name = tool_call.function.name.trim();
+                let args = &tool_call.function.arguments;
+                
+                // Repetition Check
+                if let Some((last_tool, last_args)) = &self.last_tool_call {
+                    if last_tool == tool_name && last_args == args {
+                        self.repetition_count += 1;
+                        if self.repetition_count >= 3 {
+                            return Ok(AgentDecision::Error(format!("Detected repeated tool call to '{}' with identical arguments. Breaking loop.", tool_name)));
+                        }
+                    } else {
+                        self.repetition_count = 0;
+                    }
+                }
+                self.last_tool_call = Some((tool_name.to_string(), args.to_string()));
+
+                let kind = self.tools.get(tool_name).map(|t| t.kind()).unwrap_or(ToolKind::Internal);
+                self.history.push(response.choices[0].message.clone());
+
+                let action = AgentDecision::Action {
+                    tool: tool_name.to_string(),
+                    args: args.to_string(),
+                    kind,
+                };
+
+                // Check if there's also text content (Thoughts)
+                if !content.trim().is_empty() {
+                    self.pending_decision = Some(action);
+                    return Ok(AgentDecision::Message(content, self.total_usage.clone()));
+                }
+
+                return Ok(action);
+            }
+        }
+
+        // 2. Handle ReAct format (Regex)
+        let action_re = Regex::new(r"Action:\s*(.*)")?;
+        let action_input_re = Regex::new(r"Action Input:\s*(.*)")?;
+
+        let action = action_re.captures(&content).map(|c| c[1].trim().to_string());
+        let action_input = action_input_re.captures(&content).map(|c| c[1].trim().to_string());
+
+        if let (Some(tool_name), Some(args)) = (action, action_input) {
+            // Repetition Check
+            if let Some((last_tool, last_args)) = &self.last_tool_call {
+                if *last_tool == tool_name && *last_args == args {
+                    self.repetition_count += 1;
+                    if self.repetition_count >= 3 {
+                        return Ok(AgentDecision::Error(format!("Detected repeated tool call to '{}' with identical arguments (ReAct). Breaking loop.", tool_name)));
+                    }
+                } else {
+                    self.repetition_count = 0;
+                }
+            }
+            self.last_tool_call = Some((tool_name.clone(), args.clone()));
+
+            // If the content also contains "Final Answer:", prioritize returning the whole thing as a message
+            if content.contains("Final Answer:") {
+                self.history.push(ChatMessage::assistant(content.clone()));
+                return Ok(AgentDecision::Message(content, self.total_usage.clone()));
+            }
+
+            let kind = self.tools.get(&tool_name).map(|t| t.kind()).unwrap_or(ToolKind::Internal);
+            self.history.push(ChatMessage::assistant(content.clone()));
+            
+            let action_decision = AgentDecision::Action {
+                tool: tool_name,
+                args,
+                kind,
+            };
+
+            // Extract everything before "Action:" as Thought
+            if let Some(pos) = content.find("Action:") {
+                let thought = content[..pos].trim().to_string();
+                if !thought.is_empty() {
+                    self.pending_decision = Some(action_decision);
+                    return Ok(AgentDecision::Message(thought, self.total_usage.clone()));
+                }
+            }
+            
+            return Ok(action_decision);
+        }
+
+        // 3. Final Answer or just a message
+        self.history.push(ChatMessage::assistant(content.clone()));
+        Ok(AgentDecision::Message(content, self.total_usage.clone()))
+    }
+
+    /// Legacy run method for backward compatibility.
     pub async fn run(
         &mut self,
         history: Vec<ChatMessage>,
         event_tx: tokio::sync::mpsc::UnboundedSender<crate::terminal::app::TuiEvent>,
-        interrupt_flag: Arc<AtomicBool>,
+        interrupt_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
         auto_approve: bool,
-    ) -> Result<(String, TokenUsage), Box<dyn std::error::Error>> {
-        let mut history = history;
-
-        // --- Auto-RAG: Proactive Memory Retrieval ---
-        if let Some(user_msg) = history.iter().rev().find(|m| m.role == MessageRole::User) {
-            if let Some(memory_tool) = self.tools.get("memory") {
-                let query = format!("search: {}", user_msg.content);
-                if let Ok(memory_context) = memory_tool.call(&query).await {
-                    if !memory_context.contains("No relevant memories found") {
-                        let context_injection = format!(
-                            "\n\n# Relevant Context from Memory\n{}\n",
-                            memory_context
-                        );
-                        
-                        if let Some(sys_msg) = history.iter_mut().find(|m| m.role == MessageRole::System) {
-                            sys_msg.content.push_str(&context_injection);
-                        } else {
-                            history.insert(0, ChatMessage::system(format!("{}{}", self.generate_system_prompt(), context_injection)));
-                        }
-                    }
-                }
-            }
-        }
+    ) -> Result<(String, TokenUsage), Box<dyn StdError + Send + Sync>> {
+        self.reset(history);
         
-        if history.is_empty() || history[0].role != MessageRole::System {
-            history.insert(0, ChatMessage::system(self.generate_system_prompt()));
-        }
+        let mut last_observation = None;
 
-        // --- Context Pruning ---
-        let context_limit = self.llm_client.config().max_context_tokens.min(100000); // Heuristic or from config
-        history = self.prune_history(history, context_limit);
-
-        let mut total_usage = TokenUsage::default();
-
-        let action_re = Regex::new(r"Action:\s*(.*)")?;
-        let action_input_re = Regex::new(r"Action Input:\s*(.*)")?;
-
-        for _ in 0..self.max_iterations {
-            // Check for interruption
-            if interrupt_flag.load(Ordering::SeqCst) {
-                return Ok(("Interrupted by user.".to_string(), total_usage));
+        loop {
+            if interrupt_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(("Interrupted by user.".to_string(), self.total_usage.clone()));
             }
 
             let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate("Thinking...".to_string()));
-            let request = ChatRequest::new(self.llm_client.model().to_string(), history.clone());
-            let response = self.llm_client.chat(&request).await?;
-            let content = response.content();
-
-            if let Some(usage) = &response.usage {
-                total_usage.prompt_tokens += usage.prompt_tokens;
-                total_usage.completion_tokens += usage.completion_tokens;
-                total_usage.total_tokens += usage.total_tokens;
-            }
-
-            if let Some(tool_calls) = response.choices[0].message.tool_calls.as_ref() {
-                let assistant_msg = response.choices[0].message.clone();
-                history.push(assistant_msg.clone());
-
-                for tool_call in tool_calls {
-                    if interrupt_flag.load(Ordering::SeqCst) {
-                        return Ok(("Interrupted by user during tool execution.".to_string(), total_usage));
+            
+            match self.step(last_observation.take()).await? {
+                AgentDecision::Message(msg, usage) => {
+                    let _ = event_tx.send(crate::terminal::app::TuiEvent::AgentResponse(msg.clone(), usage.clone()));
+                    if self.has_pending_decision() {
+                        continue;
                     }
+                    let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate("".to_string()));
+                    return Ok((msg, usage));
+                }
+                AgentDecision::Action { tool, args, kind } => {
+                    let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate(format!("Tool: '{}'", tool)));
 
-                    let tool_name = tool_call.function.name.trim();
-                    let args = &tool_call.function.arguments;
-
-                    let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate(format!("Tool: '{}' (Auto: {})", tool_name, auto_approve)));
-
-                    // Check for auto-approve intercept
-                    if tool_name == "execute_command" && !auto_approve {
-                        let cmd = if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
+                    if tool == "execute_command" && !auto_approve {
+                        let cmd = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&args) {
                             v.get("command").and_then(|c| c.as_str())
-                                 .or_else(|| v.get("args").and_then(|c| c.as_str()))
-                                 .unwrap_or(args).to_string()
+                             .or_else(|| v.get("args").and_then(|c| c.as_str()))
+                             .unwrap_or(&args).to_string()
                         } else {
-                            args.to_string()
+                            args.clone()
                         };
                         let _ = event_tx.send(crate::terminal::app::TuiEvent::SuggestCommand(cmd));
                         
-                        // Return a cleaned version of the assistant message up to the Action Input
-                        let mut truncated = assistant_msg.content.clone();
+                        let last_msg = self.history.last().map(|m| m.content.clone()).unwrap_or_default();
+                        let mut truncated = last_msg;
                         if let Some(pos) = truncated.find("Observation:") {
                             truncated.truncate(pos);
                         }
-                        return Ok((truncated.trim().to_string(), total_usage));
+                        return Ok((truncated.trim().to_string(), self.total_usage.clone()));
                     }
 
-                    let observation_text = match self.tools.get(tool_name) {
-                        Some(tool) => match tool.call(args).await {
+                    let observation = match self.tools.get(&tool) {
+                        Some(t) => match t.call(&args).await {
                             Ok(output) => output,
                             Err(e) => format!("Error: {}", e),
                         },
-                        None => format!("Error: Tool '{}' not found.", tool_name),
+                        None => format!("Error: Tool '{}' not found.", tool),
                     };
 
-                    // Mirror to PTY if NOT a ShellTool (which handles its own mirroring via visible PTY execution)
-                    if tool_name != "execute_command" {
-                        let obs_log = format!("\x1b[32m[Observation]:\x1b[0m {}\r\n", observation_text.trim());
+                    if kind == ToolKind::Internal {
+                        let obs_log = format!("\x1b[32m[Observation]:\x1b[0m {}\r\n", observation.trim());
                         let _ = event_tx.send(crate::terminal::app::TuiEvent::PtyWrite(obs_log.into_bytes()));
                     }
 
-                    history.push(ChatMessage::tool(tool_call.id.clone(), tool_name.to_string(), observation_text));
+                    last_observation = Some(observation);
                 }
-                continue;
-            }
-
-            if content.contains("Final Answer:") {
-                // Return full content to preserve thoughts/actions for the UI
-                return Ok((content, total_usage));
-            }
-
-            let action = action_re.captures(&content).map(|c| c[1].trim().to_string());
-            let action_input = action_input_re.captures(&content).map(|c| c[1].trim().to_string());
-
-            if let (Some(tool_name_raw), Some(args)) = (action, action_input) {
-                if interrupt_flag.load(Ordering::SeqCst) {
-                    return Ok(("Interrupted by user.".to_string(), total_usage));
+                AgentDecision::Error(e) => {
+                    let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate("".to_string()));
+                    return Err(e.into());
                 }
-
-                let tool_name = tool_name_raw.trim();
-                let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate(format!("Tool: '{}' (Auto: {})", tool_name, auto_approve)));
-
-                // Check for auto-approve intercept
-                if tool_name == "execute_command" && !auto_approve {
-                    let cmd = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&args) {
-                        v.get("command").and_then(|c| c.as_str())
-                         .or_else(|| v.get("args").and_then(|c| c.as_str()))
-                         .unwrap_or(&args).to_string()
-                    } else {
-                        args.clone()
-                    };
-                    let _ = event_tx.send(crate::terminal::app::TuiEvent::SuggestCommand(cmd));
-                    
-                    // Truncate LLM response if it hallucinated an observation
-                    let mut truncated = content.clone();
-                    if let Some(pos) = truncated.find("Observation:") {
-                        truncated.truncate(pos);
-                    }
-                    return Ok((truncated.trim().to_string(), total_usage));
-                }
-
-                let observation_text = match self.tools.get(tool_name) {
-                    Some(tool) => match tool.call(&args).await {
-                        Ok(output) => output,
-                        Err(e) => format!("Error: {}", e),
-                    },
-                    None => format!("Error: Tool '{}' not found.", tool_name),
-                };
-
-                // Mirror to PTY if NOT a ShellTool (which handles its own mirroring via visible PTY execution)
-                if tool_name != "execute_command" {
-                    let obs_log = format!("\x1b[32m[Observation]:\x1b[0m {}\r\n", observation_text.trim());
-                    let _ = event_tx.send(crate::terminal::app::TuiEvent::PtyWrite(obs_log.into_bytes()));
-                }
-
-                let observation = format!("Observation: {}", observation_text);
-                history.push(ChatMessage::assistant(content));
-                history.push(ChatMessage::user(observation));
-            } else {
-                history.push(ChatMessage::assistant(content.clone()));
-                return Ok((content, total_usage));
             }
         }
-
-        let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate("".to_string()));
-        Ok(("Error: Maximum iterations reached without a final answer.".to_string(), total_usage))
     }
 
     /// Prune history to stay within token limits.
-    /// Uses char_count / 4 as a simple heuristic for tokens.
     fn prune_history(&self, history: Vec<ChatMessage>, limit: usize) -> Vec<ChatMessage> {
         if history.len() <= 1 {
             return history;
@@ -230,7 +307,6 @@ impl Agent {
             return history;
         }
 
-        // Always keep system message
         let system_msg = history[0].clone();
         let mut pruned = Vec::new();
         pruned.push(system_msg.clone());
@@ -238,7 +314,7 @@ impl Agent {
         let mut current_tokens = system_msg.content.len() / 4;
         let mut to_keep = Vec::new();
 
-        // Keep as many recent messages as fit
+        // Iterate backwards to keep most recent messages
         for msg in history.iter().skip(1).rev() {
             let msg_tokens = msg.content.len() / 4;
             if current_tokens + msg_tokens < limit {
@@ -250,12 +326,19 @@ impl Agent {
         }
 
         to_keep.reverse();
+
+        // Gemini/Strict API Requirement: Ensure we don't start with an Assistant/Tool message
+        // after the system prompt.
+        while !to_keep.is_empty() && to_keep[0].role != MessageRole::User {
+            to_keep.remove(0);
+        }
+
         pruned.extend(to_keep);
         pruned
     }
 
     /// Condense the conversation history by summarizing older messages.
-    pub async fn condense_history(&self, history: &[ChatMessage]) -> Result<Vec<ChatMessage>, Box<dyn std::error::Error>> {
+    pub async fn condense_history(&self, history: &[ChatMessage]) -> Result<Vec<ChatMessage>, Box<dyn StdError + Send + Sync>> {
         if history.len() <= 5 {
             return Ok(history.to_vec());
         }

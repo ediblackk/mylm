@@ -39,6 +39,10 @@ impl Tool for ShellTool {
         "Pass the command string directly as arguments. Example: 'ls -la' or 'ps aux'."
     }
 
+    fn kind(&self) -> crate::agent::tool::ToolKind {
+        crate::agent::tool::ToolKind::Terminal
+    }
+
     async fn call(&self, args: &str) -> Result<String> {
         // 1. Safety Check (performed by executor)
         self.executor.check_safety(args)?;
@@ -63,7 +67,7 @@ impl Tool for ShellTool {
         
         // Combine screen context with command output
         let combined = format!(
-            "--- TERMINAL CONTEXT ---\n{}\n--- COMMAND EXECUTION ---\n{}",
+            "--- TERMINAL CONTEXT ---\n{}\nCMD_OUTPUT:\n{}",
             screen_content,
             output
         );

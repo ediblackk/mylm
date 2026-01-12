@@ -1,6 +1,15 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
+/// Categorizes tools based on how they should be executed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolKind {
+    /// Execute silently/internally (e.g., Memory, WebSearch).
+    Internal,
+    /// Execute visibly in Terminal (e.g., Shell).
+    Terminal,
+}
+
 /// A trait for tools that can be executed by the agent.
 ///
 /// Tools are the primary way the agent interacts with the world.
@@ -18,4 +27,9 @@ pub trait Tool: Send + Sync {
 
     /// Execute the tool with the provided arguments
     async fn call(&self, args: &str) -> Result<String>;
+
+    /// The kind of tool (Internal or Terminal)
+    fn kind(&self) -> ToolKind {
+        ToolKind::Internal
+    }
 }

@@ -149,16 +149,68 @@ fn render_terminal(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // Dynamic Resizing
-    if app.terminal_size != (area.height.saturating_sub(2), area.width.saturating_sub(2)) {
-        app.resize_pty(area.width.saturating_sub(2), area.height.saturating_sub(2));
+    let inner_height = area.height.saturating_sub(2);
+    let inner_width = area.width.saturating_sub(2);
+    if app.terminal_size != (inner_height, inner_width) {
+        app.resize_pty(inner_width, inner_height);
     }
 
-    let vt100_screen = app.terminal_parser.screen();
-    let terminal = PseudoTerminal::new(vt100_screen)
-        .block(block);
+    let screen = app.terminal_parser.screen();
+    
+    // If we're auto-scrolling, use the efficient PseudoTerminal widget from tui-term
+    if app.terminal_auto_scroll {
+        let terminal = PseudoTerminal::new(screen)
+            .block(block);
+        frame.render_widget(terminal, area);
+        return;
+    }
 
-    frame.render_widget(terminal, area);
+    // Custom Renderer for Scrolling
+    // Since tui-term 0.1.x PseudoTerminal doesn't support manual scrolling offset easily,
+    // we implement a basic renderer here to support viewing history.
+    
+    let (rows, _) = screen.size();
+    let height = inner_height as usize;
+    
+    // Fallback: Get full content and slice it
+    // This is less efficient but ensures we see history.
+    // We use contents() which returns plain text because parsing ANSI manually is hard without a helper.
+    
+    let full_text = screen.contents(); // Plain text
+    let all_lines: Vec<&str> = full_text.split('\n').collect();
+    // all_lines contains history + visible
+    
+    let total_lines = all_lines.len();
+    let max_scroll = total_lines.saturating_sub(height);
+    let effective_scroll = app.terminal_scroll.min(max_scroll);
+    
+    let start_idx = total_lines.saturating_sub(effective_scroll).saturating_sub(height);
+    let end_idx = (start_idx + height).min(total_lines);
+    
+    let mut list_items = Vec::new();
+    
+    for i in start_idx..end_idx {
+        if i < all_lines.len() {
+             let line_content = all_lines[i];
+             // Simple styling for history
+             let style = if i < total_lines.saturating_sub(rows as usize) {
+                 Style::default().fg(Color::Gray) // History in gray
+             } else {
+                 Style::default().fg(Color::White) // Visible in white (approximate)
+             };
+             list_items.push(ListItem::new(Line::from(Span::styled(line_content.to_string(), style))));
+        }
+    }
+    
+    // Fill remaining height if needed (shouldn't happen if logic is correct but good for safety)
+    while list_items.len() < height {
+        list_items.push(ListItem::new(Line::from("")));
+    }
+
+    let list = List::new(list_items).block(block);
+    frame.render_widget(list, area);
 }
+
 
 fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
@@ -212,7 +264,7 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
             }
 
             if trimmed.starts_with("Thought:") {
-                if app.show_thoughts {
+                if app.show_thoughts && app.verbose_mode {
                     lines_to_render.push((line.to_string(), Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)));
                 }
                 continue;
@@ -292,9 +344,15 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
         chat_block = chat_block.title_bottom(Line::from(vec![
             Span::styled(format!(" {} ", status), Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC))
         ]));
-    } else if app.state == AppState::Processing {
+    } else if app.state != AppState::Idle {
+        let status_text = match app.state {
+            AppState::Thinking => " Thinking... ",
+            AppState::ExecutingInternal => " Executing Internal Tool... ",
+            AppState::WaitingForObservation => " Executing in Terminal... ",
+            AppState::Idle => unreachable!(),
+        };
         chat_block = chat_block.title_bottom(Line::from(vec![
-            Span::styled(" Processing... ", Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC))
+            Span::styled(status_text, Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC))
         ]));
     } else if !app.chat_auto_scroll {
         chat_block = chat_block.title_bottom(Line::from(vec![
@@ -324,7 +382,7 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     // Chat input
     let input_width = chunks[1].width.saturating_sub(2) as usize;
     let input_title = if app.focus == Focus::Chat {
-        if app.state == AppState::Processing {
+        if app.state != AppState::Idle {
             " Input (Locked - Ctrl+c to stop) "
         } else {
             " Input (Home/End/Del support) "
@@ -342,8 +400,8 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default()
         });
 
-    if app.state == AppState::Processing {
-        let p = Paragraph::new(Span::styled("(AI is thinking...)", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)))
+    if app.state != AppState::Idle {
+        let p = Paragraph::new(Span::styled("(AI is active...)", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)))
             .block(input_block);
         frame.render_widget(p, chunks[1]);
     } else {

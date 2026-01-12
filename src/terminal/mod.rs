@@ -223,6 +223,9 @@ async fn run_loop(
                     app.state = AppState::Idle;
                     app.status_message = None;
                 }
+                TuiEvent::AppStateUpdate(state) => {
+                    app.state = state;
+                }
                 TuiEvent::ConfigUpdate(new_config) => {
                     app.config = new_config.clone();
                     
@@ -319,7 +322,7 @@ async fn run_loop(
                                         continue;
                                     }
                                     KeyCode::Char('c') => {
-                                        if app.state == AppState::Processing {
+                                        if app.state != AppState::Idle {
                                             app.abort_current_task();
                                             continue;
                                         } else {

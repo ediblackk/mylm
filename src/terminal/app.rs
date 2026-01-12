@@ -1,7 +1,8 @@
 use crate::terminal::pty::PtyManager;
+use crate::executor::{CommandExecutor, allowlist::CommandAllowlist, safety::SafetyChecker};
 use crate::llm::chat::ChatMessage;
 use crate::llm::TokenUsage;
-use crate::agent::Agent;
+use crate::agent::{Agent, AgentDecision, ToolKind};
 use crate::terminal::session::SessionMonitor;
 use vt100::Parser;
 use std::sync::Arc;
@@ -10,10 +11,12 @@ use tokio::sync::Mutex;
 
 use tokio::sync::mpsc;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum AppState {
     Idle,
-    Processing,
+    Thinking,
+    ExecutingInternal,
+    WaitingForObservation,
 }
 
 #[derive(Debug)]
@@ -28,6 +31,7 @@ pub enum TuiEvent {
     SuggestCommand(String),
     ExecuteTerminalCommand(String, tokio::sync::oneshot::Sender<String>),
     GetTerminalScreen(tokio::sync::oneshot::Sender<String>),
+    AppStateUpdate(AppState),
     Tick,
 }
 
@@ -186,7 +190,10 @@ impl App {
     }
 
     pub fn submit_message(&mut self, event_tx: mpsc::UnboundedSender<TuiEvent>) {
-        if !self.chat_input.is_empty() && self.state == AppState::Idle {
+        if !self.chat_input.is_empty() {
+            // Abort any existing task before starting a new one
+            self.abort_current_task();
+            
             let input = self.chat_input.clone();
 
             // Handle Slash Commands
@@ -201,7 +208,7 @@ impl App {
             self.chat_input.clear();
             self.reset_cursor();
             self.input_scroll = 0;
-            self.state = AppState::Processing;
+            self.state = AppState::Thinking;
             // Reset scroll to bottom on new message
             self.chat_scroll = 0;
             self.chat_auto_scroll = true;
@@ -215,27 +222,29 @@ impl App {
             interrupt_flag.store(false, Ordering::SeqCst);
 
             let task = tokio::spawn(async move {
-                let mut agent = agent.lock().await;
-                
-                // Automatic condensation check
-                let final_history = if monitor_ratio > agent.llm_client.config().condense_threshold {
-                    match agent.condense_history(&history).await {
-                        Ok(new_history) => new_history,
-                        Err(_) => history,
-                    }
-                } else {
-                    history
-                };
+                {
+                    let mut agent_lock = agent.lock().await;
+                    
+                    // Automatic condensation check
+                    let final_history = if monitor_ratio > agent_lock.llm_client.config().condense_threshold {
+                        match agent_lock.condense_history(&history).await {
+                            Ok(new_history) => new_history,
+                            Err(_) => history,
+                        }
+                    } else {
+                        history
+                    };
 
-                let result = agent.run(final_history, event_tx_clone, interrupt_flag, auto_approve).await;
-                match result {
-                    Ok((response, usage)) => {
-                        let _ = event_tx.send(TuiEvent::AgentResponse(response, usage));
-                    }
-                    Err(e) => {
-                        let _ = event_tx.send(TuiEvent::AgentResponse(format!("Error: {}", e), TokenUsage::default()));
-                    }
+                    agent_lock.reset(final_history);
                 }
+                
+                run_agent_loop(
+                    agent,
+                    event_tx_clone,
+                    interrupt_flag,
+                    auto_approve,
+                    None
+                ).await;
             });
             
             self.active_task = Some(task);
@@ -247,6 +256,7 @@ impl App {
             task.abort();
             self.state = AppState::Idle;
             self.status_message = Some("⛔ Task interrupted by user.".to_string());
+            self.interrupt_flag.store(true, Ordering::SeqCst);
         }
     }
 
@@ -283,8 +293,6 @@ impl App {
                 if let Some(profile) = self.config.profiles.iter_mut().find(|p| p.name == active_profile_name) {
                     match key {
                         "model" => {
-                            // Model editing via /config is tricky because endpoints are shared.
-                            // For now, let's just not allow it here.
                             self.chat_history.push(ChatMessage::assistant("Model editing via /config is pending better endpoint management. Use /profile to switch.".to_string()));
                         }
                         "endpoint" => {
@@ -312,42 +320,42 @@ impl App {
                     return;
                 }
                 let command = parts[1..].join(" ");
-                self.chat_history.push(ChatMessage::user(&format!("/exec {}", command)));
                 
-                self.state = AppState::Processing;
+                self.state = AppState::WaitingForObservation;
                 let agent = self.agent.clone();
-                let history = self.chat_history.clone();
                 let event_tx_clone = event_tx.clone();
                 let interrupt_flag = self.interrupt_flag.clone();
                 interrupt_flag.store(false, Ordering::SeqCst);
 
+                let auto_approve = self.auto_approve;
                 let task = tokio::spawn(async move {
-                    let mut agent_lock = agent.lock().await;
-                    
-                    // 1. Execute the command using ShellTool
-                    let output = if let Some(tool) = agent_lock.tools.get("execute_command") {
-                        match tool.call(&command).await {
-                            Ok(out) => out,
-                            Err(e) => format!("Error executing command: {}", e),
-                        }
+                    // Manual execution via /exec
+                    // Safety check
+                    let executor = CommandExecutor::new(CommandAllowlist::new(), SafetyChecker::new());
+                    let last_obs = if let Err(e) = executor.check_safety(&command) {
+                        let err_msg = format!("Error: Safety Check Failed: {}", e);
+                        // Log failure to terminal
+                        let err_log = format!("\r\n\x1b[31m[Safety Check Failed]:\x1b[0m {}\r\n", e);
+                        let _ = event_tx_clone.send(TuiEvent::PtyWrite(err_log.into_bytes()));
+                        Some(err_msg)
                     } else {
-                        "Error: execute_command tool not found".to_string()
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let _ = event_tx_clone.send(TuiEvent::ExecuteTerminalCommand(command, tx));
+                        
+                        match rx.await {
+                            Ok(out) => Some(out),
+                            Err(_) => Some("Error: Execution failed".to_string()),
+                        }
                     };
 
-                    // 2. Add output to history
-                    let mut history_with_output = history.clone();
-                    history_with_output.push(ChatMessage::user(format!("Observation: {}", output)));
-                    
-                    // 3. Trigger agent to continue
-                    let result = agent_lock.run(history_with_output, event_tx_clone.clone(), interrupt_flag, true).await; // /exec is manual approval
-                    match result {
-                        Ok((response, usage)) => {
-                            let _ = event_tx_clone.send(TuiEvent::AgentResponse(response, usage));
-                        }
-                        Err(e) => {
-                            let _ = event_tx_clone.send(TuiEvent::AgentResponse(format!("Error: {}", e), TokenUsage::default()));
-                        }
-                    }
+                    // Resume agent loop with this observation
+                    run_agent_loop(
+                        agent,
+                        event_tx_clone,
+                        interrupt_flag,
+                        auto_approve, // Now correctly respects auto_approve for future steps!
+                        last_obs
+                    ).await;
                 });
                 self.active_task = Some(task);
             }
@@ -395,7 +403,10 @@ impl App {
         let output_price = self.output_price;
 
         self.session_monitor.add_usage(&usage, input_price, output_price);
-        self.state = AppState::Idle;
+        // CRITICAL BUG: This was setting state to Idle even if the agent loop was still running (e.g. after a Thought)
+        // We should probably NOT set Idle here, but rely on run_agent_loop to send AppStateUpdate(Idle)
+        // self.state = AppState::Idle; 
+        
         // Reset scroll to bottom when response arrives if we were already at bottom
         if self.chat_auto_scroll {
             self.chat_scroll = 0;
@@ -436,5 +447,128 @@ impl App {
         // Reset terminal scroll on input if auto-scroll is enabled or just to be helpful
         self.terminal_scroll = 0;
         self.terminal_auto_scroll = true;
+    }
+}
+
+async fn run_agent_loop(
+    agent: Arc<Mutex<Agent>>,
+    event_tx: mpsc::UnboundedSender<TuiEvent>,
+    interrupt_flag: Arc<AtomicBool>,
+    auto_approve: bool,
+    mut last_observation: Option<String>,
+) {
+    let mut loop_iteration = 0;
+    // Driver-level safety limit (should be higher than agent's max_iterations)
+    let max_driver_loops = 30;
+
+    loop {
+        loop_iteration += 1;
+        if loop_iteration > max_driver_loops {
+            let _ = event_tx.send(TuiEvent::AgentResponse(format!("Error: Driver-level safety limit reached ({} loops). Potential infinite loop detected.", max_driver_loops), TokenUsage::default()));
+            let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Idle));
+            break;
+        }
+
+        if interrupt_flag.load(Ordering::SeqCst) {
+            let _ = event_tx.send(TuiEvent::AgentResponse("⛔ Task interrupted by user.".to_string(), TokenUsage::default()));
+            let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Idle));
+            break;
+        }
+
+        let mut agent_lock = agent.lock().await;
+        let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Thinking));
+        let _ = event_tx.send(TuiEvent::StatusUpdate("Thinking...".to_string()));
+        
+        let step_res = agent_lock.step(last_observation.take()).await;
+        match step_res {
+            Ok(AgentDecision::Message(msg, usage)) => {
+                let has_pending = agent_lock.has_pending_decision();
+                let _ = event_tx.send(TuiEvent::AgentResponse(msg, usage));
+                if has_pending {
+                    drop(agent_lock);
+                    continue;
+                }
+                let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Idle));
+                break;
+            }
+            Ok(AgentDecision::Action { tool, args, kind }) => {
+                let _ = event_tx.send(TuiEvent::StatusUpdate(format!("Tool: '{}'", tool)));
+                
+                if kind == ToolKind::Terminal {
+                    let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::WaitingForObservation));
+                    
+                    // Prepare command for execution
+                    let cmd = if tool == "execute_command" {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&args) {
+                            v.get("command").and_then(|c| c.as_str())
+                             .or_else(|| v.get("args").and_then(|c| c.as_str()))
+                             .unwrap_or(&args).to_string()
+                        } else {
+                            args.clone()
+                        }
+                    } else {
+                        format!("{} {}", tool, args)
+                    };
+
+                    // Safety check
+                    let executor = CommandExecutor::new(CommandAllowlist::new(), SafetyChecker::new());
+                    if let Err(e) = executor.check_safety(&cmd) {
+                        last_observation = Some(format!("Error: Safety Check Failed: {}", e));
+                        let err_log = format!("\r\n\x1b[31m[Safety Check Failed]:\x1b[0m {}\r\n", e);
+                        let _ = event_tx.send(TuiEvent::PtyWrite(err_log.into_bytes()));
+                        drop(agent_lock);
+                        continue;
+                    }
+
+                    if !auto_approve {
+                        let _ = event_tx.send(TuiEvent::SuggestCommand(cmd));
+                        let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Idle));
+                        break; // Stop and wait for manual approval
+                    }
+
+                    // Execute visibly
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let _ = event_tx.send(TuiEvent::ExecuteTerminalCommand(cmd, tx));
+                    
+                    // Drop lock before awaiting
+                    drop(agent_lock);
+
+                    // Wait for result
+                    match rx.await {
+                        Ok(output) => last_observation = Some(output),
+                        Err(_) => {
+                            last_observation = Some("Error: Terminal command execution failed (channel closed)".to_string());
+                        }
+                    }
+                } else {
+                    // Internal tool
+                    let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::ExecutingInternal));
+                    let observation = match agent_lock.tools.get(&tool) {
+                        Some(t) => match t.call(&args).await {
+                            Ok(output) => output,
+                            Err(e) => format!("Error: {}", e),
+                        },
+                        None => format!("Error: Tool '{}' not found.", tool),
+                    };
+                    
+                    // Log to PTY
+                    let obs_log = format!("\x1b[32m[Observation]:\x1b[0m {}\r\n", observation.trim());
+                    let _ = event_tx.send(TuiEvent::PtyWrite(obs_log.into_bytes()));
+                    
+                    last_observation = Some(observation);
+                    drop(agent_lock);
+                }
+            }
+            Ok(AgentDecision::Error(e)) => {
+                let _ = event_tx.send(TuiEvent::AgentResponse(format!("Error: {}", e), TokenUsage::default()));
+                let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Idle));
+                break;
+            }
+            Err(e) => {
+                let _ = event_tx.send(TuiEvent::AgentResponse(format!("Error: {}", e), TokenUsage::default()));
+                let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Idle));
+                break;
+            }
+        }
     }
 }

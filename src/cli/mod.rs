@@ -102,7 +102,7 @@ pub enum ConfigCommand {
     /// Edit configuration files
     Edit {
         #[command(subcommand)]
-        cmd: EditCommand,
+        cmd: Option<EditCommand>,
     },
 
     /// Select active profile
