@@ -105,6 +105,9 @@ pub struct MemoryConfig {
     /// Whether to inject relevant memories into the context
     #[serde(default = "default_true")]
     pub auto_context: bool,
+    /// Whether to automatically categorize new memories
+    #[serde(default = "default_true")]
+    pub auto_categorize: bool,
 }
 
 impl Default for MemoryConfig {
@@ -112,6 +115,7 @@ impl Default for MemoryConfig {
         Self {
             auto_record: true,
             auto_context: true,
+            auto_categorize: true,
         }
     }
 }
@@ -357,6 +361,7 @@ impl Config {
                 format!("Verbose Mode: {}", if self.verbose_mode { "On" } else { "Off" }),
                 format!("Auto-approve:  {}", if self.commands.allow_execution { "Enabled" } else { "Disabled" }),
                 format!("Auto-Memory:   {}", if self.memory.auto_record { "Enabled" } else { "Disabled" }),
+                format!("Auto-Categorize: {}", if self.memory.auto_categorize { "Enabled" } else { "Disabled" }),
                 "⬅️  Back".to_string(),
             ];
 
@@ -382,6 +387,10 @@ impl Config {
                 3 => {
                     self.memory.auto_record = !self.memory.auto_record;
                     self.memory.auto_context = self.memory.auto_record;
+                    self.memory.auto_categorize = self.memory.auto_record;
+                }
+                4 => {
+                    self.memory.auto_categorize = !self.memory.auto_categorize;
                 }
                 _ => break,
             }

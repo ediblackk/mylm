@@ -31,6 +31,12 @@ async fn main() -> Result<()> {
     // Parse command-line arguments
     let cli = Cli::parse();
 
+    // Task 1: Splash Screen Animation
+    // Show splash screen only if we're entering Hub (no command) or TUI
+    if cli.command.is_none() && cli.query.is_empty() {
+        show_splash_screen().await?;
+    }
+
     // Handle version separately if no other args provided or explicitly requested
     if cli.version {
         let blue = Style::new().blue();
@@ -142,7 +148,7 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
         }
 
         Some(Commands::Interactive) => {
-            terminal::run_tui(None).await?;
+            terminal::run_tui(None, None, None, None).await?;
         }
 
         Some(Commands::Memory { cmd }) => {
@@ -236,10 +242,16 @@ async fn handle_hub(config: &Config, formatter: &OutputFormatter) -> Result<()> 
     loop {
         let choice = crate::cli::hub::show_hub(config).await?;
         match choice {
+            HubChoice::PopTerminal => {
+                let context = TerminalContext::collect().await;
+                let term_ctx = context.terminal.clone();
+                terminal::run_tui(None, None, Some(context), Some(term_ctx)).await?;
+                break;
+            }
             HubChoice::ResumeSession => {
                 match App::load_session() {
                     Ok(history) => {
-                        terminal::run_tui(Some(history)).await?;
+                        terminal::run_tui(Some(history), None, None, None).await?;
                         break;
                     }
                     Err(e) => {
@@ -248,7 +260,7 @@ async fn handle_hub(config: &Config, formatter: &OutputFormatter) -> Result<()> 
                 }
             }
             HubChoice::StartTui => {
-                terminal::run_tui(None).await?;
+                terminal::run_tui(None, None, None, None).await?;
                 break;
             }
             HubChoice::QuickQuery => {
@@ -437,12 +449,13 @@ async fn handle_one_shot(
 
     // Load tools
     let tools: Vec<Box<dyn crate::agent::Tool>> = vec![
-        Box::new(crate::agent::tools::shell::ShellTool::new(executor, ctx.clone(), event_tx.clone(), Some(store.clone()), None)) as Box<dyn crate::agent::Tool>,
+        Box::new(crate::agent::tools::shell::ShellTool::new(executor, ctx.clone(), event_tx.clone(), Some(store.clone()), Some(Arc::new(crate::memory::MemoryCategorizer::new(client.clone(), store.clone()))), None)) as Box<dyn crate::agent::Tool>,
         Box::new(crate::agent::tools::web_search::WebSearchTool::new(config.web_search.clone())) as Box<dyn crate::agent::Tool>,
         Box::new(crate::agent::tools::memory::MemoryTool::new(store.clone())) as Box<dyn crate::agent::Tool>,
     ];
 
-    let mut agent = crate::agent::Agent::new_with_iterations(client, tools, system_prompt, 10, Some(store));
+    let categorizer = Arc::new(crate::memory::categorizer::MemoryCategorizer::new(client.clone(), store.clone()));
+    let mut agent = crate::agent::Agent::new_with_iterations(client, tools, system_prompt, 10, Some(store), Some(categorizer));
     
     let messages = vec![
         crate::llm::chat::ChatMessage::user(query.to_string()),
@@ -470,5 +483,38 @@ async fn handle_one_shot(
         }
     }
 
+    Ok(())
+}
+
+/// Show a brief loading animation
+async fn show_splash_screen() -> Result<()> {
+    use std::io::{Write, stdout};
+    use tokio::time::{sleep, Duration};
+
+    let blue = Style::new().blue().bold();
+    let frames = ["|", "/", "-", "\\"];
+    let start = std::time::Instant::now();
+    let duration = Duration::from_millis(400);
+
+    let mut i = 0;
+    while start.elapsed() < duration {
+        let frame = frames[i % frames.len()];
+        let progress = (start.elapsed().as_millis() as f64 / duration.as_millis() as f64 * 20.0) as usize;
+        let bar = "=".repeat(progress);
+        let spaces = " ".repeat(20 - progress);
+
+        print!(
+            "\r{} {} [{}={}{}]",
+            blue.apply_to("==== LOADING MYLM HUB"),
+            frame,
+            bar,
+            if progress < 20 { ">" } else { "=" },
+            spaces
+        );
+        stdout().flush()?;
+        sleep(Duration::from_millis(40)).await;
+        i += 1;
+    }
+    println!("\r{} [====================] ====", blue.apply_to("==== LOADING MYLM HUB"));
     Ok(())
 }

@@ -1,157 +1,212 @@
-# mylm (My Language Model)
+# mylm — Terminal AI, done right
 
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Terminal AI](https://img.shields.io/badge/Terminal-AI-blue.svg)](#)
 
-**mylm** is a high-performance, globally available **Terminal AI Assistant** designed for power users of the command line. It provides a blazing-fast, Rust-powered interface to interact with your favorite LLMs while maintaining deep awareness of your terminal context.
+**mylm (My Language Model)** is a high‑performance **Terminal AI Assistant** built for developers and power users who live in the command line.
 
-Available as the simple `ai` command, it bridges the gap between natural language and shell execution.
+It is not a chatbot wrapper.
+It is not a toy CLI.
 
-> **Note on LLM Providers**: This application has been primarily tested and optimized for the **Google Gemini** API (specifically `gemini-3-pro-preview`). While **OpenAI**, **Anthropic**, and other providers are supported in the configuration, they may require further tuning. Full support is planned for future releases.
+`mylm` is a **context‑aware, agentic terminal companion** that understands your environment, reasons about tasks, and safely bridges natural language with shell execution.
 
----
-
-## 🚀 Key Features
-
-- **Blazing Fast Performance**: Built with Rust for near-instant startup and minimal resource footprint.
-- **Autonomous Agentic Loop**: A powerful interactive mode where the AI can think, plan, and execute multi-step tasks autonomously.
-- **Live Web Search & Crawling**: Integrated tools allow the AI to search the web and crawl websites in real-time to gather the most up-to-date information.
-- **Deep Terminal Context**: Automatically gathers relevant environment data—current directory, Git status, and system specs—to provide highly relevant answers.
-- **Smart Command Execution**: Analyze, validate, and execute shell commands suggested by the AI with built-in safety guardrails.
-- **Multi-Provider & Endpoint Support**: Seamlessly switch between local models (**Ollama**, **LM Studio**) and cloud providers (**OpenAI**, **Anthropic**, **Google Gemini**) using a unified interface.
-- **Interactive Hub**: A powerful TUI (Terminal User Interface) to manage sessions, resume past conversations, and configure your workspace.
-- **Persistent Memory (RAG)**: Store and retrieve local knowledge using integrated vector search.
+Installed as the simple `ai` command, it integrates directly into your workflow instead of pulling you out of it.
 
 ---
 
-## 🛡 Security Philosophy: Build from Source
+## Why mylm
 
-`mylm` is intentionally distributed as source code to be compiled locally. Given its **ultra-deep integration** into your operating system and terminal, we believe users should have the opportunity to:
-1. **Audit the codebase**: Use an AI in your IDE or manual review to scan for malicious patterns.
-2. **Verify Dependencies**: Inspect the `Cargo.toml` and lockfile before execution.
-3. **Control the Build**: Ensure the binary you run is exactly what you see in the source.
+Most "AI CLI tools" today are thin API frontends:
 
-This "transparency-first" approach ensures that you remain the ultimate authority over what runs in your terminal.
+* stateless
+* slow to start
+* blind to your system
+* unsafe around command execution
+
+**mylm is different by design.**
+
+It treats the terminal as a *first‑class environment*, not a text box.
 
 ---
 
-## 🛠 Prerequisites
+## Core Capabilities
 
-### Supported Platforms
-- **Linux**: Primary focus (Optimized for performance).
-- **macOS**: Fully supported.
-- **Windows**: Support is currently in development.
+### ⚡ Blazing‑Fast, Native Performance
 
-### Build Dependencies (Linux)
-Beyond Rust and Cargo, ensure the following system libraries and tools are installed for compiling native dependencies and optimizing build times:
+* Written in **Rust** for instant startup and low memory usage
+* No Python runtimes, no background daemons, no surprises
 
-**Ubuntu/Debian:**
+### 🧠 Agentic Think‑Plan‑Execute Loop
+
+* Interactive mode where the AI can:
+
+  * reason about a problem
+  * plan multi‑step solutions
+  * execute validated shell commands
+* Designed for real work, not demos
+
+### 🖥 Deep Terminal Context Awareness
+
+`mylm` automatically understands:
+
+* current working directory
+* Git repository status
+* system information
+* execution history
+
+This context is continuously fed into the model to produce **relevant, actionable answers**.
+
+### 🔐 Smart & Guarded Command Execution
+
+* Commands proposed by the AI are **analyzed before execution**
+* Optional dry‑run mode for zero‑risk inspection
+* You stay in control at every step
+
+### 🌐 Live Web Search & Crawling
+
+* Real‑time search for up‑to‑date information
+* Website crawling for deeper technical analysis
+* No stale training‑data hallucinations
+
+### 🔁 Multi‑Provider & Local Model Support
+
+One unified interface for:
+
+* **Local models**: Ollama, LM Studio
+* **Cloud providers**: Google Gemini, OpenAI, Anthropic
+
+Switch providers or endpoints without changing your workflow.
+
+### 🗂 Persistent Memory (RAG)
+
+* Local vector database for long‑term knowledge
+* Store project notes, decisions, and references
+* Retrieve them naturally during future sessions
+
+### 🧭 Interactive TUI Hub
+
+* Session management
+* Resume past conversations
+* Configuration and profile switching
+
+Built with terminal UX in mind — clean, fast, and predictable.
+
+---
+
+## Security Philosophy — Build From Source
+
+`mylm` is intentionally distributed **as source code only**.
+
+This tool integrates deeply with your operating system and shell. That level of power demands transparency.
+
+You are encouraged to:
+
+1. **Audit the code** (manually or with AI assistance)
+2. **Inspect dependencies** via `Cargo.toml` and the lockfile
+3. **Build locally**, knowing exactly what binary you are running
+
+There are no hidden installers, no prebuilt binaries, and no silent updates.
+
+You stay in control.
+
+---
+
+## Supported Platforms
+
+* **Linux** — primary target, fully optimized
+* **macOS** — fully supported
+* **Windows** — in active development
+
+---
+
+## Installation (Recommended)
+
+### Build From Source
+
 ```bash
-sudo apt-get install pkg-config libssl-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev clang sccache
+git clone https://github.com/ediblackk/mylm.git
+cd mylm
+chmod +x install.sh
+./install.sh
 ```
 
-**Fedora:**
-```bash
-sudo dnf install pkgconf-pkg-config openssl-devel libxcb-devel clang sccache
-```
+### What the installer does
 
-**Arch Linux:**
-```bash
-sudo pacman -S pkgconf openssl libxcb clang sccache
-```
+* Detects your Linux distribution
+* Installs missing system dependencies
+* Builds the project locally
+* Sets up the `ai` command
+* Preserves existing configuration on updates
+* Enables `sccache` when available
 
-*Note: `sccache` is highly recommended for faster subsequent builds.*
-
----
-
-## 📦 Installation
-
-### Local Installation (Recommended)
-Since this project is designed to be built from source, we recommend cloning the repository and running the included installation script. This script handles dependency checks, building the binary, and setting up the environment.
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/ediblackk/mylm.git
-   cd mylm
-   ```
-
-2. **Run the installation script:**
-   ```bash
-   chmod +x install.sh
-   ./install.sh
-   ```
-
-   > **Note:** Currently, this project is in active development. `install.sh` will automatically invoke `./dev-install.sh` to produce a **debug build**. This ensures faster compilation times for frequent updates. Once the core features are stable, `install.sh` will default back to optimized release builds.
-
-   **What the script does:**
-1. **Dependency Check**: Automatically detects your Linux distribution and installs required build tools (`clang`, `pkg-config`, `openssl`, etc.) and Rust/Cargo if missing.
-2. **Version Awareness**: Compares your installed version with the current source to suggest updates or skip redundant builds.
-3. **Fresh Installation**: Performs a clean build, sets up the `ai` alias, and runs the configuration wizard.
-4. **Seamless Update**: Updates the binary while preserving your existing profiles, configuration, and aliases.
-5. **Optimization**: Configures `sccache` support if available for lightning-fast subsequent compilations.
+> During active development, the installer defaults to **debug builds** for faster iteration. Release builds will become the default once the core feature set stabilizes.
 
 ---
 
-## 📖 Usage Guide
+## Usage
 
-### 1. The Interactive Hub & Agentic Mode
-Start the main interaction menu to resume sessions or explore features:
+### Start the Interactive Hub
+
 ```bash
 ai
 ```
-Or jump directly into the full **Agentic TUI**:
+
+### Launch Agentic Interactive Mode
+
 ```bash
 ai interactive
 ```
 
-The application features a **guided menu-style interface** that makes navigation intuitive and user-friendly. The menu system provides clear options and visual feedback, helping users quickly access different features and capabilities.
+In this mode, `mylm` operates in a structured **Think → Plan → Execute** loop and can:
 
-In this mode, `mylm` operates in a "Think-Plan-Execute" loop. It can:
-- **Run Shell Commands**: Safely execute terminal commands to solve problems.
-- **Web Search**: Query the internet for real-time data using integrated search engines.
-- **Crawl Websites**: Extract content from specific URLs to provide deep analysis.
-- **Access Memory**: Store and retrieve information from its persistent vector database.
+* run shell commands
+* search the web
+* crawl websites
+* read and write to persistent memory
 
-> **App Screenshots**: You can add screenshots of the application interface to showcase the guided menu-style design and terminal user interface. Place them in a `docs/images/` directory and reference them here.
+### Direct Queries
 
-### 2. Direct Queries
-Ask questions directly from your shell. Your current context is automatically analyzed:
 ```bash
-ai "how do I revert the last three git commits safely?"
+ai "how do I safely revert the last three git commits?"
 ```
 
-### 3. Smart Command Execution
-Analyze and run a specific command with AI safety checks:
+### Command Analysis & Execution
+
 ```bash
 ai execute "find . -name '*.tmp' -exec rm {} +"
 ```
 
-### 4. Switching Providers
-Override your default model/endpoint on the fly:
+### Switch Providers on the Fly
+
 ```bash
-ai -e openai "Write a python script to parse this directory's logs"
+ai -e openai "write a python script to parse these logs"
 ```
 
 ---
 
-## ⚙️ Configuration
+## Configuration
 
-`mylm` uses a YAML-based configuration located at `~/.config/mylm/mylm.yaml`.
+Configuration lives at:
 
-### Managing Profiles
-You can manage your endpoints and prompts interactively:
-```bash
-ai config edit prompt  # Edit your global AI instructions
-ai config select       # Switch between configured provider profiles
+```text
+~/.config/mylm/mylm.yaml
 ```
 
-### Example Profile Structure
+### Manage Profiles
+
+```bash
+ai config edit prompt
+ai config select
+```
+
+### Example Configuration
+
 ```yaml
 default_endpoint: local-ollama
 endpoints:
   - name: local-ollama
-    provider: openai # (Ollama supports OpenAI-compatible API)
+    provider: openai
     base_url: http://localhost:11434/v1
     model: llama3.2
     api_key: none
@@ -164,44 +219,46 @@ endpoints:
 
 ---
 
-## 🗺️ Roadmap & Future Vision
+## Roadmap
 
-### Planned Enhancements
-
-- **Background Tasks with Job/Queue Manager**: Implement a robust background task processing system with job queuing and management capabilities for handling long-running operations asynchronously.
-
-- **Multi-Server Operations**: Integrate support for controlling multiple slave applications from a local master application, enabling distributed AI operations and remote control of AI instances across different servers.
-
----
-
-## 🛡️ License & Safety
-
-Distributed under the **MIT License**.
-
-**Note on Command Execution:** While `mylm` includes safety analysis, always review commands before execution. Use the `--dry-run` flag with the `execute` subcommand to see what would happen without making changes.
+* Background jobs & task queue
+* Multi‑server orchestration (master → agents)
+* Windows native support
+* Extended TUI workflows
 
 ---
 
-## 🔍 SEO Keywords
-Terminal AI assistant, CLI LLM, Rust AI tool, Ollama terminal, OpenAI CLI, Local LLM assistant, Command line AI, Anthropic Claude CLI, Google Gemini terminal, Developer productivity tools.
+## License
+
+MIT License
 
 ---
 
-### 🌟 Special Thanks & Acknowledgements
-*   **The Rust Team**: For the language that makes this possible.
-*   **VSCode Team**: For the editor environment.
-*   **Google DeepMind & The Gemini Team (Worldwide)**: For the intelligence powering the agent (`gemini-3-pro-preview`).
-*   **Linux & Git**: For the foundation of our workflow.
-*   **Open Source Community**: Special thanks to the authors of `ratatui`, `tokio`, `portable-pty`, `serde`, `clap`, `lancedb`, and all other dependencies used in this project.
+## Acknowledgements & Ecosystem Respect
 
-**Global AI Innovations:**
-We acknowledge the global community of researchers and engineers advancing the frontier of intelligence:
+This project exists thanks to the work of many open‑source and research communities.
 
-*   **OpenAI**: Creators of ChatGPT and GPT-5.
-*   **Anthropic**: Creators of Claude and Constitutional AI.
-*   **DeepSeek**: Pushing boundaries in efficient AI and coding.
-*   **Meta AI**: For Llama and open research.
-*   **Hugging Face**: The democratizing force of the AI community.
-*   **Zhipu AI**: Creators of the GLM (General Language Model) series.
-*   **Moonshot AI**: For Kimi and long-context breakthroughs.
-*   **Minimax**: For creators of Minimax M2.1 and free usage
+### Core Foundations
+
+* **Rust** — systems programming without compromise
+* **Linux & Git** — the backbone of modern development
+* **ratatui, tokio, serde, clap, portable‑pty, lancedb** — and many more
+
+### AI Research & Model Providers
+
+Mentioned respectfully for attribution, compatibility, and ecosystem context:
+
+* **Google DeepMind** — Gemini models
+* **OpenAI** — GPT models and tooling
+* **Anthropic** — Claude and Constitutional AI
+* **Meta AI** — Llama models
+* **Hugging Face** — open ML infrastructure
+* **DeepSeek**, **Zhipu AI**, **Moonshot AI**, **Minimax** — advancing efficient and accessible language models
+
+No affiliation or endorsement is implied.
+
+---
+
+## Keywords
+
+Terminal AI, CLI LLM, Rust AI tool, Local LLM assistant, Ollama CLI, OpenAI terminal, Anthropic Claude CLI, Gemini terminal, Developer productivity, Command‑line AI

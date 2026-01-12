@@ -11,7 +11,7 @@ pub struct PtyManager {
 }
 
 impl PtyManager {
-    pub fn new(tx: mpsc::UnboundedSender<Vec<u8>>) -> Result<Self> {
+    pub fn new(tx: mpsc::UnboundedSender<Vec<u8>>, cwd: Option<std::path::PathBuf>) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows: 24,
@@ -26,7 +26,10 @@ impl PtyManager {
             "bash"
         };
 
-        let cmd = CommandBuilder::new(shell);
+        let mut cmd = CommandBuilder::new(shell);
+        if let Some(cwd) = cwd {
+            cmd.cwd(cwd);
+        }
         let _child = pair.slave.spawn_command(cmd)?;
 
         // Move the reader to a separate thread
@@ -68,8 +71,8 @@ impl PtyManager {
     }
 }
 
-pub fn spawn_pty() -> Result<(PtyManager, mpsc::UnboundedReceiver<Vec<u8>>)> {
+pub fn spawn_pty(cwd: Option<std::path::PathBuf>) -> Result<(PtyManager, mpsc::UnboundedReceiver<Vec<u8>>)> {
     let (tx, rx) = mpsc::unbounded_channel();
-    let manager = PtyManager::new(tx)?;
+    let manager = PtyManager::new(tx, cwd)?;
     Ok((manager, rx))
 }

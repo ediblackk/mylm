@@ -136,12 +136,16 @@ impl TerminalContext {
             ctx.system = info;
         }
 
-        if let Ok(info) = term_info {
-            ctx.terminal = info;
-        }
-
         // Get current working directory
         ctx.cwd = std::env::current_dir().ok();
+
+        if let Ok(info) = term_info {
+            ctx.terminal = info;
+        } else if let Some(ref cwd) = ctx.cwd {
+            // Fallback: update terminal info CWD if collection failed
+            ctx.terminal.current_dir = cwd.clone();
+            ctx.terminal.current_dir_str = cwd.to_string_lossy().to_string();
+        }
 
         // Get user and hostname
         ctx.user = std::env::var("USER").ok().or_else(|| {
@@ -278,5 +282,30 @@ impl TerminalContext {
         }
 
         summary
+    }
+    /// Collect all context information synchronously (best effort, non-blocking parts)
+    pub fn collect_sync() -> Self {
+        let mut ctx = Self::new();
+        
+        // Use std::env for quick sync access
+        ctx.cwd = std::env::current_dir().ok();
+        ctx.user = std::env::var("USER").ok();
+        ctx.os = Some(format!("{} {}", std::env::consts::OS, std::env::consts::ARCH));
+
+        // Note: git and system info are skipped or minimal in sync version
+        // to avoid blocking the main thread significantly.
+        // We can try a quick git branch if we really want to.
+        if let Some(cwd) = ctx.cwd.as_deref() {
+            if let Ok(repo) = git2::Repository::discover(cwd) {
+                if let Ok(head) = repo.head() {
+                    ctx.git.is_repo = true;
+                    if let Some(shorthand) = head.shorthand() {
+                        ctx.git.branch = Some(shorthand.to_string());
+                    }
+                }
+            }
+        }
+
+        ctx
     }
 }

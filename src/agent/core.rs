@@ -1,7 +1,7 @@
 //! Agent Core Implementation
 use crate::llm::{LlmClient, chat::{ChatMessage, ChatRequest, MessageRole}, TokenUsage};
 use crate::agent::tool::{Tool, ToolKind};
-use crate::memory::VectorStore;
+use crate::memory::{VectorStore, MemoryCategorizer};
 use std::error::Error as StdError;
 use serde_json;
 use std::sync::Arc;
@@ -30,6 +30,7 @@ pub struct Agent {
     pub max_iterations: usize,
     pub system_prompt_prefix: String,
     pub memory_store: Option<Arc<VectorStore>>,
+    pub categorizer: Option<Arc<MemoryCategorizer>>,
     pub session_id: String,
     
     // State maintained between steps
@@ -50,6 +51,7 @@ impl Agent {
         system_prompt_prefix: String,
         max_iterations: usize,
         memory_store: Option<Arc<VectorStore>>,
+        categorizer: Option<Arc<MemoryCategorizer>>,
     ) -> Self {
         let mut tool_map = HashMap::new();
         for tool in tools {
@@ -63,6 +65,7 @@ impl Agent {
             tools: tool_map,
             max_iterations,
             system_prompt_prefix,
+            categorizer,
             memory_store,
             session_id,
             history: Vec::new(),
@@ -322,8 +325,18 @@ impl Agent {
                         return Ok((truncated.trim().to_string(), self.total_usage.clone()));
                     }
 
+                    // Extract arguments from JSON if necessary (for tool calling API)
+                    let processed_args = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&args) {
+                        v.get("args")
+                         .and_then(|a| a.as_str())
+                         .map(|s| s.to_string())
+                         .unwrap_or(args.clone())
+                    } else {
+                        args.clone()
+                    };
+
                     let observation = match self.tools.get(&tool) {
-                        Some(t) => match t.call(&args).await {
+                        Some(t) => match t.call(&processed_args).await {
                             Ok(output) => output,
                             Err(e) => format!("Error: {}", e),
                         },
@@ -332,7 +345,7 @@ impl Agent {
 
                     if kind == ToolKind::Internal {
                         let obs_log = format!("\x1b[32m[Observation]:\x1b[0m {}\r\n", observation.trim());
-                        let _ = event_tx.send(crate::terminal::app::TuiEvent::PtyWrite(obs_log.into_bytes()));
+                        let _ = event_tx.send(crate::terminal::app::TuiEvent::InternalObservation(obs_log.into_bytes()));
                     }
 
                     last_observation = Some(observation);
@@ -496,4 +509,16 @@ impl Agent {
         context.push_str("\nUse this context to inform your actions and avoid repeating mistakes.");
         context
     }
+
+    /// Automatically categorize a newly added memory.
+    pub async fn auto_categorize(&self, memory_id: i64, content: &str) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        if let (Some(categorizer), Some(store)) = (&self.categorizer, &self.memory_store) {
+            let category_id = categorizer.categorize_memory(content).await?;
+            store.update_memory_category(memory_id, category_id.clone()).await?;
+            // Update summary for the category
+            let _ = categorizer.update_category_summary(&category_id).await;
+        }
+        Ok(())
+    }
 }
+

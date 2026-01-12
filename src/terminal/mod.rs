@@ -26,7 +26,7 @@ use std::{io, time::Duration};
 use tokio::sync::mpsc;
 use std::sync::atomic::Ordering;
 
-pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>) -> Result<()> {
+pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>, initial_query: Option<String>, initial_context: Option<TerminalContext>, initial_terminal_context: Option<crate::context::terminal::TerminalContext>) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -53,7 +53,11 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>) -> Result<()> {
         CommandAllowlist::new(),
         SafetyChecker::new(),
     ));
-    let context = TerminalContext::collect().await;
+    let context = if let Some(ctx) = initial_context {
+        ctx
+    } else {
+        TerminalContext::collect().await
+    };
     
     let data_dir = dirs::data_dir()
         .context("Could not find data directory")?
@@ -61,6 +65,7 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>) -> Result<()> {
         .join("memory");
     std::fs::create_dir_all(&data_dir)?;
     let store = std::sync::Arc::new(crate::memory::VectorStore::new(data_dir.to_str().unwrap()).await?);
+    let categorizer = std::sync::Arc::new(crate::memory::categorizer::MemoryCategorizer::new(llm_client.clone(), store.clone()));
 
     // Build hierarchical system prompt
     let prompt_name = config.get_active_profile()
@@ -73,7 +78,7 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>) -> Result<()> {
 
     // Setup Tools
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
-    let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone(), Some(store.clone()), None);
+    let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone(), Some(store.clone()), Some(categorizer.clone()), None);
     let memory_tool = MemoryTool::new(store.clone());
     let web_search_tool = WebSearchTool::new(config.web_search.clone());
     let crawl_tool = CrawlTool::new();
@@ -84,15 +89,26 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>) -> Result<()> {
     tools.push(Box::new(crawl_tool) as Box<dyn Tool>);
 
     // Create Agent
-    let agent = Agent::new_with_iterations(llm_client, tools, system_prompt, 10, Some(store.clone()));
+    let agent = Agent::new_with_iterations(llm_client, tools, system_prompt, 10, Some(store.clone()), Some(categorizer.clone()));
 
-    // Setup PTY
-    let (pty_manager, mut pty_rx) = spawn_pty()?;
+    // Setup PTY with context CWD
+    let (pty_manager, mut pty_rx) = spawn_pty(context.cwd.clone())?;
 
     // Create app state
     let mut app = App::new(pty_manager, agent, config);
+
+    // Store initial terminal context to be injected after PTY setup
+    app.pending_terminal_context = initial_terminal_context;
+
     if let Some(history) = initial_history {
         app.chat_history = history;
+    }
+
+    if let Some(query) = initial_query {
+        app.chat_input = query;
+        app.cursor_position = app.chat_input.chars().count();
+        app.focus = Focus::Chat;
+        app.submit_message(event_tx.clone());
     }
 
     // Spawn PTY listener
@@ -204,6 +220,10 @@ async fn run_loop(
                     app.terminal_parser.process(&data);
                     let _ = app.pty_manager.write_all(&data);
                 }
+                TuiEvent::InternalObservation(data) => {
+                    // Send ONLY to the parser for rendering, NOT to the PTY
+                    app.terminal_parser.process(&data);
+                }
                 TuiEvent::AgentResponse(response, usage) => {
                     app.add_assistant_message(response, usage);
                     app.status_message = None;
@@ -261,7 +281,8 @@ async fn run_loop(
                                 
                                 let mut tools: Vec<Box<dyn Tool>> = Vec::new();
                                 let agent_session_id = agent.session_id.clone();
-                                let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone(), Some(store.clone()), Some(agent_session_id));
+                                let categorizer = agent.categorizer.as_ref().cloned();
+                                let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone(), Some(store.clone()), categorizer, Some(agent_session_id));
                                 let memory_tool = MemoryTool::new(store.clone());
                                 let web_search_tool = WebSearchTool::new(new_config.web_search.clone());
                                 let crawl_tool = CrawlTool::new();
@@ -311,7 +332,33 @@ async fn run_loop(
                     }
                     let _ = tx.send(content);
                 }
-                TuiEvent::Tick => {}
+                TuiEvent::Tick => {
+                    app.tick_count += 1;
+                    // Inject terminal context after a few ticks to let PTY settle
+                    // Seed PTY history after a short delay to let shell init scripts run
+                    if app.tick_count == 10 {
+                        if let Some(ctx) = app.pending_terminal_context.take() {
+                            let mut pty_data = String::new();
+                            // Use \r to ensure the shell processes the line
+                            pty_data.push_str("\r# --- mylm terminal context ---\r");
+                            pty_data.push_str(&format!("# CWD: {}\r", ctx.current_dir_str));
+                            pty_data.push_str("# Directory Listing:\r");
+                            
+                            for line in ctx.directory_listing.lines() {
+                                pty_data.push_str(&format!("#   {}\r", line));
+                            }
+                            pty_data.push_str("# -----------------------------\r");
+                            
+                            // Write directly to PTY input. This will appear as commented text in the shell.
+                            // We use \r to simulate hitting enter if we want it to clear,
+                            // but actually just writing it should be enough to show it in the scrollback.
+                            // However, writing to PTY input usually means it's waiting for user to press enter.
+                            // If we want it to just "appear" without being an active command line,
+                            // we can try to write it as part of the startup sequence.
+                            let _ = app.pty_manager.write_all(pty_data.as_bytes());
+                        }
+                    }
+                }
                 TuiEvent::Input(ev) => {
                     match ev {
                         CrosstermEvent::Key(key) => {
@@ -387,7 +434,7 @@ async fn run_loop(
                                     }
                                 }
                                 Focus::Chat => {
-                                    if app.state == AppState::Idle {
+                                    if app.state == AppState::Idle || app.state == AppState::WaitingForUser {
                                         match key.code {
                                             KeyCode::Enter => {
                                                 app.submit_message(event_tx.clone());

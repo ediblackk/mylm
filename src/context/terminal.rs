@@ -59,29 +59,55 @@ pub struct NetworkInfo {
 }
 
 impl TerminalContext {
+    fn log_debug(msg: &str) {
+        if let Some(home) = dirs::home_dir() {
+            let log_dir = home.join(".config").join("mylm");
+            let _ = std::fs::create_dir_all(&log_dir);
+            let log_file = log_dir.join("debug.log");
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_file)
+            {
+                use std::io::Write;
+                let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                let _ = writeln!(file, "[{}] {}", timestamp, msg);
+            }
+        }
+    }
+
     /// Create a new TerminalContext by collecting all information
     pub fn new() -> Result<Self> {
         let current_dir = env::current_dir()
-            .context("Failed to get current directory")?;
+            .unwrap_or_else(|_| {
+                Self::log_debug("Failed to get current_dir, falling back to '.'");
+                PathBuf::from(".")
+            });
 
         let current_dir_str = current_dir
             .to_string_lossy()
             .to_string();
 
-        // Get directory listing
-        let directory_listing = Self::get_directory_listing(&current_dir)?;
+        Self::log_debug(&format!("Collecting context for CWD: {}", current_dir_str));
 
-        // Get command history from shell
-        let command_history = Self::get_shell_history()?;
+        // Get directory listing (fall back to error message if fails)
+        let directory_listing = Self::get_directory_listing(&current_dir)
+            .unwrap_or_else(|e| {
+                Self::log_debug(&format!("Error listing directory: {}", e));
+                format!("Error listing directory: {}", e)
+            });
 
-        // Get file-based shell history
-        let shell_history = Self::get_file_based_history()?;
+        // Get command history from shell (optional)
+        let command_history = Self::get_shell_history().unwrap_or_default();
 
-        // Get running processes
-        let processes = Self::get_processes()?;
+        // Get file-based shell history (optional)
+        let shell_history = Self::get_file_based_history().unwrap_or_default();
 
-        // Get network connections
-        let network_connections = Self::get_network_connections()?;
+        // Get running processes (optional)
+        let processes = Self::get_processes().unwrap_or_default();
+
+        // Get network connections (optional)
+        let network_connections = Self::get_network_connections().unwrap_or_default();
 
         Ok(TerminalContext {
             current_dir,
@@ -96,16 +122,50 @@ impl TerminalContext {
 
     /// Get directory listing with detailed information
     fn get_directory_listing(path: &PathBuf) -> Result<String> {
-        let output = Command::new("ls")
-            .args(&["-la", "--color=never"])
-            .current_dir(path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output()
-            .context("Failed to list directory")?;
+        use std::fs;
+        use std::os::unix::fs::MetadataExt;
+        use chrono::{DateTime, Local};
 
-        String::from_utf8(output.stdout)
-            .context("Directory listing is not valid UTF-8")
+        let mut entries = Vec::new();
+
+        match fs::read_dir(path) {
+            Ok(read_dir) => {
+                for entry in read_dir.filter_map(|e| e.ok()) {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let metadata = entry.metadata().ok();
+                    
+                    let (size, modified, mode) = if let Some(m) = metadata {
+                        let size = m.len();
+                        let modified: DateTime<Local> = m.modified()
+                            .map(|t| DateTime::from(t))
+                            .unwrap_or_else(|_| DateTime::from(std::time::SystemTime::UNIX_EPOCH));
+                        let mode = m.mode();
+                        (size, modified.format("%b %d %H:%M").to_string(), mode)
+                    } else {
+                        (0, "unknown".to_string(), 0)
+                    };
+
+                    let file_type = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) { "d" } else { "-" };
+                    
+                    entries.push(format!(
+                        "{}{:o} {:>8} {} {}",
+                        file_type,
+                        mode & 0o777,
+                        size,
+                        modified,
+                        name
+                    ));
+                }
+            }
+            Err(e) => return Ok(format!("Error reading directory: {}", e)),
+        }
+
+        if entries.is_empty() {
+            return Ok("(Directory is empty)".to_string());
+        }
+
+        entries.sort();
+        Ok(entries.join("\n"))
     }
 
     /// Get command history from the shell

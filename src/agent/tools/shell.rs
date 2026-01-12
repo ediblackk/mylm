@@ -14,6 +14,7 @@ pub struct ShellTool {
     _context: TerminalContext,
     event_tx: mpsc::UnboundedSender<TuiEvent>,
     memory_store: Option<Arc<VectorStore>>,
+    categorizer: Option<Arc<crate::memory::MemoryCategorizer>>,
     session_id: Option<String>,
 }
 
@@ -24,9 +25,10 @@ impl ShellTool {
         context: TerminalContext,
         event_tx: mpsc::UnboundedSender<TuiEvent>,
         memory_store: Option<Arc<VectorStore>>,
+        categorizer: Option<Arc<crate::memory::MemoryCategorizer>>,
         session_id: Option<String>,
     ) -> Self {
-        Self { executor, _context: context, event_tx, memory_store, session_id }
+        Self { executor, _context: context, event_tx, memory_store, categorizer, session_id }
     }
 }
 
@@ -71,8 +73,17 @@ impl Tool for ShellTool {
         let output = rx.await.map_err(|_| anyhow::anyhow!("Failed to receive command output from TUI"))?;
 
         // 5. Auto-record to memory if enabled
+        // 5. Auto-record to memory if enabled
         if let Some(store) = &self.memory_store {
-            let _ = store.record_command(args, &output, 0, self.session_id.clone()).await;
+            if let Ok(memory_id) = store.record_command(args, &output, 0, self.session_id.clone()).await {
+                if let Some(categorizer) = &self.categorizer {
+                    let content = format!("Command: {}\nOutput: {}", args, output);
+                    if let Ok(category_id) = categorizer.categorize_memory(&content).await {
+                        let _ = store.update_memory_category(memory_id, category_id.clone()).await;
+                        let _ = categorizer.update_category_summary(&category_id).await;
+                    }
+                }
+            }
         }
         
         // Combine screen context with command output

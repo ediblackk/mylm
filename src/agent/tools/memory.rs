@@ -27,7 +27,7 @@ impl Tool for MemoryTool {
     }
 
     fn usage(&self) -> &str {
-        "Format: 'add: <content>' or 'search: <query>'. Example: 'add: The user likes Rust' or 'search: what are the user's preferences?'"
+        "Use 'add: <content>' to remember something, or 'search: <query>' to find something. IMPORTANT: Do not use any other format. Example: 'add: The user likes Rust' or 'search: what are the user's preferences?'"
     }
 
     async fn call(&self, args: &str) -> Result<String> {

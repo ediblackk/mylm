@@ -27,6 +27,7 @@ pub enum TuiEvent {
     Input(crossterm::event::Event),
     Pty(Vec<u8>),
     PtyWrite(Vec<u8>),
+    InternalObservation(Vec<u8>),
     AgentResponse(String, TokenUsage),
     StatusUpdate(String),
     CondensedHistory(Vec<ChatMessage>),
@@ -74,6 +75,7 @@ pub struct App {
     pub input_price: f64,
     pub output_price: f64,
     pub tick_count: u64,
+    pub pending_terminal_context: Option<crate::context::terminal::TerminalContext>,
 }
 
 impl App {
@@ -117,6 +119,7 @@ impl App {
             input_price,
             output_price,
             tick_count: 0,
+            pending_terminal_context: None,
         }
     }
 
@@ -313,7 +316,7 @@ impl App {
                         }
                     }
                 }
-
+                
                 if updated {
                     let _ = event_tx.send(TuiEvent::ConfigUpdate(self.config.clone()));
                     self.chat_history.push(ChatMessage::assistant(format!("Updated {} to {}", key, value)));
@@ -534,14 +537,26 @@ async fn run_agent_loop(
 
                     // Execute visibly
                     let (tx, rx) = tokio::sync::oneshot::channel();
-                    let _ = event_tx.send(TuiEvent::ExecuteTerminalCommand(cmd, tx));
+                    let _ = event_tx.send(TuiEvent::ExecuteTerminalCommand(cmd.clone(), tx));
                     
                     // Drop lock before awaiting
                     drop(agent_lock);
 
                     // Wait for result
                     match rx.await {
-                        Ok(output) => last_observation = Some(output),
+                        Ok(output) => {
+                            last_observation = Some(output.clone());
+                            // Record memory and categorize
+                            let agent_lock = agent.lock().await;
+                            if let Some(store) = &agent_lock.memory_store {
+                                if let Ok(memory_id) = store.record_command(&cmd, &output, 0, Some(agent_lock.session_id.clone())).await {
+                                    if agent_lock.llm_client.config().memory.auto_categorize {
+                                        let content = format!("Command: {}\nOutput: {}", cmd, output);
+                                        let _ = agent_lock.auto_categorize(memory_id, &content).await;
+                                    }
+                                }
+                            }
+                        }
                         Err(_) => {
                             last_observation = Some("Error: Terminal command execution failed (channel closed)".to_string());
                         }
@@ -559,7 +574,7 @@ async fn run_agent_loop(
                     
                     // Log to PTY
                     let obs_log = format!("\x1b[32m[Observation]:\x1b[0m {}\r\n", observation.trim());
-                    let _ = event_tx.send(TuiEvent::PtyWrite(obs_log.into_bytes()));
+                    let _ = event_tx.send(TuiEvent::InternalObservation(obs_log.into_bytes()));
                     
                     last_observation = Some(observation);
                     drop(agent_lock);

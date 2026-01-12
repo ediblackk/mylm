@@ -1,9 +1,11 @@
 use inquire::{Select, error::InquireResult};
 use crate::config::Config;
 use anyhow::Result;
+use console::Style;
 
 #[derive(Debug, PartialEq)]
 pub enum HubChoice {
+    PopTerminal,
     ResumeSession,
     StartTui,
     QuickQuery,
@@ -14,8 +16,9 @@ pub enum HubChoice {
 impl std::fmt::Display for HubChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            HubChoice::PopTerminal => write!(f, "🚀 Pop Terminal"),
             HubChoice::ResumeSession => write!(f, "🔄 Resume Latest Session"),
-            HubChoice::StartTui => write!(f, "🚀 Start Fresh TUI Session"),
+            HubChoice::StartTui => write!(f, "✨ Start Fresh TUI Session"),
             HubChoice::QuickQuery => write!(f, "⚡ Quick Query"),
             HubChoice::Configuration => write!(f, "⚙️  Configuration"),
             HubChoice::Exit => write!(f, "❌ Exit"),
@@ -55,13 +58,17 @@ impl std::fmt::Display for SettingsChoice {
 }
 
 /// Show the interactive hub menu
-pub async fn show_hub(_config: &Config) -> Result<HubChoice> {
+pub async fn show_hub(config: &Config) -> Result<HubChoice> {
+    print_banner(config).await;
+
     let mut options = Vec::new();
 
     // Check if session file exists
     let session_exists = dirs::data_dir()
         .map(|d| d.join("mylm").join("sessions").join("latest.json").exists())
         .unwrap_or(false);
+
+    options.push(HubChoice::PopTerminal);
 
     if session_exists {
         options.push(HubChoice::ResumeSession);
@@ -145,7 +152,7 @@ pub fn show_settings_dashboard(config: &Config) -> Result<SettingsChoice> {
 
     let ans: InquireResult<SettingsChoice> = Select::new(
         &format!(
-            "⚙️  Settings Dashboard\n  Profile:  {}\n  Endpoint: {}\n  Search:   {}\n  Prompt:   {}\n",
+            "⚙️  Settings Dashboard | Profile: {} | Endpoint: {} | Search: {} | Prompt: {}",
             profile_name, llm_status, search_status, prompt_status
         ),
         options
@@ -187,4 +194,49 @@ pub fn show_api_key_menu() -> Result<ApiKeyEditChoice> {
         Ok(choice) => Ok(choice),
         Err(_) => Ok(ApiKeyEditChoice::Back),
     }
+}
+
+async fn print_banner(config: &Config) {
+    let blue = Style::new().blue().bold();
+    let green = Style::new().green().bold();
+    let cyan = Style::new().cyan();
+    let dim = Style::new().dim();
+
+    let banner = r#"
+    __  ___  __  __  __     __  ___
+   /  |/  / / / / / / /    /  |/  /
+  / /|_/ / / / / / / /    / /|_/ /
+ / /  / / / /_/ / / /___ / /  / /
+/_/  /_/  \__, / /_____//_/  /_/
+         /____/
+    "#;
+
+    println!("{}", green.apply_to(banner));
+    println!("          {}", cyan.apply_to("My Language Model"));
+    println!("          {}", dim.apply_to("Rust-Powered Terminal AI"));
+    println!();
+
+    // Compact Provider/Context Info
+    let profile = config.get_active_profile();
+    let endpoint = config.get_endpoint(None).ok();
+    
+    let profile_name = &config.active_profile;
+    let llm_info = match (profile, endpoint) {
+        (Some(_), Some(e)) => format!("{} ({} / {})", e.name, e.provider, e.model),
+        _ => "Not Configured".to_string(),
+    };
+
+    let ctx = crate::context::TerminalContext::collect_sync();
+    let cwd = ctx.cwd().unwrap_or_else(|| "unknown".to_string());
+    let branch = ctx.git_branch().unwrap_or_else(|| "none".to_string());
+
+    println!("  {} [{}] | {} [{}]",
+        dim.apply_to("Profile:"), blue.apply_to(profile_name),
+        dim.apply_to("Endpoint:"), green.apply_to(llm_info)
+    );
+    println!("  {} [{}] | {} [{}]",
+        dim.apply_to("Context:"), cyan.apply_to(cwd),
+        dim.apply_to("Git:"), cyan.apply_to(branch)
+    );
+    println!("  {}", dim.apply_to("-".repeat(60).as_str()));
 }
