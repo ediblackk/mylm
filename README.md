@@ -67,18 +67,24 @@ sudo pacman -S pkgconf openssl libxcb clang sccache
 
 ## 📦 Installation
 
-### The Quick Way (Recommended)
-Our guided installation script handles the build process, binary placement, and initial configuration:
+### Local Installation (Recommended)
+Since this project is designed to be built from source, we recommend cloning the repository and running the included installation script. This script handles dependency checks, building the binary, and setting up the environment.
 
-```bash
-curl -sSL https://raw.githubusercontent.com/youruser/mylm/main/install.sh | bash
-```
-*Alternatively, if you have the repo cloned:*
-```bash
-./install.sh
-```
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/ediblackk/mylm.git
+   cd mylm
+   ```
 
-**What the script does:**
+2. **Run the installation script:**
+   ```bash
+   chmod +x install.sh
+   ./install.sh
+   ```
+
+   > **Note:** Currently, this project is in active development. `install.sh` will automatically invoke `./dev-install.sh` to produce a **debug build**. This ensures faster compilation times for frequent updates. Once the core features are stable, `install.sh` will default back to optimized release builds.
+
+   **What the script does:**
 1. **Dependency Check**: Automatically detects your Linux distribution and installs required build tools (`clang`, `pkg-config`, `openssl`, etc.) and Rust/Cargo if missing.
 2. **Version Awareness**: Compares your installed version with the current source to suggest updates or skip redundant builds.
 3. **Fresh Installation**: Performs a clean build, sets up the `ai` alias, and runs the configuration wizard.
@@ -170,13 +176,18 @@ Terminal AI assistant, CLI LLM, Rust AI tool, Ollama terminal, OpenAI CLI, Local
 ### 🌟 Special Thanks & Acknowledgements
 *   **The Rust Team**: For the language that makes this possible.
 *   **VSCode Team**: For the editor environment.
-*   **Google & Gemini (United States)**: For the intelligence powering the agent (`gemini-3-pro-preview`).
+*   **Google DeepMind & The Gemini Team (Worldwide)**: For the intelligence powering the agent (`gemini-3-pro-preview`).
 *   **Linux & Git**: For the foundation of our workflow.
 *   **Open Source Community**: Special thanks to the authors of `ratatui`, `tokio`, `portable-pty`, `serde`, `clap`, `lancedb`, and all other dependencies used in this project.
 
 **Global AI Innovations:**
-We acknowledge the giants whose work inspires this tool:
-*   **Anthropic (United States)**: Creators of Claude.
-*   **OpenAI (United States)**: Creators of ChatGPT.
-*   **DeepSeek (China)**: Pushing boundaries in efficient AI.
-*   **Mistral AI (France)**: Champions of open models.
+We acknowledge the global community of researchers and engineers advancing the frontier of intelligence:
+
+*   **OpenAI**: Creators of ChatGPT and GPT-5.
+*   **Anthropic**: Creators of Claude and Constitutional AI.
+*   **DeepSeek**: Pushing boundaries in efficient AI and coding.
+*   **Meta AI**: For Llama and open research.
+*   **Hugging Face**: The democratizing force of the AI community.
+*   **Zhipu AI**: Creators of the GLM (General Language Model) series.
+*   **Moonshot AI**: For Kimi and long-context breakthroughs.
+*   **Minimax**: For creators of Minimax M2.1 and free usage

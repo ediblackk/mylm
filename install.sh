@@ -253,8 +253,16 @@ full_installation() {
         cargo clean
     fi
     
-    build_binary "true"
-    install_binary
+    # Temporary: Use dev-install.sh for faster iteration during development phase
+    echo "⚠️  Using dev-install.sh for development build..."
+    if [ -f "./dev-install.sh" ]; then
+        chmod +x dev-install.sh
+        ./dev-install.sh
+    else
+        echo "❌ dev-install.sh not found, falling back to standard build..."
+        build_binary "true"
+        install_binary
+    fi
     setup_shell_alias "true"
     run_setup "true"
     
@@ -281,8 +289,17 @@ update_existing() {
     fi
 
     check_and_install_dependencies
-    build_binary "false"
-    install_binary
+    
+    # Temporary: Use dev-install.sh for faster iteration during development phase
+    echo "⚠️  Using dev-install.sh for development build..."
+    if [ -f "./dev-install.sh" ]; then
+        chmod +x dev-install.sh
+        ./dev-install.sh
+    else
+        echo "❌ dev-install.sh not found, falling back to standard build..."
+        build_binary "false"
+        install_binary
+    fi
     
     echo ""
     echo "✅ Update complete! (Your configuration and aliases were preserved)"
