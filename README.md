@@ -8,6 +8,8 @@
 
 Available as the simple `ai` command, it bridges the gap between natural language and shell execution.
 
+> **Note on LLM Providers**: This application has been primarily tested and optimized for the **Google Gemini** API (specifically `gemini-3-pro-preview`). While **OpenAI**, **Anthropic**, and other providers are supported in the configuration, they may require further tuning. Full support is planned for future releases.
+
 ---
 
 ## 🚀 Key Features
@@ -162,3 +164,19 @@ Distributed under the **MIT License**.
 
 ## 🔍 SEO Keywords
 Terminal AI assistant, CLI LLM, Rust AI tool, Ollama terminal, OpenAI CLI, Local LLM assistant, Command line AI, Anthropic Claude CLI, Google Gemini terminal, Developer productivity tools.
+
+---
+
+### 🌟 Special Thanks & Acknowledgements
+*   **The Rust Team**: For the language that makes this possible.
+*   **VSCode Team**: For the editor environment.
+*   **Google & Gemini (United States)**: For the intelligence powering the agent (`gemini-3-pro-preview`).
+*   **Linux & Git**: For the foundation of our workflow.
+*   **Open Source Community**: Special thanks to the authors of `ratatui`, `tokio`, `portable-pty`, `serde`, `clap`, `lancedb`, and all other dependencies used in this project.
+
+**Global AI Innovations:**
+We acknowledge the giants whose work inspires this tool:
+*   **Anthropic (United States)**: Creators of Claude.
+*   **OpenAI (United States)**: Creators of ChatGPT.
+*   **DeepSeek (China)**: Pushing boundaries in efficient AI.
+*   **Mistral AI (France)**: Champions of open models.

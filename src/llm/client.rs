@@ -274,64 +274,116 @@ impl LlmClient {
             }),
         };
 
-        let response = self
-            .http_client
-            .post(&url)
-            .header(CONTENT_TYPE, "application/json")
-            .json(&body)
-            .send()
-            .await
-            .context("Failed to send request to Gemini API")?;
+        let mut attempt = 0;
+        let max_retries = 5;
+        let mut backoff_sec = 1;
 
-        match response.status() {
-            StatusCode::OK => {
-                let text = response.text().await.context("Failed to read Gemini response text")?;
-                let response_body: GeminiResponse = match serde_json::from_str(&text) {
-                    Ok(body) => body,
-                    Err(e) => {
-                        bail!("Failed to parse Gemini response: {}. Response body: {}", e, text);
+        loop {
+            attempt += 1;
+
+            let response_result = self
+                .http_client
+                .post(&url)
+                .header(CONTENT_TYPE, "application/json")
+                .json(&body)
+                .send()
+                .await;
+
+            match response_result {
+                Ok(response) => {
+                    let status = response.status();
+
+                    if status.is_success() {
+                        let text = response
+                            .text()
+                            .await
+                            .context("Failed to read Gemini response text")?;
+                        let response_body: GeminiResponse = match serde_json::from_str(&text) {
+                            Ok(body) => body,
+                            Err(e) => {
+                                bail!(
+                                    "Failed to parse Gemini response: {}. Response body: {}",
+                                    e,
+                                    text
+                                );
+                            }
+                        };
+
+                        let choices = response_body
+                            .candidates
+                            .into_iter()
+                            .map(|c| Choice {
+                                index: c.index,
+                                message: ChatMessage {
+                                    role: super::chat::MessageRole::Assistant,
+                                    content: c
+                                        .content
+                                        .parts
+                                        .first()
+                                        .map(|p| p.text.clone())
+                                        .unwrap_or_default(),
+                                    name: None,
+                                    tool_call_id: None,
+                                    tool_calls: None,
+                                },
+                                finish_reason: c.finish_reason,
+                            })
+                            .collect();
+
+                        return Ok(ChatResponse {
+                            id: "gemini".to_string(),
+                            object: "chat.completion".to_string(),
+                            created: 0,
+                            model: self.config.model.clone(),
+                            choices,
+                            usage: response_body.usage_metadata.map(|u| Usage {
+                                prompt_tokens: u.prompt_token_count,
+                                completion_tokens: u.candidates_token_count,
+                                total_tokens: u.total_token_count,
+                            }),
+                        });
                     }
-                };
-                
-                let choices = response_body.candidates.into_iter().map(|c| Choice {
-                    index: c.index,
-                    message: ChatMessage {
-                        role: super::chat::MessageRole::Assistant,
-                        content: c.content.parts.first().map(|p| p.text.clone()).unwrap_or_default(),
-                        name: None,
-                        tool_call_id: None,
-                        tool_calls: None,
-                    },
-                    finish_reason: c.finish_reason,
-                }).collect();
 
-                Ok(ChatResponse {
-                    id: "gemini".to_string(),
-                    object: "chat.completion".to_string(),
-                    created: 0,
-                    model: self.config.model.clone(),
-                    choices,
-                    usage: response_body.usage_metadata.map(|u| Usage {
-                        prompt_tokens: u.prompt_token_count,
-                        completion_tokens: u.candidates_token_count,
-                        total_tokens: u.total_token_count,
-                    }),
-                })
-            }
-            StatusCode::UNAUTHORIZED => {
-                bail!("Authentication failed. Check your API key.");
-            }
-            StatusCode::TOO_MANY_REQUESTS => {
-                bail!("Rate limit exceeded. Please try again later.");
-            }
-            status => {
-                let error_body: Option<serde_json::Value> = response.json().await.ok();
-                let error_msg = error_body
-                    .as_ref()
-                    .and_then(|v| v.get("error").and_then(|e| e.get("message")))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Unknown error");
-                bail!("Gemini API request failed ({}): {}", status, error_msg);
+                    // Retry logic for 5xx and 429
+                    if (status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS)
+                        && attempt <= max_retries
+                    {
+                        eprintln!(
+                            "Provider error {}, retrying in {}s...",
+                            status, backoff_sec
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff_sec)).await;
+                        backoff_sec *= 2;
+                        continue;
+                    }
+
+                    match status {
+                        StatusCode::UNAUTHORIZED => {
+                            bail!("Authentication failed. Check your API key.");
+                        }
+                        StatusCode::TOO_MANY_REQUESTS => {
+                            bail!("Rate limit exceeded. Please try again later.");
+                        }
+                        status => {
+                            let error_body: Option<serde_json::Value> = response.json().await.ok();
+                            let error_msg = error_body
+                                .as_ref()
+                                .and_then(|v| v.get("error").and_then(|e| e.get("message")))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Unknown error");
+                            bail!("Gemini API request failed ({}): {}", status, error_msg);
+                        }
+                    }
+                }
+                Err(e) => {
+                    if attempt <= max_retries {
+                        eprintln!("Network error, retrying in {}s...", backoff_sec);
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff_sec)).await;
+                        backoff_sec *= 2;
+                        continue;
+                    }
+                    return Err(e).context("Failed to send request to Gemini API");
+                }
             }
         }
     }

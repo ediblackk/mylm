@@ -171,14 +171,18 @@ async fn run_loop(
                         let text = String::from_utf8_lossy(&data);
                         app.command_output_buffer.push_str(&text);
                         
-                        if let Some(pos) = app.command_output_buffer.find("_MYLM_EOF_") {
+                        // Use rfind to match the LAST occurrence, just in case (though obfuscation should handle it)
+                        if let Some(pos) = app.command_output_buffer.rfind("_MYLM_EOF_") {
                             let marker_line = &app.command_output_buffer[pos..];
                             if let Some(end_pos) = marker_line.find('\r').or_else(|| marker_line.find('\n')) {
-                                let full_marker = &marker_line[..end_pos];
+                                let full_marker = &marker_line[..end_pos].trim();
                                 let exit_code = full_marker.strip_prefix("_MYLM_EOF_").unwrap_or("0");
                                 
-                                let final_output = app.command_output_buffer[..pos].to_string();
-                                
+                                let raw_output = app.command_output_buffer[..pos].to_string();
+                                // Strip ANSI escape codes for cleaner LLM input
+                                let re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+                                let final_output = re.replace_all(&raw_output, "").to_string();
+
                                 if let Some(tx) = app.pending_command_tx.take() {
                                     let result = if exit_code == "0" {
                                         final_output
@@ -282,7 +286,11 @@ async fn run_loop(
                     app.pending_command_tx = Some(tx);
                     
                     // Wrap command to get exit code and marker
-                    let wrapped_cmd = format!("{{ {}; }} ; echo \"_MYLM_EOF_$?\"\r", cmd.trim());
+                    // Wrap command to get exit code and marker
+                    // We obfuscate the marker ("_MYLM_" "EOF") to prevent the shell echo from triggering the detector
+                    // We also use stty -echo to prevent the command itself from being echoed, which keeps the output clean
+                    // and prevents false positives if the command itself contains the marker.
+                    let wrapped_cmd = format!("stty -echo; {{ {}; }} ; echo _MYLM_\"\"EOF_$?; stty echo\r", cmd.trim());
                     let _ = app.pty_manager.write_all(wrapped_cmd.as_bytes());
                 }
                 TuiEvent::GetTerminalScreen(tx) => {
