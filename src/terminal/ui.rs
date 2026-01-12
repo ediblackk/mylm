@@ -276,9 +276,7 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
             }
 
             if trimmed.starts_with("Action:") {
-                if !app.verbose_mode {
-                    continue;
-                }
+                // Always show actions to provide feedback on what the agent is doing
                 lines_to_render.push((line.to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
                 continue;
             }

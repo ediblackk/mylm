@@ -133,17 +133,18 @@ impl VectorStore {
     }
 
     async fn get_or_create_table(&self, name: &str, schema: Arc<Schema>) -> Result<Table> {
-        // In LanceDB 0.23, open_table returns a builder, use .execute()
         match self.conn.open_table(name).execute().await {
             Ok(table) => {
                 let current_schema = table.schema().await?;
-                if current_schema.fields().len() != schema.fields().len() {
-                    // Try to drop. Using execute() for drop_table too if it's a builder.
-                    // Actually, lancedb 0.23 drop_table returns a future directly or builder.
-                    // The error said drop_table takes 2 args. Maybe (name, mode)?
-                    // I will try drop_table(name).await which usually works in 0.23 if it's the right feature.
-                    // But if it fails, I'll just return the table and hope for the best or use a different name.
-                    Ok(table)
+                // Check for schema mismatch (column count or field names)
+                let mismatch = current_schema.fields().len() != schema.fields().len() ||
+                    current_schema.fields().iter().zip(schema.fields().iter()).any(|(a, b)| a.name() != b.name());
+
+                if mismatch {
+                    // Schema mismatch detected.
+                    // Since we cannot easily drop the table without knowing the exact lancedb version signature,
+                    // we will return an error instructing the user to reset.
+                    anyhow::bail!("Memory table schema mismatch. Please delete the 'mylm/memory' directory in your data folder (usually ~/.local/share/mylm/memory) to reset the database.");
                 } else {
                     Ok(table)
                 }
@@ -268,7 +269,7 @@ impl VectorStore {
         table.add(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema)))
             .execute()
             .await
-            .context("Failed to add memory to LanceDB")?;
+            .map_err(|e| anyhow::anyhow!("Failed to add memory to LanceDB: {:#}", e))?;
 
         Ok(())
     }

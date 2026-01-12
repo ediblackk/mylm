@@ -601,7 +601,10 @@ async fn run_agent_loop(
                         None => format!("Error: Tool '{}' not found.", tool),
                     };
                     
-                    // Log to PTY
+                    // Log to PTY - SUPPRESSED for Internal Tools
+                    // Only ShellTool outputs (via ToolKind::Terminal path above) should appear in the Terminal Pane.
+                    // Internal tool outputs are for the Agent's eyes only (via last_observation).
+                    /*
                     let trimmed_obs = observation.trim();
                     let log_content = if trimmed_obs.len() > 200 {
                         format!("{}... [Content hidden, total length: {} chars]", &trimmed_obs[..100], trimmed_obs.len())
@@ -610,6 +613,7 @@ async fn run_agent_loop(
                     };
                     let obs_log = format!("\x1b[32m[Observation]:\x1b[0m {}\r\n", log_content);
                     let _ = event_tx.send(TuiEvent::InternalObservation(obs_log.into_bytes()));
+                    */
                     
                     last_observation = Some(observation);
                     drop(agent_lock);
