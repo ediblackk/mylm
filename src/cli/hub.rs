@@ -6,6 +6,7 @@ use console::Style;
 #[derive(Debug, PartialEq)]
 pub enum HubChoice {
     PopTerminal,
+    PopTerminalMissing,
     ResumeSession,
     StartTui,
     QuickQuery,
@@ -16,7 +17,14 @@ pub enum HubChoice {
 impl std::fmt::Display for HubChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            HubChoice::PopTerminal => write!(f, "🚀 Pop Terminal"),
+            HubChoice::PopTerminal => {
+                if crate::context::terminal::TerminalContext::is_inside_tmux() {
+                    write!(f, "🚀 Pop Terminal with Seamless Context")
+                } else {
+                    write!(f, "🚀 Pop Terminal (Limited Context - Not in tmux)")
+                }
+            },
+            HubChoice::PopTerminalMissing => write!(f, "🚀 Pop Terminal (tmux Required)"),
             HubChoice::ResumeSession => write!(f, "🔄 Resume Latest Session"),
             HubChoice::StartTui => write!(f, "✨ Start Fresh TUI Session"),
             HubChoice::QuickQuery => write!(f, "⚡ Quick Query"),
@@ -36,6 +44,7 @@ pub enum SettingsChoice {
     EditGeneral,
     EditApiKeys,
     NewProfile,
+    ShellIntegration,
     Save,
     Back,
 }
@@ -51,10 +60,19 @@ impl std::fmt::Display for SettingsChoice {
             SettingsChoice::EditSearch => write!(f, "🌐 Search Config"),
             SettingsChoice::EditPrompt => write!(f, "📝 System Prompt"),
             SettingsChoice::NewProfile => write!(f, "➕ Create New Profile"),
+            SettingsChoice::ShellIntegration => write!(f, "🐚 Shell Integration"),
             SettingsChoice::Save => write!(f, "💾 Save & Exit"),
             SettingsChoice::Back => write!(f, "⬅️  Discard & Back"),
         }
     }
+}
+
+/// Check if tmux is installed and available in PATH
+pub fn is_tmux_available() -> bool {
+    std::process::Command::new("tmux")
+        .arg("-V")
+        .output()
+        .is_ok()
 }
 
 /// Show the interactive hub menu
@@ -68,7 +86,11 @@ pub async fn show_hub(config: &Config) -> Result<HubChoice> {
         .map(|d| d.join("mylm").join("sessions").join("latest.json").exists())
         .unwrap_or(false);
 
-    options.push(HubChoice::PopTerminal);
+    if is_tmux_available() {
+        options.push(HubChoice::PopTerminal);
+    } else {
+        options.push(HubChoice::PopTerminalMissing);
+    }
 
     if session_exists {
         options.push(HubChoice::ResumeSession);
@@ -146,6 +168,7 @@ pub fn show_settings_dashboard(config: &Config) -> Result<SettingsChoice> {
         SettingsChoice::EditGeneral,
         SettingsChoice::EditApiKeys,
         SettingsChoice::NewProfile,
+        SettingsChoice::ShellIntegration,
         SettingsChoice::Save,
         SettingsChoice::Back,
     ];
@@ -178,6 +201,35 @@ impl std::fmt::Display for ApiKeyEditChoice {
             ApiKeyEditChoice::SearchKey => write!(f, "🌐 Search API Key"),
             ApiKeyEditChoice::Back => write!(f, "⬅️  Back"),
         }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ShellIntegrationChoice {
+    ToggleTmuxAutoStart,
+    Back,
+}
+
+impl std::fmt::Display for ShellIntegrationChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ShellIntegrationChoice::ToggleTmuxAutoStart => write!(f, "🪟 Toggle tmux Auto-Start (Seamless Context)"),
+            ShellIntegrationChoice::Back => write!(f, "⬅️  Back"),
+        }
+    }
+}
+
+pub fn show_shell_integration_menu() -> Result<ShellIntegrationChoice> {
+    let options = vec![
+        ShellIntegrationChoice::ToggleTmuxAutoStart,
+        ShellIntegrationChoice::Back,
+    ];
+
+    let ans: InquireResult<ShellIntegrationChoice> = Select::new("Shell Integration Settings", options).prompt();
+
+    match ans {
+        Ok(choice) => Ok(choice),
+        Err(_) => Ok(ShellIntegrationChoice::Back),
     }
 }
 
@@ -229,14 +281,20 @@ async fn print_banner(config: &Config) {
     let ctx = crate::context::TerminalContext::collect_sync();
     let cwd = ctx.cwd().unwrap_or_else(|| "unknown".to_string());
     let branch = ctx.git_branch().unwrap_or_else(|| "none".to_string());
+    let tmux_status = if crate::context::terminal::TerminalContext::is_inside_tmux() {
+        green.apply_to("Active")
+    } else {
+        Style::new().yellow().apply_to("Inactive (No Scrollback)")
+    };
 
     println!("  {} [{}] | {} [{}]",
         dim.apply_to("Profile:"), blue.apply_to(profile_name),
         dim.apply_to("Endpoint:"), green.apply_to(llm_info)
     );
-    println!("  {} [{}] | {} [{}]",
+    println!("  {} [{}] | {} [{}] | {} [{}]",
         dim.apply_to("Context:"), cyan.apply_to(cwd),
-        dim.apply_to("Git:"), cyan.apply_to(branch)
+        dim.apply_to("Git:"), cyan.apply_to(branch),
+        dim.apply_to("Tmux:"), tmux_status
     );
     println!("  {}", dim.apply_to("-".repeat(60).as_str()));
 }

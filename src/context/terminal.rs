@@ -26,6 +26,8 @@ pub struct TerminalContext {
     pub processes: Vec<ProcessInfo>,
     /// Network connections
     pub network_connections: Vec<NetworkInfo>,
+    /// Raw terminal scrollback (from tmux)
+    pub raw_scrollback: Option<String>,
 }
 
 /// Process information
@@ -109,6 +111,9 @@ impl TerminalContext {
         // Get network connections (optional)
         let network_connections = Self::get_network_connections().unwrap_or_default();
 
+        // Get tmux scrollback (optional)
+        let raw_scrollback = Self::get_tmux_scrollback();
+
         Ok(TerminalContext {
             current_dir,
             current_dir_str,
@@ -117,6 +122,7 @@ impl TerminalContext {
             shell_history,
             processes,
             network_connections,
+            raw_scrollback,
         })
     }
 
@@ -300,6 +306,42 @@ impl TerminalContext {
         Ok(connections)
     }
 
+    /// Check if currently running inside a tmux session
+    pub fn is_inside_tmux() -> bool {
+        env::var("TMUX").is_ok()
+    }
+
+    /// Get tmux scrollback history if running inside tmux
+    fn get_tmux_scrollback() -> Option<String> {
+        if !Self::is_inside_tmux() {
+            return None;
+        }
+
+        let output = Command::new("tmux")
+            .args(&["capture-pane", "-p", "-S", "-300", "-e", "-J"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+
+        if output.status.success() {
+            let scrollback = String::from_utf8_lossy(&output.stdout).to_string();
+            if scrollback.trim().is_empty() {
+                None
+            } else {
+                // Trim trailing whitespace from each line to avoid phantom width
+                let trimmed = scrollback
+                    .lines()
+                    .map(|line| line.trim_end())
+                    .collect::<Vec<_>>()
+                    .join("\r\n");
+                Some(trimmed)
+            }
+        } else {
+            None
+        }
+    }
+
     /// Get a formatted summary for AI context
     #[allow(dead_code)]
     pub fn get_summary(&self) -> String {
@@ -372,6 +414,7 @@ impl Default for TerminalContext {
             shell_history: Vec::new(),
             processes: Vec::new(),
             network_connections: Vec::new(),
+            raw_scrollback: None,
         }
     }
 }

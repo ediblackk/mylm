@@ -33,6 +33,7 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>, initial_query: O
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    let size = terminal.size()?;
 
     // Setup LLM Client (using default endpoint)
     let config = Config::load()?;
@@ -96,9 +97,50 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>, initial_query: O
 
     // Create app state
     let mut app = App::new(pty_manager, agent, config);
+    
+    // Resize app to current terminal size before injecting context
+    // This ensures vt100 parser wraps lines correctly for our TUI panes.
+    // Terminal pane is 70% width, minus borders.
+    let term_width = ((size.width as f32 * 0.7) as u16).saturating_sub(2);
+    let term_height = size.height.saturating_sub(4);
+    app.resize_pty(term_width, term_height);
 
-    // Store initial terminal context to be injected after PTY setup
-    app.pending_terminal_context = initial_terminal_context;
+    // Inject initial terminal context directly into the parser now.
+    // This ensures it is the first thing visible on the alternate screen,
+    // appearing above the shell prompt that will arrive shortly from the PTY.
+    if let Some(ctx) = initial_terminal_context {
+        // Restore raw scrollback if available
+        if let Some(scrollback) = ctx.raw_scrollback {
+            // Set actual terminal size BEFORE processing scrollback
+            // This allows the parser to wrap logical lines naturally
+            // Note: resize_pty is already called above, so parser has correct size
+            
+            // Clear parser state and process scrollback
+            app.process_terminal_data(b"\x1c\x1b[2J\x1b[H");
+            app.process_terminal_data(scrollback.as_bytes());
+            
+            // Add a visual divider to separate history from the new session
+            let divider = "\r\n\x1b[2m--- mylm session started ---\x1b[0m\r\n\r\n";
+            app.process_terminal_data(divider.as_bytes());
+        } else {
+            // Fallback: If no tmux scrollback, at least show some context info so it's not empty
+            let header = format!("\x1b[1;33m[mylm context fallback - tmux session not detected]\x1b[0m\n");
+            let cwd_info = format!("\x1b[2mCurrent Directory: {}\x1b[0m\n", ctx.current_dir_str);
+            let history_header = format!("\x1b[2mRecent History:\x1b[0m\n");
+            
+            app.process_terminal_data(header.as_bytes());
+            app.process_terminal_data(cwd_info.as_bytes());
+            app.process_terminal_data(history_header.as_bytes());
+            
+            for cmd in ctx.shell_history.iter().take(5) {
+                let line = format!("  - {}\n", cmd);
+                app.process_terminal_data(line.as_bytes());
+            }
+            
+            let footer = "\n\x1b[2m--- mylm session started ---\x1b[0m\n\n";
+            app.process_terminal_data(footer.as_bytes());
+        }
+    }
 
     if let Some(history) = initial_history {
         app.chat_history = history;
@@ -182,6 +224,49 @@ async fn run_loop(
         if let Some(event) = event_rx.recv().await {
             match event {
                 TuiEvent::Pty(data) => {
+                    // Check if we need to suppress the echo of the wrapper command
+                    if !app.pending_echo_suppression.is_empty() {
+                        let data_str = String::from_utf8_lossy(&data).to_string();
+                        // Normalize newlines for comparison
+                        let normalized_data = data_str.replace("\r\n", "\n").replace('\r', "\n");
+                        let normalized_expected = app.pending_echo_suppression.replace("\r\n", "\n").replace('\r', "\n");
+                        
+                        // Check if the incoming data matches the start of what we expect
+                        // We are lenient with the match to handle PTY quirks
+                        if normalized_expected.starts_with(&normalized_data) {
+                            // It matches! Remove this part from the expected buffer
+                            let remaining = normalized_expected[normalized_data.len()..].to_string();
+                            app.pending_echo_suppression = remaining;
+                            
+                            // If we've suppressed everything (or just have a newline left), we are done
+                            if app.pending_echo_suppression.trim().is_empty() {
+                                app.pending_echo_suppression.clear();
+                                
+                                // Show the clean command to the user
+                                if let Some(clean_cmd) = app.pending_clean_command.take() {
+                                    // Make it look like a real prompt interaction
+                                    let display = format!("\x1b[32m> {}\x1b[0m\r\n", clean_cmd.trim());
+                                    app.process_terminal_data(display.as_bytes());
+                                }
+                            }
+                            // Drop this data packet as it was just the echo
+                            continue;
+                        } else {
+                            // Mismatch! The PTY sent something we didn't expect.
+                            // Maybe there was a prompt before the echo?
+                            // Or maybe the shell formatted the echo differently.
+                            // To be safe and avoid swallowing real output, we abort suppression.
+                            // However, we might want to check if the *data* contains the *start* of the expectation
+                            // but that's complex. For now, simply aborting is safer.
+                            
+                            // One edge case: The data might be "prompt > stty..."
+                            // But usually we assume we are at a prompt.
+                            
+                            app.pending_echo_suppression.clear();
+                            // Proceed to process data normally
+                        }
+                    }
+
                     let screen = app.terminal_parser.screen();
                     let (rows, _cols) = screen.size();
                     
@@ -211,7 +296,7 @@ async fn run_loop(
                         }
                     }
 
-                    app.terminal_parser.process(&data);
+                    app.process_terminal_data(&data);
 
                     if app.capturing_command_output {
                         let text = String::from_utf8_lossy(&data);
@@ -246,12 +331,12 @@ async fn run_loop(
                 }
                 TuiEvent::PtyWrite(data) => {
                     // Send to both the parser for rendering AND the actual PTY for execution
-                    app.terminal_parser.process(&data);
+                    app.process_terminal_data(&data);
                     let _ = app.pty_manager.write_all(&data);
                 }
                 TuiEvent::InternalObservation(data) => {
                     // Send ONLY to the parser for rendering, NOT to the PTY
-                    app.terminal_parser.process(&data);
+                    app.process_terminal_data(&data);
                 }
                 TuiEvent::AgentResponse(response, usage) => {
                     app.add_assistant_message(response, usage);
@@ -267,8 +352,8 @@ async fn run_loop(
                     // Show suggestion in Terminal
                     let suggestion = format!("\r\n\x1b[33m[Suggestion]:\x1b[0m AI wants to run: \x1b[1;36m{}\x1b[0m\r\n", cmd);
                     let prompt = "\x1b[33mExecute? (Press Enter in Chat to confirm)\x1b[0m\r\n";
-                    app.terminal_parser.process(suggestion.as_bytes());
-                    app.terminal_parser.process(prompt.as_bytes());
+                    app.process_terminal_data(suggestion.as_bytes());
+                    app.process_terminal_data(prompt.as_bytes());
                     
                     // Populate Chat Input
                     app.chat_input = format!("/exec {}", cmd);
@@ -340,11 +425,16 @@ async fn run_loop(
                     app.pending_command_tx = Some(tx);
                     
                     // Wrap command to get exit code and marker
-                    // Wrap command to get exit code and marker
                     // We obfuscate the marker ("_MYLM_" "EOF") to prevent the shell echo from triggering the detector
-                    // We also use stty -echo to prevent the command itself from being echoed, which keeps the output clean
-                    // and prevents false positives if the command itself contains the marker.
+                    // We also use stty -echo to prevent the command itself from being echoed (if suppression fails),
+                    // which keeps the output clean and prevents false positives if the command itself contains the marker.
                     let wrapped_cmd = format!("stty -echo; {{ {}; }} ; echo _MYLM_\"\"EOF_$?; stty echo\r", cmd.trim());
+                    
+                    // Set up echo suppression
+                    // We expect the shell to echo exactly what we type
+                    app.pending_echo_suppression = wrapped_cmd.clone();
+                    app.pending_clean_command = Some(cmd.clone());
+                    
                     let _ = app.pty_manager.write_all(wrapped_cmd.as_bytes());
                 }
                 TuiEvent::GetTerminalScreen(tx) => {
@@ -363,30 +453,6 @@ async fn run_loop(
                 }
                 TuiEvent::Tick => {
                     app.tick_count += 1;
-                    // Inject terminal context after a few ticks to let PTY settle
-                    // Seed PTY history after a short delay to let shell init scripts run
-                    if app.tick_count == 10 {
-                        if let Some(ctx) = app.pending_terminal_context.take() {
-                            let mut pty_data = String::new();
-                            // Use \r to ensure the shell processes the line
-                            pty_data.push_str("\r# --- mylm terminal context ---\r");
-                            pty_data.push_str(&format!("# CWD: {}\r", ctx.current_dir_str));
-                            pty_data.push_str("# Directory Listing:\r");
-                            
-                            for line in ctx.directory_listing.lines() {
-                                pty_data.push_str(&format!("#   {}\r", line));
-                            }
-                            pty_data.push_str("# -----------------------------\r");
-                            
-                            // Write directly to PTY input. This will appear as commented text in the shell.
-                            // We use \r to simulate hitting enter if we want it to clear,
-                            // but actually just writing it should be enough to show it in the scrollback.
-                            // However, writing to PTY input usually means it's waiting for user to press enter.
-                            // If we want it to just "appear" without being an active command line,
-                            // we can try to write it as part of the startup sequence.
-                            let _ = app.pty_manager.write_all(pty_data.as_bytes());
-                        }
-                    }
                 }
                 TuiEvent::Input(ev) => {
                     match ev {
@@ -510,8 +576,15 @@ async fn run_loop(
                                 }
                             }
                         }
-                        CrosstermEvent::Resize(_, _) => {
+                        CrosstermEvent::Resize(width, height) => {
                             terminal.autoresize()?;
+                            
+                            // Recalculate terminal pane size (70% width, minus borders)
+                            let term_width = ((width as f32 * 0.7) as u16).saturating_sub(2);
+                            let term_height = height.saturating_sub(4);
+                            
+                            // Resize PTY and reflow content
+                            app.resize_pty(term_width, term_height);
                         }
                         _ => {}
                     }

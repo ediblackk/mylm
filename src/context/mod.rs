@@ -306,6 +306,11 @@ impl TerminalContext {
             }
         }
 
+        // Collect terminal-specific context synchronously
+        if let Ok(term_info) = crate::context::terminal::TerminalContext::new() {
+            ctx.terminal = term_info;
+        }
+
         ctx
     }
 }

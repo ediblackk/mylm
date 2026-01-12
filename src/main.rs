@@ -28,6 +28,9 @@ mod terminal;
 /// Main entry point for the AI assistant CLI
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Capture context IMMEDIATELY before any output to ensure we get the clean terminal state
+    let initial_context = crate::context::TerminalContext::collect_sync();
+    
     // Parse command-line arguments
     let cli = Cli::parse();
 
@@ -230,7 +233,7 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
         }
 
         None => {
-            handle_hub(&config, &formatter).await?;
+            handle_hub(&config, &formatter, initial_context).await?;
         }
     }
 
@@ -238,15 +241,27 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
 }
 
 /// Handle the interactive hub menu
-async fn handle_hub(config: &Config, formatter: &OutputFormatter) -> Result<()> {
+async fn handle_hub(config: &Config, formatter: &OutputFormatter, initial_context: crate::context::TerminalContext) -> Result<()> {
     loop {
         let choice = crate::cli::hub::show_hub(config).await?;
         match choice {
             HubChoice::PopTerminal => {
-                let context = TerminalContext::collect().await;
-                let term_ctx = context.terminal.clone();
-                terminal::run_tui(None, None, Some(context), Some(term_ctx)).await?;
+                let context = crate::context::TerminalContext::collect().await;
+                terminal::run_tui(None, None, Some(context), Some(initial_context.terminal)).await?;
                 break;
+            }
+            HubChoice::PopTerminalMissing => {
+                println!("\n❌ {} is required for the 'Pop Terminal' feature.", Style::new().bold().apply_to("tmux"));
+                println!("   This feature uses tmux to capture your current terminal session history and provide seamless context.");
+                println!("\n   Note: tmux does not run automatically; you should start your terminal inside a tmux session");
+                println!("   (by running 'tmux') to take full advantage of this feature.");
+                println!("\n   Please install it using your package manager:");
+                println!("   - {}  : sudo apt install tmux", Style::new().cyan().apply_to("Debian/Ubuntu/Pop"));
+                println!("   - {}       : sudo dnf install tmux", Style::new().cyan().apply_to("Fedora"));
+                println!("   - {}         : sudo pacman -S tmux", Style::new().cyan().apply_to("Arch"));
+                println!("   - {}        : brew install tmux", Style::new().cyan().apply_to("macOS"));
+                println!();
+                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
             }
             HubChoice::ResumeSession => {
                 match App::load_session() {
@@ -342,6 +357,17 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                         prompt: "default".to_string(),
                     });
                     config.active_profile = name;
+                }
+            }
+            crate::cli::hub::SettingsChoice::ShellIntegration => {
+                loop {
+                    let choice = crate::cli::hub::show_shell_integration_menu()?;
+                    match choice {
+                        crate::cli::hub::ShellIntegrationChoice::ToggleTmuxAutoStart => {
+                            toggle_tmux_autostart()?;
+                        }
+                        crate::cli::hub::ShellIntegrationChoice::Back => break,
+                    }
                 }
             }
             crate::cli::hub::SettingsChoice::Save => {
@@ -516,5 +542,75 @@ async fn show_splash_screen() -> Result<()> {
         i += 1;
     }
     println!("\r{} [====================] ====", blue.apply_to("==== LOADING MYLM HUB"));
+    Ok(())
+}
+
+fn toggle_tmux_autostart() -> Result<()> {
+    let home = dirs::home_dir().context("Could not find home directory")?;
+    let shells = vec![".bashrc", ".zshrc"];
+    let snippet_start = "# --- mylm tmux auto-start ---";
+    let snippet_end = "# --- end mylm tmux auto-start ---";
+    
+    let mut modified = false;
+    let mut enabled = false;
+
+    for shell in shells {
+        let path = home.join(shell);
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)?;
+            if content.contains(snippet_start) {
+                // Remove snippet
+                let lines: Vec<&str> = content.lines().collect();
+                let mut new_lines = Vec::new();
+                let mut in_snippet = false;
+                for line in lines {
+                    if line.contains(snippet_start) {
+                        in_snippet = true;
+                        continue;
+                    }
+                    if line.contains(snippet_end) {
+                        in_snippet = false;
+                        continue;
+                    }
+                    if !in_snippet {
+                        new_lines.push(line);
+                    }
+                }
+                std::fs::write(&path, new_lines.join("\n"))?;
+                modified = true;
+                enabled = false;
+            } else {
+                // Add snippet
+                let mut new_content = content.clone();
+                if !new_content.ends_with('\n') {
+                    new_content.push('\n');
+                }
+                new_content.push('\n');
+                new_content.push_str(snippet_start);
+                new_content.push('\n');
+                new_content.push_str("if command -v tmux &> /dev/null && [ -z \"$TMUX\" ] && [ -n \"$PS1\" ]; then\n");
+                new_content.push_str("    tmux attach-session -t mylm 2>/dev/null || tmux new-session -s mylm\n");
+                new_content.push_str("fi\n");
+                new_content.push_str(snippet_end);
+                new_content.push('\n');
+                
+                std::fs::write(&path, new_content)?;
+                modified = true;
+                enabled = true;
+            }
+        }
+    }
+
+    if modified {
+        if enabled {
+            println!("✅ tmux auto-start enabled in your shell configuration.");
+            println!("💡 Please restart your terminal for changes to take effect.");
+        } else {
+            println!("✅ tmux auto-start disabled (removed from shell configuration).");
+        }
+    } else {
+        println!("⚠️  Could not find .bashrc or .zshrc to modify.");
+    }
+
     Ok(())
 }

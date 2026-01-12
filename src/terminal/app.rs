@@ -75,8 +75,10 @@ pub struct App {
     pub input_price: f64,
     pub output_price: f64,
     pub tick_count: u64,
-    pub pending_terminal_context: Option<crate::context::terminal::TerminalContext>,
     pub terminal_history: Vec<String>,
+    pub pending_echo_suppression: String,
+    pub pending_clean_command: Option<String>,
+    pub raw_buffer: Vec<u8>,
 }
 
 impl App {
@@ -91,7 +93,7 @@ impl App {
         let auto_approve = config.commands.allow_execution;
 
         Self {
-            terminal_parser: Parser::new(24, 80, 1000), // 1000 lines of scrollback
+            terminal_parser: Parser::new(24, 80, 0), // Standard size, history handled separately
             pty_manager,
             config,
             agent: Arc::new(Mutex::new(agent)),
@@ -120,15 +122,26 @@ impl App {
             input_price,
             output_price,
             tick_count: 0,
-            pending_terminal_context: None,
             terminal_history: Vec::new(),
+            pending_echo_suppression: String::new(),
+            pending_clean_command: None,
+            raw_buffer: Vec::new(),
         }
+    }
+
+    pub fn process_terminal_data(&mut self, data: &[u8]) {
+        self.terminal_parser.process(data);
+        self.raw_buffer.extend_from_slice(data);
     }
 
     pub fn resize_pty(&mut self, width: u16, height: u16) {
         self.terminal_size = (height, width);
         let _ = self.pty_manager.resize(height, width);
-        self.terminal_parser.set_size(height, width);
+        
+        // Re-create parser with new dimensions and replay history to fix wrapping
+        let mut new_parser = Parser::new(height, width, 0);
+        new_parser.process(&self.raw_buffer);
+        self.terminal_parser = new_parser;
     }
 
     pub fn toggle_focus(&mut self) {
@@ -203,6 +216,7 @@ impl App {
         if !self.chat_input.is_empty() {
             // Abort any existing task before starting a new one
             self.abort_current_task();
+            self.status_message = None;
             
             let input = self.chat_input.clone();
 
@@ -263,10 +277,12 @@ impl App {
 
     pub fn abort_current_task(&mut self) {
         if let Some(task) = self.active_task.take() {
-            task.abort();
+            if !task.is_finished() {
+                task.abort();
+                self.status_message = Some("⛔ Task interrupted by user.".to_string());
+                self.interrupt_flag.store(true, Ordering::SeqCst);
+            }
             self.state = AppState::Idle;
-            self.status_message = Some("⛔ Task interrupted by user.".to_string());
-            self.interrupt_flag.store(true, Ordering::SeqCst);
         }
     }
 

@@ -40,8 +40,8 @@ check_and_install_dependencies() {
     
     case $OS in
         ubuntu|debian|pop|mint)
-            # Core build tools and libraries for mylm (OpenSSL, XCB, etc.)
-            DEPS=("pkg-config" "libssl-dev" "libxcb1-dev" "libxcb-render0-dev" "libxcb-shape0-dev" "libxcb-xfixes0-dev" "clang" "build-essential" "cmake")
+            # Core build tools and libraries for mylm (OpenSSL, XCB, etc.) + tmux for terminal context
+            DEPS=("pkg-config" "libssl-dev" "libxcb1-dev" "libxcb-render0-dev" "libxcb-shape0-dev" "libxcb-xfixes0-dev" "clang" "build-essential" "cmake" "tmux")
             for dep in "${DEPS[@]}"; do
                 if ! dpkg -l | grep -qw "$dep" &>/dev/null; then
                     MISSING_DEPS+=("$dep")
@@ -57,7 +57,7 @@ check_and_install_dependencies() {
             fi
             ;;
         fedora)
-            DEPS=("pkgconf-pkg-config" "openssl-devel" "libxcb-devel" "clang" "gcc-c++" "cmake")
+            DEPS=("pkgconf-pkg-config" "openssl-devel" "libxcb-devel" "clang" "gcc-c++" "cmake" "tmux")
             for dep in "${DEPS[@]}"; do
                 if ! rpm -q "$dep" &> /dev/null; then
                     MISSING_DEPS+=("$dep")
@@ -72,7 +72,7 @@ check_and_install_dependencies() {
             fi
             ;;
         arch)
-            DEPS=("pkgconf" "openssl" "libxcb" "clang" "base-devel" "cmake")
+            DEPS=("pkgconf" "openssl" "libxcb" "clang" "base-devel" "cmake" "tmux")
             for dep in "${DEPS[@]}"; do
                 if ! pacman -Qs "$dep" &> /dev/null; then
                     MISSING_DEPS+=("$dep")
@@ -84,6 +84,26 @@ check_and_install_dependencies() {
                 if [[ ! "$install_deps" =~ ^[Nn]$ ]]; then
                     sudo pacman -S --noconfirm "${MISSING_DEPS[@]}"
                 fi
+            fi
+            ;;
+        Darwin)
+            # macOS dependencies via Homebrew
+            if command -v brew &> /dev/null; then
+                DEPS=("openssl" "pkg-config" "tmux")
+                for dep in "${DEPS[@]}"; do
+                    if ! brew list "$dep" &> /dev/null; then
+                        MISSING_DEPS+=("$dep")
+                    fi
+                done
+                if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
+                    echo "⚠️  Missing dependencies: ${MISSING_DEPS[*]}"
+                    read -p "Would you like to install them now? [Y/n]: " install_deps
+                    if [[ ! "$install_deps" =~ ^[Nn]$ ]]; then
+                        brew install "${MISSING_DEPS[@]}"
+                    fi
+                fi
+            else
+                echo "⚠️  Homebrew not found. Please ensure you have 'openssl', 'pkg-config', and 'tmux' installed manually."
             fi
             ;;
         *)
@@ -225,6 +245,52 @@ setup_shell_alias() {
     fi
 }
 
+setup_tmux_autostart() {
+    echo ""
+    echo "🔍 Configuring Seamless Terminal Context (tmux auto-start)..."
+    echo "💡 This is the secret to a 'magical' terminal evolution experience."
+    echo "   By auto-starting tmux, every command you run and every output you see"
+    echo "   is instantly accessible to the AI when you run 'ai pop'."
+    echo ""
+    echo "   - It only attaches if you aren't already in tmux."
+    echo "   - It keeps your session alive if the terminal closes."
+    echo "   - It's the only way to capture full scrollback history seamlessly."
+    
+    local shell_rc=""
+    if [[ "$SHELL" == *"zsh"* ]]; then
+        shell_rc="$HOME/.zshrc"
+    elif [[ "$SHELL" == *"bash"* ]]; then
+        shell_rc="$HOME/.bashrc"
+    fi
+
+    if [ -n "$shell_rc" ] && [ -f "$shell_rc" ]; then
+        if grep -q "mylm tmux auto-start" "$shell_rc"; then
+            echo "✅ tmux auto-start is already configured in $shell_rc."
+            return 0
+        fi
+    fi
+
+    read -p "Enable global seamless context via tmux? [y/N]: " enable_tmux
+    if [[ ! "$enable_tmux" =~ ^[Yy]$ ]]; then
+        echo "⏭️  Skipping tmux auto-start setup."
+        return 0
+    fi
+
+    if [ -n "$shell_rc" ] && [ -f "$shell_rc" ]; then
+            echo "" >> "$shell_rc"
+            echo "# --- mylm tmux auto-start ---" >> "$shell_rc"
+            echo 'if command -v tmux &> /dev/null && [ -z "$TMUX" ] && [ -n "$PS1" ]; then' >> "$shell_rc"
+            echo '    tmux attach-session -t mylm 2>/dev/null || tmux new-session -s mylm' >> "$shell_rc"
+            echo 'fi' >> "$shell_rc"
+            echo "# --- end mylm tmux auto-start ---" >> "$shell_rc"
+            echo "✅ Added tmux auto-start snippet to $shell_rc."
+            echo "💡 Changes will take effect in new terminal sessions."
+        fi
+    else
+        echo "⚠️  Could not find shell configuration file to enable tmux auto-start."
+    fi
+}
+
 run_setup() {
     local mandatory=$1
     echo ""
@@ -264,6 +330,7 @@ full_installation() {
         install_binary
     fi
     setup_shell_alias "true"
+    setup_tmux_autostart
     run_setup "true"
     
     echo ""
