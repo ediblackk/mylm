@@ -11,12 +11,15 @@ use tokio::sync::Mutex;
 
 use tokio::sync::mpsc;
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum AppState {
     Idle,
-    Thinking,
-    ExecutingInternal,
-    WaitingForObservation,
+    Thinking(String),      // Provider info
+    #[allow(dead_code)]
+    Streaming(String),     // Progress or partial content
+    ExecutingTool(String), // Tool name
+    WaitingForUser,        // Auto-approve off
+    Error(String),
 }
 
 #[derive(Debug)]
@@ -70,6 +73,7 @@ pub struct App {
     pub pending_command_tx: Option<tokio::sync::oneshot::Sender<String>>,
     pub input_price: f64,
     pub output_price: f64,
+    pub tick_count: u64,
 }
 
 impl App {
@@ -112,6 +116,7 @@ impl App {
             pending_command_tx: None,
             input_price,
             output_price,
+            tick_count: 0,
         }
     }
 
@@ -208,7 +213,7 @@ impl App {
             self.chat_input.clear();
             self.reset_cursor();
             self.input_scroll = 0;
-            self.state = AppState::Thinking;
+            self.state = AppState::Thinking("...".to_string());
             // Reset scroll to bottom on new message
             self.chat_scroll = 0;
             self.chat_auto_scroll = true;
@@ -321,7 +326,7 @@ impl App {
                 }
                 let command = parts[1..].join(" ");
                 
-                self.state = AppState::WaitingForObservation;
+                self.state = AppState::ExecutingTool(command.clone());
                 let agent = self.agent.clone();
                 let event_tx_clone = event_tx.clone();
                 let interrupt_flag = self.interrupt_flag.clone();
@@ -476,8 +481,9 @@ async fn run_agent_loop(
         }
 
         let mut agent_lock = agent.lock().await;
-        let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Thinking));
-        let _ = event_tx.send(TuiEvent::StatusUpdate("Thinking...".to_string()));
+        let provider = agent_lock.llm_client.config().provider.to_string();
+        let model = agent_lock.llm_client.config().model.clone();
+        let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Thinking(format!("{} ({})", model, provider))));
         
         let step_res = agent_lock.step(last_observation.take()).await;
         match step_res {
@@ -495,7 +501,7 @@ async fn run_agent_loop(
                 let _ = event_tx.send(TuiEvent::StatusUpdate(format!("Tool: '{}'", tool)));
                 
                 if kind == ToolKind::Terminal {
-                    let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::WaitingForObservation));
+                    let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::ExecutingTool(tool.clone())));
                     
                     // Prepare command for execution
                     let cmd = if tool == "execute_command" {
@@ -522,7 +528,7 @@ async fn run_agent_loop(
 
                     if !auto_approve {
                         let _ = event_tx.send(TuiEvent::SuggestCommand(cmd));
-                        let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Idle));
+                        let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::WaitingForUser));
                         break; // Stop and wait for manual approval
                     }
 
@@ -542,7 +548,7 @@ async fn run_agent_loop(
                     }
                 } else {
                     // Internal tool
-                    let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::ExecutingInternal));
+                    let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::ExecutingTool(tool.clone())));
                     let observation = match agent_lock.tools.get(&tool) {
                         Some(t) => match t.call(&args).await {
                             Ok(output) => output,
@@ -561,12 +567,12 @@ async fn run_agent_loop(
             }
             Ok(AgentDecision::Error(e)) => {
                 let _ = event_tx.send(TuiEvent::AgentResponse(format!("Error: {}", e), TokenUsage::default()));
-                let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Idle));
+                let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Error(e)));
                 break;
             }
             Err(e) => {
                 let _ = event_tx.send(TuiEvent::AgentResponse(format!("Error: {}", e), TokenUsage::default()));
-                let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Idle));
+                let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Error(e.to_string())));
                 break;
             }
         }

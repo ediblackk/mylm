@@ -83,7 +83,8 @@ async fn main() -> Result<()> {
                 endpoint_config.base_url.clone(),
                 endpoint_config.model.clone(),
                 Some(endpoint_config.api_key.clone()),
-            );
+            )
+            .with_memory(config.memory.clone());
             let client = LlmClient::new(llm_config)?;
 
             let prompt = format!(
@@ -371,7 +372,8 @@ async fn handle_one_shot(
         endpoint_config.base_url.clone(),
         endpoint_config.model.clone(),
         Some(endpoint_config.api_key.clone()),
-    );
+    )
+    .with_memory(config.memory.clone());
     let client = Arc::new(LlmClient::new(llm_config)?);
 
     // Build hierarchical system prompt
@@ -435,12 +437,12 @@ async fn handle_one_shot(
 
     // Load tools
     let tools: Vec<Box<dyn crate::agent::Tool>> = vec![
-        Box::new(crate::agent::tools::shell::ShellTool::new(executor, ctx.clone(), event_tx.clone())) as Box<dyn crate::agent::Tool>,
+        Box::new(crate::agent::tools::shell::ShellTool::new(executor, ctx.clone(), event_tx.clone(), Some(store.clone()), None)) as Box<dyn crate::agent::Tool>,
         Box::new(crate::agent::tools::web_search::WebSearchTool::new(config.web_search.clone())) as Box<dyn crate::agent::Tool>,
-        Box::new(crate::agent::tools::memory::MemoryTool::new(store)) as Box<dyn crate::agent::Tool>,
+        Box::new(crate::agent::tools::memory::MemoryTool::new(store.clone())) as Box<dyn crate::agent::Tool>,
     ];
 
-    let mut agent = crate::agent::Agent::new(client, tools, system_prompt);
+    let mut agent = crate::agent::Agent::new_with_iterations(client, tools, system_prompt, 10, Some(store));
     
     let messages = vec![
         crate::llm::chat::ChatMessage::user(query.to_string()),

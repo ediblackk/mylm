@@ -38,6 +38,8 @@ pub struct LlmConfig {
     pub max_context_tokens: usize,
     /// Condense threshold (0.0 - 1.0)
     pub condense_threshold: f64,
+    /// Memory configuration (auto-record, auto-context)
+    pub memory: crate::config::MemoryConfig,
     /// Additional provider-specific parameters
     #[allow(dead_code)]
     pub extra_params: HashMap<String, String>,
@@ -63,6 +65,7 @@ impl LlmConfig {
             output_price_per_1k: 0.0,
             max_context_tokens: 32768,
             condense_threshold: 0.8,
+            memory: crate::config::MemoryConfig::default(),
             extra_params: HashMap::new(),
         }
     }
@@ -78,6 +81,12 @@ impl LlmConfig {
     pub fn with_context_management(mut self, max_tokens: usize, threshold: f64) -> Self {
         self.max_context_tokens = max_tokens;
         self.condense_threshold = threshold;
+        self
+    }
+
+    /// Set memory configuration
+    pub fn with_memory(mut self, memory: crate::config::MemoryConfig) -> Self {
+        self.memory = memory;
         self
     }
 

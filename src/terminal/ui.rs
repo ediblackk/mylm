@@ -345,14 +345,19 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(format!(" {} ", status), Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC))
         ]));
     } else if app.state != AppState::Idle {
-        let status_text = match app.state {
-            AppState::Thinking => " Thinking... ",
-            AppState::ExecutingInternal => " Executing Internal Tool... ",
-            AppState::WaitingForObservation => " Executing in Terminal... ",
+        let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let frame = spinner[(app.tick_count % spinner.len() as u64) as usize];
+        
+        let (status_text, color) = match &app.state {
+            AppState::Thinking(info) => (format!(" {} Thinking ({}) ", frame, info), Color::Yellow),
+            AppState::Streaming(info) => (format!(" {} Streaming: {} ", frame, info), Color::Green),
+            AppState::ExecutingTool(tool) => (format!(" {} Executing: {} ", frame, tool), Color::Cyan),
+            AppState::WaitingForUser => (" ⏳ Waiting for Approval ".to_string(), Color::Magenta),
+            AppState::Error(err) => (format!(" ❌ Error: {} ", err), Color::Red),
             AppState::Idle => unreachable!(),
         };
         chat_block = chat_block.title_bottom(Line::from(vec![
-            Span::styled(status_text, Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC))
+            Span::styled(status_text, Style::default().fg(color).add_modifier(Modifier::BOLD))
         ]));
     } else if !app.chat_auto_scroll {
         chat_block = chat_block.title_bottom(Line::from(vec![
@@ -400,7 +405,7 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default()
         });
 
-    if app.state != AppState::Idle {
+    if app.state != AppState::Idle && app.state != AppState::WaitingForUser {
         let p = Paragraph::new(Span::styled("(AI is active...)", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)))
             .block(input_block);
         frame.render_widget(p, chunks[1]);

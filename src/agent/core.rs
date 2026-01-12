@@ -1,6 +1,7 @@
 //! Agent Core Implementation
 use crate::llm::{LlmClient, chat::{ChatMessage, ChatRequest, MessageRole}, TokenUsage};
 use crate::agent::tool::{Tool, ToolKind};
+use crate::memory::VectorStore;
 use std::error::Error as StdError;
 use serde_json;
 use std::sync::Arc;
@@ -28,6 +29,8 @@ pub struct Agent {
     pub tools: HashMap<String, Box<dyn Tool>>,
     pub max_iterations: usize,
     pub system_prompt_prefix: String,
+    pub memory_store: Option<Arc<VectorStore>>,
+    pub session_id: String,
     
     // State maintained between steps
     pub history: Vec<ChatMessage>,
@@ -41,22 +44,27 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Create a new Agent with the provided LLM client and tools.
-    pub fn new(client: Arc<LlmClient>, tools: Vec<Box<dyn Tool>>, system_prompt_prefix: String) -> Self {
-        Self::new_with_iterations(client, tools, system_prompt_prefix, 10)
-    }
-
-    pub fn new_with_iterations(client: Arc<LlmClient>, tools: Vec<Box<dyn Tool>>, system_prompt_prefix: String, max_iterations: usize) -> Self {
+    pub fn new_with_iterations(
+        client: Arc<LlmClient>,
+        tools: Vec<Box<dyn Tool>>,
+        system_prompt_prefix: String,
+        max_iterations: usize,
+        memory_store: Option<Arc<VectorStore>>,
+    ) -> Self {
         let mut tool_map = HashMap::new();
         for tool in tools {
             tool_map.insert(tool.name().to_string(), tool);
         }
+
+        let session_id = chrono::Utc::now().timestamp_millis().to_string();
 
         Self {
             llm_client: client,
             tools: tool_map,
             max_iterations,
             system_prompt_prefix,
+            memory_store,
+            session_id,
             history: Vec::new(),
             iteration_count: 0,
             total_usage: TokenUsage::default(),
@@ -114,7 +122,24 @@ impl Agent {
         let context_limit = self.llm_client.config().max_context_tokens.min(100000);
         self.history = self.prune_history(self.history.clone(), context_limit);
 
-        let request = ChatRequest::new(self.llm_client.model().to_string(), self.history.clone());
+        let mut request = ChatRequest::new(self.llm_client.model().to_string(), self.history.clone());
+        
+        // Provide tool definitions if supported
+        let mut chat_tools = Vec::new();
+        for tool in self.tools.values() {
+            chat_tools.push(crate::llm::chat::ChatTool {
+                type_: "function".to_string(),
+                function: crate::llm::chat::ChatFunction {
+                    name: tool.name().to_string(),
+                    description: Some(tool.description().to_string()),
+                    parameters: Some(tool.parameters()),
+                },
+            });
+        }
+        if !chat_tools.is_empty() {
+            request = request.with_tools(chat_tools);
+        }
+
         let response = self.llm_client.chat(&request).await?;
         let content = response.content();
 
@@ -167,11 +192,23 @@ impl Agent {
         }
 
         // 2. Handle ReAct format (Regex)
-        let action_re = Regex::new(r"Action:\s*(.*)")?;
-        let action_input_re = Regex::new(r"Action Input:\s*(.*)")?;
+        // Improved ReAct parsing (handles multi-line Action Input)
+        let action_re = Regex::new(r"(?m)^Action:\s*(.*)")?;
+        let action_input_re = Regex::new(r"(?ms)^Action Input:\s*(.*)$")?;
 
         let action = action_re.captures(&content).map(|c| c[1].trim().to_string());
-        let action_input = action_input_re.captures(&content).map(|c| c[1].trim().to_string());
+        
+        // Action Input might be multi-line or followed by other tags, we need to be careful
+        // Often it's at the end of the message or followed by "Observation:"
+        let action_input = if let Some(caps) = action_input_re.captures(&content) {
+            let mut val = caps[1].trim().to_string();
+            if let Some(pos) = val.find("Observation:") {
+                val.truncate(pos);
+            }
+            Some(val.trim().to_string())
+        } else {
+            None
+        };
 
         if let (Some(tool_name), Some(args)) = (action, action_input) {
             // Repetition Check
@@ -222,11 +259,28 @@ impl Agent {
     /// Legacy run method for backward compatibility.
     pub async fn run(
         &mut self,
-        history: Vec<ChatMessage>,
+        mut history: Vec<ChatMessage>,
         event_tx: tokio::sync::mpsc::UnboundedSender<crate::terminal::app::TuiEvent>,
         interrupt_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
         auto_approve: bool,
     ) -> Result<(String, TokenUsage), Box<dyn StdError + Send + Sync>> {
+        // 1. Memory Context Injection (if enabled)
+        if self.llm_client.config().memory.auto_context {
+            if let Some(store) = &self.memory_store {
+                if let Some(last_user_msg) = history.iter().rev().find(|m| m.role == MessageRole::User) {
+                    let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate("Searching memory...".to_string()));
+                    let memories = store.search_memory(&last_user_msg.content, 5).await.unwrap_or_default();
+                    if !memories.is_empty() {
+                        let context = self.build_context_from_memories(&memories);
+                        // Inject context as a system reminder or prepended to user msg
+                        if let Some(user_idx) = history.iter().rposition(|m| m.role == MessageRole::User) {
+                            history[user_idx].content = format!("{}\n\n## User Query\n{}", context, history[user_idx].content);
+                        }
+                    }
+                }
+            }
+        }
+
         self.reset(history);
         
         let mut last_observation = None;
@@ -418,5 +472,28 @@ impl Agent {
             tools_desc,
             self.tools.keys().cloned().collect::<Vec<_>>().join(", ")
         )
+    }
+
+    fn build_context_from_memories(&self, memories: &[crate::memory::store::Memory]) -> String {
+        if memories.is_empty() {
+            return String::new();
+        }
+        
+        let mut context = String::from("## Relevant Past Operations & Knowledge\n");
+        for (i, mem) in memories.iter().enumerate() {
+            let timestamp = chrono::DateTime::from_timestamp(mem.created_at, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "unknown time".to_string());
+            
+            context.push_str(&format!(
+                "{}. [{}] {} ({})\n",
+                i + 1,
+                mem.r#type,
+                mem.content,
+                timestamp,
+            ));
+        }
+        context.push_str("\nUse this context to inform your actions and avoid repeating mistakes.");
+        context
     }
 }

@@ -1,6 +1,7 @@
 use crate::agent::tool::Tool;
 use crate::executor::CommandExecutor;
 use crate::context::TerminalContext;
+use crate::memory::VectorStore;
 use crate::terminal::app::TuiEvent;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -12,6 +13,8 @@ pub struct ShellTool {
     executor: Arc<CommandExecutor>,
     _context: TerminalContext,
     event_tx: mpsc::UnboundedSender<TuiEvent>,
+    memory_store: Option<Arc<VectorStore>>,
+    session_id: Option<String>,
 }
 
 impl ShellTool {
@@ -19,9 +22,11 @@ impl ShellTool {
     pub fn new(
         executor: Arc<CommandExecutor>,
         context: TerminalContext,
-        event_tx: mpsc::UnboundedSender<TuiEvent>
+        event_tx: mpsc::UnboundedSender<TuiEvent>,
+        memory_store: Option<Arc<VectorStore>>,
+        session_id: Option<String>,
     ) -> Self {
-        Self { executor, _context: context, event_tx }
+        Self { executor, _context: context, event_tx, memory_store, session_id }
     }
 }
 
@@ -64,6 +69,11 @@ impl Tool for ShellTool {
         
         // 4. Await result from PTY capture
         let output = rx.await.map_err(|_| anyhow::anyhow!("Failed to receive command output from TUI"))?;
+
+        // 5. Auto-record to memory if enabled
+        if let Some(store) = &self.memory_store {
+            let _ = store.record_command(args, &output, 0, self.session_id.clone()).await;
+        }
         
         // Combine screen context with command output
         let combined = format!(

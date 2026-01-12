@@ -44,7 +44,8 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>) -> Result<()> {
         Some(endpoint_config.api_key.clone()),
     )
     .with_pricing(endpoint_config.input_price_per_1k, endpoint_config.output_price_per_1k)
-    .with_context_management(endpoint_config.max_context_tokens, endpoint_config.condense_threshold);
+    .with_context_management(endpoint_config.max_context_tokens, endpoint_config.condense_threshold)
+    .with_memory(config.memory.clone());
     let llm_client = std::sync::Arc::new(LlmClient::new(llm_config)?);
 
     // Setup Agent dependencies
@@ -72,7 +73,7 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>) -> Result<()> {
 
     // Setup Tools
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
-    let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone());
+    let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone(), Some(store.clone()), None);
     let memory_tool = MemoryTool::new(store.clone());
     let web_search_tool = WebSearchTool::new(config.web_search.clone());
     let crawl_tool = CrawlTool::new();
@@ -83,7 +84,7 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>) -> Result<()> {
     tools.push(Box::new(crawl_tool) as Box<dyn Tool>);
 
     // Create Agent
-    let agent = Agent::new(llm_client, tools, system_prompt);
+    let agent = Agent::new_with_iterations(llm_client, tools, system_prompt, 10, Some(store.clone()));
 
     // Setup PTY
     let (pty_manager, mut pty_rx) = spawn_pty()?;
@@ -120,7 +121,7 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>) -> Result<()> {
     tokio::spawn(async move {
         loop {
             let _ = tick_tx.send(TuiEvent::Tick);
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     });
 
@@ -241,11 +242,13 @@ async fn run_loop(
                             Some(endpoint_config.api_key.clone()),
                         )
                         .with_pricing(endpoint_config.input_price_per_1k, endpoint_config.output_price_per_1k)
-                        .with_context_management(endpoint_config.max_context_tokens, endpoint_config.condense_threshold);
+                        .with_context_management(endpoint_config.max_context_tokens, endpoint_config.condense_threshold)
+                        .with_memory(new_config.memory.clone());
                         
                         if let Ok(llm_client) = LlmClient::new(llm_config) {
                             app.input_price = endpoint_config.input_price_per_1k;
                             app.output_price = endpoint_config.output_price_per_1k;
+                            app.session_monitor.set_max_context(endpoint_config.max_context_tokens as u32);
                             
                             let llm_client = std::sync::Arc::new(llm_client);
                             
@@ -257,7 +260,8 @@ async fn run_loop(
                                 agent.system_prompt_prefix = system_prompt;
                                 
                                 let mut tools: Vec<Box<dyn Tool>> = Vec::new();
-                                let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone());
+                                let agent_session_id = agent.session_id.clone();
+                                let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone(), Some(store.clone()), Some(agent_session_id));
                                 let memory_tool = MemoryTool::new(store.clone());
                                 let web_search_tool = WebSearchTool::new(new_config.web_search.clone());
                                 let crawl_tool = CrawlTool::new();

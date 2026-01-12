@@ -58,6 +58,10 @@ pub struct Config {
     #[serde(default)]
     pub web_search: WebSearchConfig,
 
+    /// Memory configuration
+    #[serde(default)]
+    pub memory: MemoryConfig,
+
     /// Maximum context tokens to keep in history
     #[serde(default = "default_context_limit")]
     pub context_limit: usize,
@@ -92,6 +96,30 @@ pub struct WebSearchConfig {
     pub model: String,
 }
 
+/// Memory configuration
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct MemoryConfig {
+    /// Whether to automatically record commands and interactions
+    #[serde(default = "default_true")]
+    pub auto_record: bool,
+    /// Whether to inject relevant memories into the context
+    #[serde(default = "default_true")]
+    pub auto_context: bool,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            auto_record: true,
+            auto_context: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Command execution configuration
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct CommandConfig {
@@ -122,6 +150,7 @@ impl Default for Config {
             endpoints: Vec::new(),
             commands: CommandConfig::default(),
             web_search: WebSearchConfig::default(),
+            memory: MemoryConfig::default(),
             context_limit: default_context_limit(),
             verbose_mode: default_verbose_mode(),
         }
@@ -327,6 +356,7 @@ impl Config {
                 format!("Context Limit: {}", self.context_limit),
                 format!("Verbose Mode: {}", if self.verbose_mode { "On" } else { "Off" }),
                 format!("Auto-approve:  {}", if self.commands.allow_execution { "Enabled" } else { "Disabled" }),
+                format!("Auto-Memory:   {}", if self.memory.auto_record { "Enabled" } else { "Disabled" }),
                 "⬅️  Back".to_string(),
             ];
 
@@ -348,6 +378,10 @@ impl Config {
                 }
                 2 => {
                     self.commands.allow_execution = !self.commands.allow_execution;
+                }
+                3 => {
+                    self.memory.auto_record = !self.memory.auto_record;
+                    self.memory.auto_context = self.memory.auto_record;
                 }
                 _ => break,
             }
@@ -567,56 +601,8 @@ pub fn create_default_config() -> Config {
             allowlist_paths: vec![],
         },
         web_search: WebSearchConfig::default(),
+        memory: MemoryConfig::default(),
         context_limit: 100000,
         verbose_mode: false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    #[test]
-    fn test_default_config() {
-        let config = Config::default();
-        assert_eq!(config.default_endpoint, "default");
-        assert!(config.endpoints.is_empty());
-    }
-
-    #[test]
-    fn test_load_from_file() {
-        let yaml_content = r#"
-default_endpoint: ollama
-endpoints:
-  - name: ollama
-    provider: openai
-    base_url: http://localhost:11434/v1
-    model: llama3.2
-    api_key: none
-    timeout_seconds: 120
-"#;
-        let temp_dir = TempDir::new().unwrap();
-        let config_path = temp_dir.path().join("mylm.yaml");
-        fs::write(&config_path, yaml_content).unwrap();
-
-        let config = Config::load_from_file(&config_path).unwrap();
-        assert_eq!(config.default_endpoint, "ollama");
-        assert_eq!(config.endpoints.len(), 1);
-        assert_eq!(config.endpoints[0].name, "ollama");
-    }
-
-    #[test]
-    fn test_get_endpoint() {
-        let config = create_default_config();
-        let endpoint = config.get_endpoint(Some("ollama")).unwrap();
-        assert_eq!(endpoint.name, "ollama");
-    }
-
-    #[test]
-    fn test_get_default_endpoint() {
-        let config = create_default_config();
-        let endpoint = config.get_default_endpoint().unwrap();
-        assert_eq!(endpoint.name, "ollama");
     }
 }

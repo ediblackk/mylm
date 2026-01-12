@@ -25,6 +25,20 @@ pub trait Tool: Send + Sync {
     /// A description of how to use the tool, including parameter format
     fn usage(&self) -> &str;
 
+    /// Optional JSON schema for tool parameters
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "args": {
+                    "type": "string",
+                    "description": self.usage()
+                }
+            },
+            "required": ["args"]
+        })
+    }
+
     /// Execute the tool with the provided arguments
     async fn call(&self, args: &str) -> Result<String>;
 
