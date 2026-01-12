@@ -38,6 +38,13 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>, initial_query: O
     // Setup LLM Client (using default endpoint)
     let config = Config::load()?;
     let endpoint_config = config.get_endpoint(None)?;
+    // Use global context limit if user explicitly changed it from default, otherwise respect endpoint limit
+    let effective_context_limit = if config.context_limit != crate::config::default_context_limit() {
+        config.context_limit
+    } else {
+        endpoint_config.max_context_tokens
+    };
+
     let llm_config = LlmConfig::new(
         endpoint_config.provider.parse().map_err(|e| anyhow::anyhow!("{}", e))?,
         endpoint_config.base_url.clone(),
@@ -45,7 +52,7 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>, initial_query: O
         Some(endpoint_config.api_key.clone()),
     )
     .with_pricing(endpoint_config.input_price_per_1k, endpoint_config.output_price_per_1k)
-    .with_context_management(endpoint_config.max_context_tokens, endpoint_config.condense_threshold)
+    .with_context_management(effective_context_limit, endpoint_config.condense_threshold)
     .with_memory(config.memory.clone());
     let llm_client = std::sync::Arc::new(LlmClient::new(llm_config)?);
 
@@ -81,8 +88,8 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>, initial_query: O
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
     let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone(), Some(store.clone()), Some(categorizer.clone()), None);
     let memory_tool = MemoryTool::new(store.clone());
-    let web_search_tool = WebSearchTool::new(config.web_search.clone());
-    let crawl_tool = CrawlTool::new();
+    let web_search_tool = WebSearchTool::new(config.web_search.clone(), event_tx.clone());
+    let crawl_tool = CrawlTool::new(event_tx.clone());
     
     tools.push(Box::new(shell_tool) as Box<dyn Tool>);
     tools.push(Box::new(memory_tool) as Box<dyn Tool>);
@@ -369,6 +376,13 @@ async fn run_loop(
                     app.config = new_config.clone();
                     
                     if let Ok(endpoint_config) = new_config.get_endpoint(None) {
+                        // Use global context limit if user explicitly changed it from default, otherwise respect endpoint limit
+                        let effective_context_limit = if new_config.context_limit != crate::config::default_context_limit() {
+                            new_config.context_limit
+                        } else {
+                            endpoint_config.max_context_tokens
+                        };
+
                         let llm_config = LlmConfig::new(
                             endpoint_config.provider.parse().unwrap_or(crate::llm::LlmProvider::OpenAiCompatible),
                             endpoint_config.base_url.clone(),
@@ -376,13 +390,13 @@ async fn run_loop(
                             Some(endpoint_config.api_key.clone()),
                         )
                         .with_pricing(endpoint_config.input_price_per_1k, endpoint_config.output_price_per_1k)
-                        .with_context_management(endpoint_config.max_context_tokens, endpoint_config.condense_threshold)
+                        .with_context_management(effective_context_limit, endpoint_config.condense_threshold)
                         .with_memory(new_config.memory.clone());
                         
                         if let Ok(llm_client) = LlmClient::new(llm_config) {
                             app.input_price = endpoint_config.input_price_per_1k;
                             app.output_price = endpoint_config.output_price_per_1k;
-                            app.session_monitor.set_max_context(endpoint_config.max_context_tokens as u32);
+                            app.session_monitor.set_max_context(effective_context_limit as u32);
                             
                             let llm_client = std::sync::Arc::new(llm_client);
                             
@@ -398,8 +412,8 @@ async fn run_loop(
                                 let categorizer = agent.categorizer.as_ref().cloned();
                                 let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone(), Some(store.clone()), categorizer, Some(agent_session_id));
                                 let memory_tool = MemoryTool::new(store.clone());
-                                let web_search_tool = WebSearchTool::new(new_config.web_search.clone());
-                                let crawl_tool = CrawlTool::new();
+                                let web_search_tool = WebSearchTool::new(new_config.web_search.clone(), event_tx.clone());
+                                let crawl_tool = CrawlTool::new(event_tx.clone());
                                 
                                 tools.push(Box::new(shell_tool) as Box<dyn Tool>);
                                 tools.push(Box::new(memory_tool) as Box<dyn Tool>);

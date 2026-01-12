@@ -1,20 +1,30 @@
 use crate::agent::tool::Tool;
 use crate::llm::{LlmClient, LlmConfig, LlmProvider, chat::{ChatRequest, ChatMessage, ChatTool, ChatFunction}};
 use crate::config::WebSearchConfig;
-use anyhow::{Result, bail};
+use crate::terminal::app::TuiEvent;
+use anyhow::{Result, bail, Context};
 use async_trait::async_trait;
+use tokio::sync::mpsc;
 
 /// A tool for searching the web using various providers (Kimi, Google, etc.)
 pub struct WebSearchTool {
     config: WebSearchConfig,
+    client: reqwest::Client,
+    event_tx: mpsc::UnboundedSender<TuiEvent>,
 }
 
 impl WebSearchTool {
-    pub fn new(config: WebSearchConfig) -> Self {
-        Self { config }
+    pub fn new(config: WebSearchConfig, event_tx: mpsc::UnboundedSender<TuiEvent>) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .user_agent("mylm-assistant/0.1")
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self { config, client, event_tx }
     }
 
     async fn call_kimi(&self, query: &str) -> Result<String> {
+        let _ = self.event_tx.send(TuiEvent::StatusUpdate(format!("Searching (Kimi): {}", query)));
         let base_url = "https://api.moonshot.ai/v1".to_string();
         let model = if self.config.model.is_empty() { 
             "kimi-k2-turbo-preview".to_string() 
@@ -40,49 +50,71 @@ impl WebSearchTool {
         };
 
         // 1. Initial request to trigger tool call
-        let messages = vec![
+        let mut messages = vec![
             ChatMessage::system("You are a helpful assistant with web search capabilities. When asked to search, use the $web_search tool."),
             ChatMessage::user(query),
         ];
 
-        let request = ChatRequest::new(
-            client.model().to_string(),
-            messages.clone(),
-        )
-        .with_tools(vec![web_search_tool.clone()]);
-
-        let response = client.chat(&request).await?;
-        
         // 2. Handle the tool call loop (as per Kimi docs)
-        // Note: Our LlmClient/ChatResponse doesn't currently expose tool_calls directly in the public API 
-        // in a way that matches Moonshot's exact expectations for the internal loop if we want to be fully generic.
-        // However, for this "WebSearchTool" wrapper, we can handle the logic.
+        for _ in 0..5 { // Limit turns to prevent infinite loops
+            let request = ChatRequest::new(
+                client.model().to_string(),
+                messages.clone(),
+            )
+            .with_tools(vec![web_search_tool.clone()]);
+
+            let response = client.chat(&request).await.context("Kimi API request failed")?;
+            let choice = response.choices.first().context("Kimi returned no choices")?;
+            
+            if choice.finish_reason.as_deref() == Some("tool_calls") {
+                if let Some(tool_calls) = &choice.message.tool_calls {
+                    messages.push(choice.message.clone());
+                    for tool_call in tool_calls {
+                        if tool_call.function.name == "$web_search" {
+                            // Echo back the arguments as the result for builtin_function.$web_search
+                            messages.push(ChatMessage::tool(
+                                tool_call.id.clone(),
+                                tool_call.function.name.clone(),
+                                tool_call.function.arguments.clone()
+                            ));
+                        }
+                    }
+                    continue;
+                }
+            }
+
+            let content = response.content().trim().to_string();
+            if content.is_empty() {
+                return Ok("No results found.".to_string());
+            }
+            return Ok(content);
+        }
         
-        // For now, if the response is successful and contains the content, we return it.
-        // If Moonshot requires the manual mirror-back of arguments to trigger the search, 
-        // we'd need to parse the raw JSON or update our ChatResponse to hold tool_calls.
-        
-        // Let's assume for this high-level tool we want the final answer.
-        // The loop in WebSearchTool will continue until finish_reason is "stop".
-        
-        // TODO: Enhance LlmClient to support tool_calls extraction if we want to implement the exact loop here.
-        // For a simple implementation that works with Kimi's builtin search, 
-        // we might need to use a more direct request if our abstraction is too high.
-        
-        // Given the prompt, the user wants a "complete implementation".
-        
-        Ok(response.content())
+        bail!("Kimi search timed out (too many tool call turns)");
     }
 
     async fn call_serpapi(&self, query: &str) -> Result<String> {
-        let client = reqwest::Client::new();
-        let url = format!("https://serpapi.com/search.json?q={}&api_key={}", 
-            urlencoding::encode(query), 
+        let _ = self.event_tx.send(TuiEvent::StatusUpdate(format!("Searching (SerpAPI): {}", query)));
+        let url = format!("https://serpapi.com/search.json?q={}&api_key={}",
+            urlencoding::encode(query),
             self.config.api_key
         );
 
-        let resp = client.get(url).send().await?.json::<serde_json::Value>().await?;
+        let resp_res = self.client.get(url).send().await;
+        let resp = match resp_res {
+            Ok(r) => {
+                match r.json::<serde_json::Value>().await {
+                    Ok(v) => v,
+                    Err(_) => return Ok("Error parsing response".to_string()),
+                }
+            },
+            Err(e) => bail!("Failed to connect to SerpAPI: {}", e),
+        };
         
+        if let Some(error) = resp.get("error").and_then(|e| e.as_str()) {
+            bail!("SerpAPI error: {}", error);
+        }
+
         // Extract snippets from organic results
         let mut results = Vec::new();
         if let Some(organic) = resp.get("organic_results").and_then(|r| r.as_array()) {

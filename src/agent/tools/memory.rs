@@ -33,6 +33,38 @@ impl Tool for MemoryTool {
     async fn call(&self, args: &str) -> Result<String> {
         let args = args.trim();
         
+        // Helper to extract content from JSON wrapper
+        fn extract_from_json(args: &str) -> String {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
+                // Check for wrapper keys like "args" or "arguments"
+                if let Some(inner) = v.get("args").or_else(|| v.get("arguments")) {
+                    if let Some(s) = inner.as_str() {
+                        return extract_from_json(s);
+                    }
+                }
+
+                // Check for direct command keys
+                if let Some(content) = v.get("add").and_then(|s| s.as_str()) {
+                    return format!("add: {}", content);
+                }
+                if let Some(query) = v.get("search").and_then(|s| s.as_str()) {
+                    return format!("search: {}", query);
+                }
+                if let Some(query) = v.get("query").and_then(|s| s.as_str()) {
+                    return format!("search: {}", query);
+                }
+            }
+            args.to_string()
+        }
+
+        let cleaned_args = if args.starts_with('{') {
+            extract_from_json(args)
+        } else {
+            args.to_string()
+        };
+
+        let args = cleaned_args.as_str();
+
         if let Some(content) = args.strip_prefix("add:") {
             let content = content.trim();
             if content.is_empty() {
@@ -56,7 +88,7 @@ impl Tool for MemoryTool {
                 Ok(output)
             }
         } else {
-            bail!("Invalid memory command. Use 'add: <content>' or 'search: <query>'");
+            bail!("Invalid memory command. Use 'add: <content>' or 'search: <query>'. You sent: '{}'", args);
         }
     }
 }

@@ -154,6 +154,24 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
             terminal::run_tui(None, None, None, None).await?;
         }
 
+        Some(Commands::Pop) => {
+            if crate::cli::hub::is_tmux_available() {
+                let context = TerminalContext::collect().await;
+                terminal::run_tui(None, None, Some(context), Some(initial_context.terminal)).await?;
+            } else {
+                println!("\n❌ {} is required for the 'Pop Terminal' feature.", Style::new().bold().apply_to("tmux"));
+                println!("   This feature uses tmux to capture your current terminal session history and provide seamless context.");
+                println!("\n   Note: tmux does not run automatically; you should start your terminal inside a tmux session");
+                println!("   (by running 'tmux') to take full advantage of this feature.");
+                println!("\n   Please install it using your package manager:");
+                println!("   - {}  : sudo apt install tmux", Style::new().cyan().apply_to("Debian/Ubuntu/Pop"));
+                println!("   - {}       : sudo dnf install tmux", Style::new().cyan().apply_to("Fedora"));
+                println!("   - {}         : sudo pacman -S tmux", Style::new().cyan().apply_to("Arch"));
+                println!("   - {}        : brew install tmux", Style::new().cyan().apply_to("macOS"));
+                println!();
+            }
+        }
+
         Some(Commands::Memory { cmd }) => {
             let data_dir = dirs::data_dir()
                 .context("Could not find data directory")?
@@ -476,8 +494,9 @@ async fn handle_one_shot(
     // Load tools
     let tools: Vec<Box<dyn crate::agent::Tool>> = vec![
         Box::new(crate::agent::tools::shell::ShellTool::new(executor, ctx.clone(), event_tx.clone(), Some(store.clone()), Some(Arc::new(crate::memory::MemoryCategorizer::new(client.clone(), store.clone()))), None)) as Box<dyn crate::agent::Tool>,
-        Box::new(crate::agent::tools::web_search::WebSearchTool::new(config.web_search.clone())) as Box<dyn crate::agent::Tool>,
+        Box::new(crate::agent::tools::web_search::WebSearchTool::new(config.web_search.clone(), event_tx.clone())) as Box<dyn crate::agent::Tool>,
         Box::new(crate::agent::tools::memory::MemoryTool::new(store.clone())) as Box<dyn crate::agent::Tool>,
+        Box::new(crate::agent::tools::crawl::CrawlTool::new(event_tx.clone())) as Box<dyn crate::agent::Tool>,
     ];
 
     let categorizer = Arc::new(crate::memory::categorizer::MemoryCategorizer::new(client.clone(), store.clone()));

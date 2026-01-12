@@ -250,7 +250,16 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
         };
 
         let mut lines_to_render = Vec::new();
-        let raw_lines: Vec<&str> = m.content.split('\n').collect();
+        
+        let delimiter = "\n\n---\n[TERMINAL STATE ATTACHMENT]";
+        let (display_content, has_hidden_context) = if m.content.contains(delimiter) {
+            let parts: Vec<&str> = m.content.split(delimiter).collect();
+            (parts[0], true)
+        } else {
+            (m.content.as_str(), false)
+        };
+
+        let raw_lines: Vec<&str> = display_content.split('\n').collect();
         
         for line in raw_lines {
             let trimmed = line.trim();
@@ -293,6 +302,10 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
             }
 
             lines_to_render.push((line.to_string(), Style::default()));
+        }
+
+        if has_hidden_context {
+            lines_to_render.push(("[Context Attached]".to_string(), Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)));
         }
 
         if m.role == MessageRole::Assistant && lines_to_render.iter().all(|(l, _)| l.trim().is_empty()) {

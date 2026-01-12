@@ -1,14 +1,25 @@
 use crate::agent::tool::Tool;
+use crate::terminal::app::TuiEvent;
 use anyhow::Result;
 use async_trait::async_trait;
 use reqwest;
+use tokio::sync::mpsc;
 
 /// A tool for retrieving and cleaning web page content.
-pub struct CrawlTool;
+pub struct CrawlTool {
+    client: reqwest::Client,
+    event_tx: mpsc::UnboundedSender<TuiEvent>,
+}
 
 impl CrawlTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(event_tx: mpsc::UnboundedSender<TuiEvent>) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .user_agent("mylm-assistant/0.1")
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
+        Self { client, event_tx }
     }
 }
 
@@ -27,12 +38,8 @@ impl Tool for CrawlTool {
     }
 
     async fn call(&self, url: &str) -> Result<String> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .user_agent("mylm-assistant/0.1")
-            .build()?;
-
-        let response = client.get(url).send().await?.text().await?;
+        let _ = self.event_tx.send(TuiEvent::StatusUpdate(format!("Crawling: {}", url)));
+        let response = self.client.get(url).send().await?.text().await?;
         
         // Very basic HTML to text conversion (just stripping tags for now)
         // In a production app, we'd use something like 'html2md' or 'readability'

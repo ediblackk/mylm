@@ -84,6 +84,12 @@ pub enum Commands {
     /// Start interactive TUI mode with terminal and AI chat
     Interactive,
 
+    /// Pop into the current terminal session (requires tmux)
+    ///
+    /// This restores your existing terminal history and environment
+    /// for seamless context awareness.
+    Pop,
+
     /// Manage persistent memory (RAG)
     Memory {
         #[command(subcommand)]

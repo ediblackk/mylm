@@ -19,10 +19,10 @@ Installed as the simple `ai` command, it integrates directly into your workflow 
 
 Most "AI CLI tools" today are thin API frontends:
 
-* stateless
-* slow to start
-* blind to your system
-* unsafe around command execution
+*   stateless
+*   slow to start
+*   blind to your system
+*   unsafe around command execution
 
 **mylm is different by design.**
 
@@ -32,65 +32,64 @@ It treats the terminal as a *first‑class environment*, not a text box.
 
 ## Core Capabilities
 
-### ⚡ Blazing‑Fast, Native Performance
+### ⚡ Seamless Terminal Evolution
 
-* Written in **Rust** for instant startup and low memory usage
-* No Python runtimes, no background daemons, no surprises
+`mylm` doesn't just "chat" — it evolves your current terminal session.
+
+*   **Pop Terminal (`ai pop`)**: Instantly "pops" your current shell state into the AI interface.
+*   **Restores Context**: Uses `tmux` to capture your active pane's history, running processes, and environment variables.
+*   **No Context Switching**: Resume exactly where you left off, but now with an AI assistant that sees what you see.
+
+### 🫧 Clean Execution & Smart Reflow
+
+*   **Clean Execution**: Commands run visibly in a dedicated terminal pane, but their raw output doesn't clutter the chat. The AI sees the output, but you get a clean, readable conversation.
+*   **Smart Reflow**: The interface dynamically resizes and reflows content as you adjust your terminal window. No broken layouts or cutoff text.
 
 ### 🧠 Agentic Think‑Plan‑Execute Loop
 
-* Interactive mode where the AI can:
-
-  * reason about a problem
-  * plan multi‑step solutions
-  * execute validated shell commands
-* Designed for real work, not demos
+*   Interactive mode where the AI can:
+    *   reason about a problem
+    *   plan multi‑step solutions
+    *   execute validated shell commands
+*   Designed for real work, not demos
 
 ### 🖥 Deep Terminal Context Awareness
 
 `mylm` automatically understands:
 
-* current working directory
-* Git repository status
-* system information
-* execution history
+*   current working directory
+*   Git repository status
+*   system information
+*   execution history
 
 This context is continuously fed into the model to produce **relevant, actionable answers**.
 
 ### 🔐 Smart & Guarded Command Execution
 
-* Commands proposed by the AI are **analyzed before execution**
-* Optional dry‑run mode for zero‑risk inspection
-* You stay in control at every step
+*   Commands proposed by the AI are **analyzed before execution**
+*   Optional dry‑run mode for zero‑risk inspection
+*   You stay in control at every step
 
 ### 🌐 Live Web Search & Crawling
 
-* Real‑time search for up‑to‑date information
-* Website crawling for deeper technical analysis
-* No stale training‑data hallucinations
+*   Real‑time search for up‑to‑date information
+*   Website crawling for deeper technical analysis
+*   No stale training‑data hallucinations
 
 ### 🔁 Multi‑Provider & Local Model Support
 
 One unified interface for:
 
-* **Local models**: Ollama, LM Studio
-* **Cloud providers**: Google Gemini, OpenAI, Anthropic
+*   **Local models**: Ollama, LM Studio
+*   **Cloud providers**: Google Gemini, OpenAI, Anthropic
 
 Switch providers or endpoints without changing your workflow.
 
 ### 🗂 Persistent Memory (RAG)
 
-* Local vector database for long‑term knowledge
-* Store project notes, decisions, and references
-* Retrieve them naturally during future sessions
-
-### 🧭 Interactive TUI Hub
-
-* Session management
-* Resume past conversations
-* Configuration and profile switching
-
-Built with terminal UX in mind — clean, fast, and predictable.
+*   Local vector database for long‑term knowledge
+*   Store project notes, decisions, and references
+*   Retrieve them naturally during future sessions
 
 ---
 
@@ -102,9 +101,9 @@ This tool integrates deeply with your operating system and shell. That level of 
 
 You are encouraged to:
 
-1. **Audit the code** (manually or with AI assistance)
-2. **Inspect dependencies** via `Cargo.toml` and the lockfile
-3. **Build locally**, knowing exactly what binary you are running
+1.  **Audit the code** (manually or with AI assistance)
+2.  **Inspect dependencies** via `Cargo.toml` and the lockfile
+3.  **Build locally**, knowing exactly what binary you are running
 
 There are no hidden installers, no prebuilt binaries, and no silent updates.
 
@@ -114,13 +113,18 @@ You stay in control.
 
 ## Supported Platforms
 
-* **Linux** — primary target, fully optimized
-* **macOS** — fully supported
-* **Windows** — in active development
+*   **Linux** — primary target, fully optimized
+*   **macOS** — fully supported
+*   **Windows** — in active development
 
 ---
 
 ## Installation (Recommended)
+
+### Prerequisites
+
+*   **Rust Toolchain** (installed automatically if missing)
+*   **tmux** (highly recommended for Seamless Terminal Evolution)
 
 ### Build From Source
 
@@ -133,12 +137,12 @@ chmod +x install.sh
 
 ### What the installer does
 
-* Detects your Linux distribution
-* Installs missing system dependencies
-* Builds the project locally
-* Sets up the `ai` command
-* Preserves existing configuration on updates
-* Enables `sccache` when available
+*   Detects your Linux distribution
+*   Installs missing system dependencies (including **tmux**)
+*   Builds the project locally
+*   Sets up the `ai` command
+*   Configures **tmux auto-start** (optional) for seamless context capture
+*   Preserves existing configuration on updates
 
 > During active development, the installer defaults to **debug builds** for faster iteration. Release builds will become the default once the core feature set stabilizes.
 
@@ -146,24 +150,29 @@ chmod +x install.sh
 
 ## Usage
 
-### Start the Interactive Hub
+### 🚀 Seamless Terminal Evolution
 
 ```bash
-ai
+ai pop
 ```
 
-### Launch Agentic Interactive Mode
+This is the most powerful way to use `mylm`. It "pops" your current terminal session into the AI interface, carrying over your command history and context. Requires `tmux`.
+
+### ✨ Fresh Interactive Session
 
 ```bash
 ai interactive
 ```
 
-In this mode, `mylm` operates in a structured **Think → Plan → Execute** loop and can:
+Starts a fresh, clean AI session. Ideal for new tasks unrelated to your current terminal history.
 
-* run shell commands
-* search the web
-* crawl websites
-* read and write to persistent memory
+### 🤖 Interactive Hub
+
+```bash
+ai
+```
+
+Opens the central hub menu where you can choose between Pop Terminal, Resume Session, Interactive Mode, or Configuration.
 
 ### Direct Queries
 
@@ -221,10 +230,10 @@ endpoints:
 
 ## Roadmap
 
-* Background jobs & task queue
-* Multi‑server orchestration (master → agents)
-* Windows native support
-* Extended TUI workflows
+*   Background jobs & task queue
+*   Multi‑server orchestration (master → agents)
+*   Windows native support
+*   Extended TUI workflows
 
 ---
 
@@ -240,20 +249,20 @@ This project exists thanks to the work of many open‑source and research commun
 
 ### Core Foundations
 
-* **Rust** — systems programming without compromise
-* **Linux & Git** — the backbone of modern development
-* **ratatui, tokio, serde, clap, portable‑pty, lancedb** — and many more
+*   **Rust** — systems programming without compromise
+*   **Linux & Git** — the backbone of modern development
+*   **ratatui, tokio, serde, clap, portable‑pty, lancedb** — and many more
 
 ### AI Research & Model Providers
 
 Mentioned respectfully for attribution, compatibility, and ecosystem context:
 
-* **Google DeepMind** — Gemini models
-* **OpenAI** — GPT models and tooling
-* **Anthropic** — Claude and Constitutional AI
-* **Meta AI** — Llama models
-* **Hugging Face** — open ML infrastructure
-* **DeepSeek**, **Zhipu AI**, **Moonshot AI**, **Minimax** — advancing efficient and accessible language models
+*   **Google DeepMind** — Gemini models
+*   **OpenAI** — GPT models and tooling
+*   **Anthropic** — Claude and Constitutional AI
+*   **Meta AI** — Llama models
+*   **Hugging Face** — open ML infrastructure
+*   **DeepSeek**, **Zhipu AI**, **Moonshot AI**, **Minimax** — advancing efficient and accessible language models
 
 No affiliation or endorsement is implied.
 
@@ -261,4 +270,4 @@ No affiliation or endorsement is implied.
 
 ## Keywords
 
-Terminal AI, CLI LLM, Rust AI tool, Local LLM assistant, Ollama CLI, OpenAI terminal, Anthropic Claude CLI, Gemini terminal, Developer productivity, Command‑line AI
+Terminal AI, CLI LLM, Rust AI tool, Local LLM assistant, Ollama CLI, OpenAI terminal, Anthropic Claude CLI, Gemini terminal, Developer productivity, Command‑line AI, tmux AI

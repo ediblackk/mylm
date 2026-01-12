@@ -228,7 +228,18 @@ impl App {
                 return;
             }
 
-            self.chat_history.push(ChatMessage::user(&input));
+            // Capture full terminal history for context
+            let history_height = 2000;
+            let width = self.terminal_size.1;
+            let mut temp_parser = Parser::new(history_height, width, 0);
+            temp_parser.process(&self.raw_buffer);
+            let terminal_content = temp_parser.screen().contents();
+            
+            // Limit the content size if necessary (though 2000 lines is usually safe)
+            // The prompt format is strict:
+            let final_message = format!("{}\n\n---\n[TERMINAL STATE ATTACHMENT]\n{}", input, terminal_content);
+
+            self.chat_history.push(ChatMessage::user(&final_message));
             self.chat_input.clear();
             self.reset_cursor();
             self.input_scroll = 0;
@@ -591,7 +602,13 @@ async fn run_agent_loop(
                     };
                     
                     // Log to PTY
-                    let obs_log = format!("\x1b[32m[Observation]:\x1b[0m {}\r\n", observation.trim());
+                    let trimmed_obs = observation.trim();
+                    let log_content = if trimmed_obs.len() > 200 {
+                        format!("{}... [Content hidden, total length: {} chars]", &trimmed_obs[..100], trimmed_obs.len())
+                    } else {
+                        trimmed_obs.to_string()
+                    };
+                    let obs_log = format!("\x1b[32m[Observation]:\x1b[0m {}\r\n", log_content);
                     let _ = event_tx.send(TuiEvent::InternalObservation(obs_log.into_bytes()));
                     
                     last_observation = Some(observation);

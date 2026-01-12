@@ -71,7 +71,7 @@ pub struct Config {
     pub verbose_mode: bool,
 }
 
-fn default_context_limit() -> usize {
+pub fn default_context_limit() -> usize {
     100000
 }
 
