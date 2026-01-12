@@ -8,7 +8,7 @@ use clap::Parser;
 use console::Style;
 use std::sync::Arc;
 
-use crate::cli::{Cli, Commands, MemoryCommand, ConfigCommand, EditCommand, hub::{HubChoice, ConfigChoice, ProfileEditChoice}};
+use crate::cli::{Cli, Commands, MemoryCommand, ConfigCommand, EditCommand, hub::HubChoice};
 use crate::config::Config;
 use crate::context::TerminalContext;
 use crate::llm::{LlmClient, LlmConfig};
@@ -126,7 +126,11 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
             if *warmup {
                 crate::memory::VectorStore::warmup().await?;
             } else {
-                Config::setup().await?;
+                if config.endpoints.is_empty() {
+                    println!("🤖 Welcome to mylm! Let's get you set up.");
+                }
+                let mut mut_config = config.clone();
+                handle_settings_dashboard(&mut mut_config).await?;
                 crate::memory::VectorStore::warmup().await?;
             }
         }
@@ -182,7 +186,17 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
                     }
                 }
                 Some(ConfigCommand::New) => {
-                    println!("Use 'ai setup' to create a new configuration.");
+                    let mut mut_config = config.clone();
+                    let name = inquire::Text::new("New profile name:").prompt()?;
+                    if !name.trim().is_empty() {
+                        mut_config.profiles.push(crate::config::Profile {
+                            name: name.clone(),
+                            endpoint: mut_config.default_endpoint.clone(),
+                            prompt: "default".to_string(),
+                        });
+                        mut_config.active_profile = name;
+                        handle_settings_dashboard(&mut mut_config).await?;
+                    }
                 }
                 Some(ConfigCommand::Edit { cmd: edit_cmd }) => {
                     match edit_cmd {
@@ -197,12 +211,13 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
                         }
                         None => {
                             let mut mut_config = config.clone();
-                            handle_edit_profile(&mut mut_config).await?;
+                            handle_settings_dashboard(&mut mut_config).await?;
                         }
                     }
                 }
                 None => {
-                    handle_config_menu(&config).await?;
+                    let mut mut_config = config.clone();
+                    handle_settings_dashboard(&mut mut_config).await?;
                 }
             }
         }
@@ -242,7 +257,8 @@ async fn handle_hub(config: &Config, formatter: &OutputFormatter) -> Result<()> 
                 }
             }
             HubChoice::Configuration => {
-                handle_config_menu(config).await?;
+                let mut mut_config = config.clone();
+                handle_settings_dashboard(&mut mut_config).await?;
             }
             HubChoice::Exit => break,
         }
@@ -250,47 +266,52 @@ async fn handle_hub(config: &Config, formatter: &OutputFormatter) -> Result<()> 
     Ok(())
 }
 
-/// Handle the configuration menu
-async fn handle_config_menu(config: &Config) -> Result<()> {
-    let mut config = config.clone();
+/// Handle the unified settings dashboard
+async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
     loop {
-        let choice = crate::cli::hub::show_config_menu().await?;
+        let choice = crate::cli::hub::show_settings_dashboard(config)?;
         match choice {
-            ConfigChoice::SelectProfile => {
+            crate::cli::hub::SettingsChoice::SelectProfile => {
                 let profiles: Vec<String> = config.profiles.iter().map(|p| p.name.clone()).collect();
-                if profiles.is_empty() {
-                    println!("No profiles found.");
-                    continue;
-                }
-
                 if let Some(ans) = crate::cli::hub::show_profile_select(profiles)? {
                     config.active_profile = ans;
-                    if let Some(path) = crate::config::find_config_file() {
-                        config.save(path)?;
-                        println!("Active profile set to {}", config.active_profile);
+                }
+            }
+            crate::cli::hub::SettingsChoice::SelectEndpoint => {
+                let endpoints: Vec<String> = config.endpoints.iter().map(|e| e.name.clone()).collect();
+                let current_endpoint = config.get_active_profile().map(|p| p.endpoint.clone()).unwrap_or_default();
+                if let Some(new_endpoint) = crate::cli::hub::show_endpoint_select(endpoints, &current_endpoint)? {
+                    if let Some(p) = config.profiles.iter_mut().find(|p| p.name == config.active_profile) {
+                        p.endpoint = new_endpoint;
                     }
                 }
             }
-            ConfigChoice::EditProfile => {
-                handle_edit_profile(&mut config).await?;
+            crate::cli::hub::SettingsChoice::EditEndpoint => {
+                let endpoint_name = config.get_active_profile().map(|p| p.endpoint.clone()).unwrap_or_else(|| "default".to_string());
+                config.edit_endpoint_details(&endpoint_name).await?;
             }
-            ConfigChoice::NewProfile => {
-                println!("Use 'ai setup' to create a new configuration.");
+            crate::cli::hub::SettingsChoice::EditGeneral => {
+                config.edit_general()?;
             }
-            ConfigChoice::Back => break,
-        }
-    }
-    Ok(())
-}
-
-/// Handle editing the current profile
-async fn handle_edit_profile(config: &mut Config) -> Result<()> {
-    let profile_name = config.active_profile.clone();
-    
-    loop {
-        let choice = crate::cli::hub::show_profile_edit_menu(&profile_name)?;
-        match choice {
-            ProfileEditChoice::EditPrompt => {
+            crate::cli::hub::SettingsChoice::EditApiKeys => {
+                loop {
+                    let key_choice = crate::cli::hub::show_api_key_menu()?;
+                    let endpoint_name = config.get_active_profile().map(|p| p.endpoint.clone());
+                    match key_choice {
+                        crate::cli::hub::ApiKeyEditChoice::LlmKey => {
+                            config.edit_api_key(false, endpoint_name.as_deref())?;
+                        }
+                        crate::cli::hub::ApiKeyEditChoice::SearchKey => {
+                            config.edit_api_key(true, None)?;
+                        }
+                        crate::cli::hub::ApiKeyEditChoice::Back => break,
+                    }
+                }
+            }
+            crate::cli::hub::SettingsChoice::EditSearch => {
+                config.edit_search().await?;
+            }
+            crate::cli::hub::SettingsChoice::EditPrompt => {
                 let profile = config.get_active_profile()
                     .map(|p| p.prompt.clone())
                     .unwrap_or_else(|| "default".to_string());
@@ -299,69 +320,30 @@ async fn handle_edit_profile(config: &mut Config) -> Result<()> {
                 let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
                 std::process::Command::new(editor).arg(path).status()?;
             }
-            ProfileEditChoice::SelectEndpoint => {
-                let endpoints: Vec<String> = config.endpoints.iter().map(|e| e.name.clone()).collect();
-                let current_endpoint = config.get_active_profile().map(|p| p.endpoint.clone()).unwrap_or_default();
-                
-                if let Some(new_endpoint) = crate::cli::hub::show_endpoint_select(endpoints, &current_endpoint)? {
-                    let mut updated_endpoint = None;
-                    if let Some(p) = config.profiles.iter_mut().find(|p| p.name == profile_name) {
-                        p.endpoint = new_endpoint;
-                        updated_endpoint = Some(p.endpoint.clone());
-                    }
-                    
-                    if let Some(endpoint_name) = updated_endpoint {
-                        if let Some(path) = crate::config::find_config_file() {
-                            config.save(path)?;
-                            println!("Profile '{}' updated to use endpoint '{}'", profile_name, endpoint_name);
-                        }
-                    }
+            crate::cli::hub::SettingsChoice::NewProfile => {
+                let name = inquire::Text::new("New profile name:").prompt()?;
+                if !name.trim().is_empty() {
+                    config.profiles.push(crate::config::Profile {
+                        name: name.clone(),
+                        endpoint: config.default_endpoint.clone(),
+                        prompt: "default".to_string(),
+                    });
+                    config.active_profile = name;
                 }
             }
-            ProfileEditChoice::EditEndpointDetails => {
-                let endpoint_name = config.get_active_profile().map(|p| p.endpoint.clone()).unwrap_or_default();
-                
-                let (new_model, new_provider, new_key) = if let Some(endpoint) = config.endpoints.iter().find(|e| e.name == endpoint_name) {
-                    println!("Editing endpoint: {}", endpoint_name);
-                    
-                    let model = inquire::Text::new("Model:")
-                        .with_initial_value(&endpoint.model)
-                        .prompt()?;
-                    
-                    let provider = inquire::Text::new("Provider:")
-                        .with_initial_value(&endpoint.provider)
-                        .prompt()?;
-                    
-                    let key_msg = if endpoint.api_key.is_empty() || endpoint.api_key == "none" {
-                        "API Key (current: none):"
-                    } else {
-                        "API Key (current: [HIDDEN]):"
-                    };
-
-                    let password = inquire::Password::new(key_msg)
-                        .with_display_mode(inquire::PasswordDisplayMode::Masked)
-                        .prompt()?;
-                    
-                    (model, provider, if password.is_empty() { None } else { Some(password) })
-                } else {
-                    println!("Error: Endpoint '{}' not found.", endpoint_name);
-                    continue;
-                };
-
-                if let Some(endpoint) = config.endpoints.iter_mut().find(|e| e.name == endpoint_name) {
-                    endpoint.model = new_model;
-                    endpoint.provider = new_provider;
-                    if let Some(k) = new_key {
-                        endpoint.api_key = k;
+            crate::cli::hub::SettingsChoice::Save => {
+                if let Some(path) = crate::config::find_config_file().or_else(|| {
+                    dirs::config_dir().map(|d| d.join("mylm").join("mylm.yaml"))
+                }) {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
                     }
-
-                    if let Some(path) = crate::config::find_config_file() {
-                        config.save(path)?;
-                        println!("Endpoint '{}' updated successfully.", endpoint_name);
-                    }
+                    config.save(path)?;
+                    println!("✅ Configuration saved successfully.");
                 }
+                break;
             }
-            ProfileEditChoice::Back => break,
+            crate::cli::hub::SettingsChoice::Back => break,
         }
     }
     Ok(())

@@ -199,27 +199,9 @@ impl Config {
     }
 
     /// Interactive setup wizard
-    pub async fn setup() -> Result<Self> {
+    /// Edit the LLM endpoint configuration
+    pub async fn edit_endpoint_details(&mut self, endpoint_name: &str) -> Result<()> {
         let theme = ColorfulTheme::default();
-        
-        // Check if config already exists
-        if let Some(config_path) = find_config_file() {
-            if config_path.exists() {
-                let reconfigure = Confirm::with_theme(&theme)
-                    .with_prompt(format!("Configuration already exists at {:?}. Reconfigure?", config_path))
-                    .default(false)
-                    .interact()?;
-                
-                if !reconfigure {
-                    println!("✅ Keeping existing configuration.");
-                    return Self::load_from_file(config_path);
-                }
-            }
-        }
-
-        println!("🤖 Welcome to mylm setup wizard!");
-
-        // 1. Choose Provider
         let providers = vec!["OpenAI", "Google (Gemini)", "Ollama", "OpenRouter", "Custom"];
         let selection = Select::with_theme(&theme)
             .with_prompt("Select your LLM provider")
@@ -228,9 +210,7 @@ impl Config {
             .interact()?;
 
         let provider_name = providers[selection];
-        
-        // Default values based on provider
-        let (mut provider_id, mut base_url, mut model) = match provider_name {
+        let (provider_id, mut base_url, mut model) = match provider_name {
             "OpenAI" => ("openai".to_string(), "https://api.openai.com/v1".to_string(), "gpt-4o".to_string()),
             "Google (Gemini)" => ("google".to_string(), "https://generativelanguage.googleapis.com".to_string(), "gemini-3-flash-preview".to_string()),
             "Ollama" => ("openai".to_string(), "http://localhost:11434/v1".to_string(), "llama3.2".to_string()),
@@ -238,7 +218,6 @@ impl Config {
             _ => ("openai".to_string(), String::new(), String::new()),
         };
 
-        // 2. API Key (needed before fetching models)
         let api_key = if provider_name != "Ollama" {
             Password::with_theme(&theme)
                 .with_prompt(format!("API Key for {}", provider_name))
@@ -247,154 +226,184 @@ impl Config {
             "none".to_string()
         };
 
-        // 3. Fetch models if possible
         let mut fetched_models = Vec::new();
         if provider_name != "Custom" {
-            let fetch_options = vec!["Yes", "No (use default or enter manually)"];
             let fetch = Select::with_theme(&theme)
                 .with_prompt("Fetch latest models from provider?")
-                .items(&fetch_options)
+                .items(&["Yes", "No"])
                 .default(0)
                 .interact()?;
 
             if fetch == 0 {
-                let filter: String = Input::with_theme(&theme)
-                    .with_prompt("Filter models by keyword (optional)")
-                    .allow_empty(true)
-                    .interact_text()?;
-
                 println!("📡 Fetching models...");
-                match fetch_models_from_provider(provider_name, &base_url, &api_key, &filter).await {
-                    Ok(models) => {
-                        if !models.is_empty() {
-                            let model_selection = Select::with_theme(&theme)
-                                .with_prompt(format!("Select model (showing {} matching)", models.len()))
-                                .items(&models)
-                                .default(0)
-                                .interact()?;
-                            model = models[model_selection].clone();
-                            fetched_models = models;
-                        } else {
-                            println!("⚠️ No models found. Using default.");
-                        }
+                match fetch_models_from_provider(provider_name, &base_url, &api_key, "").await {
+                    Ok(models) if !models.is_empty() => {
+                        let m_idx = Select::with_theme(&theme)
+                            .with_prompt("Select model")
+                            .items(&models)
+                            .default(0)
+                            .interact()?;
+                        model = models[m_idx].clone();
+                        fetched_models = models;
                     }
-                    Err(e) => {
-                        println!("❌ Failed to fetch models: {}. Using default.", e);
-                    }
+                    _ => println!("⚠️ Could not fetch models, using default."),
                 }
             }
         }
 
-        // 4. Custom inputs if needed or if user wants to override
-        if provider_name == "Custom" {
-            provider_id = "openai".to_string(); // Default custom to openai-compatible
-            base_url = Input::<String>::with_theme(&theme)
-                .with_prompt("Base URL")
-                .interact_text()?;
-            model = Input::<String>::with_theme(&theme)
-                .with_prompt("Model name")
-                .interact_text()?;
-        } else if fetched_models.is_empty() {
-            // Allow overriding defaults if we didn't fetch
-            model = Input::<String>::with_theme(&theme)
-                .with_prompt("Model name")
-                .with_initial_text(model)
-                .interact_text()?;
-
+        if provider_name == "Custom" || fetched_models.is_empty() {
+            model = Input::with_theme(&theme).with_prompt("Model name").with_initial_text(model).interact_text()?;
             if provider_name != "Ollama" && provider_name != "Google (Gemini)" {
-                 base_url = Input::<String>::with_theme(&theme)
-                    .with_prompt("Base URL")
-                    .with_initial_text(base_url)
-                    .interact_text()?;
+                base_url = Input::with_theme(&theme).with_prompt("Base URL").with_initial_text(base_url).interact_text()?;
             }
         }
 
-        // 4. Create endpoint
+        let mut timeout_seconds = 60;
+        let mut input_price_per_1k = 0.0;
+        let mut output_price_per_1k = 0.0;
+        let mut max_context_tokens = 32768;
+        let mut condense_threshold = 0.8;
+
+        if Confirm::with_theme(&theme)
+            .with_prompt("Configure advanced settings (tokens, prices, timeout)?")
+            .default(false)
+            .interact()?
+        {
+            timeout_seconds = Input::with_theme(&theme)
+                .with_prompt("Request timeout (seconds)")
+                .default(timeout_seconds)
+                .interact_text()?;
+
+            input_price_per_1k = Input::with_theme(&theme)
+                .with_prompt("Input price per 1k tokens ($)")
+                .default(input_price_per_1k)
+                .interact_text()?;
+
+            output_price_per_1k = Input::with_theme(&theme)
+                .with_prompt("Output price per 1k tokens ($)")
+                .default(output_price_per_1k)
+                .interact_text()?;
+
+            max_context_tokens = Input::with_theme(&theme)
+                .with_prompt("Max context tokens")
+                .default(max_context_tokens)
+                .interact_text()?;
+
+            condense_threshold = Input::with_theme(&theme)
+                .with_prompt("Condense threshold (0.0 - 1.0)")
+                .default(condense_threshold)
+                .interact_text()?;
+        }
+
         let endpoint = endpoints::EndpointConfig {
-            name: "default".to_string(),
-            provider: provider_id.to_string(),
-            base_url: base_url.to_string(),
-            model: model.to_string(),
+            name: endpoint_name.to_string(),
+            provider: provider_id,
+            base_url,
+            model,
             api_key,
-            timeout_seconds: 60,
-            input_price_per_1k: 0.0,
-            output_price_per_1k: 0.0,
-            max_context_tokens: 32768,
-            condense_threshold: 0.8,
+            timeout_seconds,
+            input_price_per_1k,
+            output_price_per_1k,
+            max_context_tokens,
+            condense_threshold,
         };
 
-        // 5. Web Search Setup
-        let enable_search = Confirm::with_theme(&theme)
-            .with_prompt("Enable web search capabilities?")
-            .default(true)
-            .interact()?;
+        // Update or add the endpoint
+        if let Some(e) = self.endpoints.iter_mut().find(|e| e.name == endpoint_name) {
+            *e = endpoint;
+        } else {
+            self.endpoints.push(endpoint);
+        }
 
-        let mut web_search = WebSearchConfig::default();
-        if enable_search {
-            web_search.enabled = true;
-            let search_providers = vec!["Kimi (Moonshot AI)", "SerpAPI (Google/Bing/etc.)"];
-            let search_selection = Select::with_theme(&theme)
-                .with_prompt("Select web search provider")
-                .items(&search_providers)
+        Ok(())
+    }
+
+    /// Edit General settings (context limit, verbose mode, etc.)
+    pub fn edit_general(&mut self) -> Result<()> {
+        let theme = ColorfulTheme::default();
+        
+        loop {
+            let options = vec![
+                format!("Context Limit: {}", self.context_limit),
+                format!("Verbose Mode: {}", if self.verbose_mode { "On" } else { "Off" }),
+                format!("Auto-approve:  {}", if self.commands.allow_execution { "Enabled" } else { "Disabled" }),
+                "⬅️  Back".to_string(),
+            ];
+
+            let selection = Select::with_theme(&theme)
+                .with_prompt("General Settings")
+                .items(&options)
                 .default(0)
                 .interact()?;
 
-            match search_selection {
+            match selection {
                 0 => {
-                    web_search.provider = "kimi".to_string();
-                    web_search.api_key = Password::with_theme(&theme)
-                        .with_prompt("Kimi API Key")
-                        .interact()?;
-                    web_search.model = "kimi-k2-turbo-preview".to_string();
+                    self.context_limit = Input::with_theme(&theme)
+                        .with_prompt("Global context limit (history tokens)")
+                        .default(self.context_limit)
+                        .interact_text()?;
                 }
                 1 => {
-                    web_search.provider = "serpapi".to_string();
-                    web_search.api_key = Password::with_theme(&theme)
-                        .with_prompt("SerpAPI Key")
-                        .interact()?;
+                    self.verbose_mode = !self.verbose_mode;
                 }
-                _ => {}
+                2 => {
+                    self.commands.allow_execution = !self.commands.allow_execution;
+                }
+                _ => break,
             }
         }
 
-        // 6. Build final config
-        let config = Config {
-            active_profile: "default".to_string(),
-            profiles: vec![Profile {
-                name: "default".to_string(),
-                endpoint: "default".to_string(),
-                prompt: "default".to_string(),
-            }],
-            default_endpoint: "default".to_string(),
-            endpoints: vec![endpoint],
-            commands: CommandConfig {
-                allow_execution: false,
-                allowlist_paths: vec![],
-            },
-            web_search,
-            context_limit: default_context_limit(),
-            verbose_mode: default_verbose_mode(),
-        };
+        Ok(())
+    }
 
-        // 6. Save config
-        let config_dir = get_config_dir()
-            .or_else(|| {
-                // Create if not exists
-                home_dir().map(|h| h.join(".config").join(CONFIG_DIR_NAME))
-            })
-            .context("Could not determine config directory")?;
+    /// Edit API keys for LLM or Search
+    pub fn edit_api_key(&mut self, search: bool, endpoint_name: Option<&str>) -> Result<()> {
+        let theme = ColorfulTheme::default();
+        let prompt = if search { "Search API Key" } else { "LLM API Key" };
+        let key = Password::with_theme(&theme)
+            .with_prompt(prompt)
+            .interact()?;
 
-        if !config_dir.exists() {
-            fs::create_dir_all(&config_dir)?;
+        if search {
+            self.web_search.api_key = key;
+        } else if let Some(name) = endpoint_name {
+            if let Some(e) = self.endpoints.iter_mut().find(|e| e.name == name) {
+                e.api_key = key;
+            }
+        } else if let Some(e) = self.endpoints.iter_mut().find(|e| e.name == "default") {
+            e.api_key = key;
         }
 
-        let config_path = config_dir.join(CONFIG_FILE_NAME);
-        config.save(&config_path)?;
+        Ok(())
+    }
 
-        println!("\n✅ Configuration saved to {:?}", config_path);
-        println!("Try it out with: ai 'hello world'");
+    /// Edit Web Search configuration
+    pub async fn edit_search(&mut self) -> Result<()> {
+        let theme = ColorfulTheme::default();
+        let providers = vec!["Kimi (Moonshot AI)", "SerpAPI (Google/Bing/etc.)", "Disabled"];
+        let selection = Select::with_theme(&theme)
+            .with_prompt("Select web search provider")
+            .items(&providers)
+            .default(0)
+            .interact()?;
 
-        Ok(config)
+        match selection {
+            0 => {
+                self.web_search.enabled = true;
+                self.web_search.provider = "kimi".to_string();
+                self.web_search.api_key = Password::with_theme(&theme).with_prompt("Kimi API Key").interact()?;
+                self.web_search.model = "kimi-k2-turbo-preview".to_string();
+            }
+            1 => {
+                self.web_search.enabled = true;
+                self.web_search.provider = "serpapi".to_string();
+                self.web_search.api_key = Password::with_theme(&theme).with_prompt("SerpAPI Key").interact()?;
+            }
+            _ => {
+                self.web_search.enabled = false;
+            }
+        }
+        Ok(())
     }
 }
 

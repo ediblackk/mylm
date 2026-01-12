@@ -62,6 +62,7 @@ impl LlmClient {
     pub fn new(config: LlmConfig) -> Result<Self> {
         let http_client = HttpClient::builder()
             .timeout(std::time::Duration::from_secs(300))
+            .user_agent("mylm/1.0")
             .build()
             .context("Failed to build HTTP client")?;
 
@@ -99,7 +100,7 @@ impl LlmClient {
 
     /// OpenAI-compatible API chat
     async fn chat_openai(&self, request: &ChatRequest) -> Result<ChatResponse> {
-        let url = format!("{}/chat/completions", self.config.base_url);
+        let url = format!("{}/chat/completions", self.config.base_url.trim_end_matches('/'));
 
         let body = OpenAiRequest {
             model: self.config.model.clone(),
@@ -260,9 +261,9 @@ impl LlmClient {
 
         let url = format!(
             "{}/v1beta/models/{}:generateContent?key={}",
-            self.config.base_url,
+            self.config.base_url.trim_end_matches('/'),
             self.config.model,
-            self.config.api_key.as_ref().unwrap_or(&String::new())
+            self.config.api_key.as_ref().map(|k| k.trim()).unwrap_or("")
         );
 
         let body = GeminiRequest {
@@ -394,7 +395,7 @@ impl LlmClient {
         &'a self,
         request: &'a ChatRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send + 'a>> {
-        let url = format!("{}/chat/completions", self.config.base_url);
+        let url = format!("{}/chat/completions", self.config.base_url.trim_end_matches('/'));
 
         let body = OpenAiRequest {
             model: self.config.model.clone(),
@@ -494,11 +495,19 @@ impl LlmClient {
         match self.config.provider {
             LlmProvider::OpenAiCompatible | LlmProvider::MoonshotKimi => {
                 headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
+                
+                // OpenRouter specific headers
+                if self.config.base_url.contains("openrouter.ai") {
+                    headers.insert("HTTP-Referer", "https://github.com/edward/mylm".parse().unwrap());
+                    headers.insert("X-Title", "mylm".parse().unwrap());
+                }
+
                 if let Some(api_key) = &self.config.api_key {
-                    if api_key != "none" && !api_key.is_empty() {
+                    let key = api_key.trim();
+                    if key != "none" && !key.is_empty() {
                         headers.insert(
                             "Authorization",
-                            format!("Bearer {}", api_key).parse().unwrap(),
+                            format!("Bearer {}", key).parse().unwrap(),
                         );
                     }
                 }

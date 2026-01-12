@@ -24,39 +24,32 @@ impl std::fmt::Display for HubChoice {
 }
 
 #[derive(Debug, PartialEq)]
-pub enum ConfigChoice {
+pub enum SettingsChoice {
     SelectProfile,
-    EditProfile,
-    NewProfile,
-    Back,
-}
-
-impl std::fmt::Display for ConfigChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConfigChoice::SelectProfile => write!(f, "👤 Select Active Profile"),
-            ConfigChoice::EditProfile => write!(f, "📝 Edit Current Profile"),
-            ConfigChoice::NewProfile => write!(f, "➕ Create New Profile"),
-            ConfigChoice::Back => write!(f, "⬅️  Back to Main Menu"),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq)]
-pub enum ProfileEditChoice {
-    EditPrompt,
     SelectEndpoint,
-    EditEndpointDetails,
+    EditEndpoint,
+    EditPrompt,
+    EditSearch,
+    EditGeneral,
+    EditApiKeys,
+    NewProfile,
+    Save,
     Back,
 }
 
-impl std::fmt::Display for ProfileEditChoice {
+impl std::fmt::Display for SettingsChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProfileEditChoice::EditPrompt => write!(f, "📝 Edit Prompt Instructions"),
-            ProfileEditChoice::SelectEndpoint => write!(f, "🔗 Select Associated Endpoint"),
-            ProfileEditChoice::EditEndpointDetails => write!(f, "⚙️  Edit Endpoint Details (Model/Key)"),
-            ProfileEditChoice::Back => write!(f, "⬅️  Back"),
+            SettingsChoice::SelectProfile => write!(f, "👤 Switch Profile"),
+            SettingsChoice::SelectEndpoint => write!(f, "🔗 Change Endpoint for Profile"),
+            SettingsChoice::EditEndpoint => write!(f, "🤖 Edit Endpoint Details"),
+            SettingsChoice::EditGeneral => write!(f, "⚙️  General Settings"),
+            SettingsChoice::EditApiKeys => write!(f, "🔑 API Keys"),
+            SettingsChoice::EditSearch => write!(f, "🌐 Search Config"),
+            SettingsChoice::EditPrompt => write!(f, "📝 System Prompt"),
+            SettingsChoice::NewProfile => write!(f, "➕ Create New Profile"),
+            SettingsChoice::Save => write!(f, "💾 Save & Exit"),
+            SettingsChoice::Back => write!(f, "⬅️  Discard & Back"),
         }
     }
 }
@@ -89,23 +82,6 @@ pub async fn show_hub(_config: &Config) -> Result<HubChoice> {
     }
 }
 
-/// Show the configuration sub-menu
-pub async fn show_config_menu() -> Result<ConfigChoice> {
-    let options = vec![
-        ConfigChoice::SelectProfile,
-        ConfigChoice::EditProfile,
-        ConfigChoice::NewProfile,
-        ConfigChoice::Back,
-    ];
-
-    let ans: InquireResult<ConfigChoice> = Select::new("Configuration", options).prompt();
-
-    match ans {
-        Ok(choice) => Ok(choice),
-        Err(_) => Ok(ConfigChoice::Back),
-    }
-}
-
 /// Show profile selection menu with a back option
 pub fn show_profile_select(profiles: Vec<String>) -> Result<Option<String>> {
     let mut options = profiles;
@@ -117,26 +93,6 @@ pub fn show_profile_select(profiles: Vec<String>) -> Result<Option<String>> {
         Ok(choice) if choice == "⬅️  Back" => Ok(None),
         Ok(choice) => Ok(Some(choice)),
         Err(_) => Ok(None),
-    }
-}
-
-/// Show profile edit menu
-pub fn show_profile_edit_menu(profile_name: &str) -> Result<ProfileEditChoice> {
-    let options = vec![
-        ProfileEditChoice::EditPrompt,
-        ProfileEditChoice::SelectEndpoint,
-        ProfileEditChoice::EditEndpointDetails,
-        ProfileEditChoice::Back,
-    ];
-
-    let ans: InquireResult<ProfileEditChoice> = Select::new(
-        &format!("Editing Profile: {}", profile_name),
-        options
-    ).prompt();
-
-    match ans {
-        Ok(choice) => Ok(choice),
-        Err(_) => Ok(ProfileEditChoice::Back),
     }
 }
 
@@ -152,5 +108,83 @@ pub fn show_endpoint_select(endpoints: Vec<String>, _current: &str) -> Result<Op
         Ok(choice) if choice == "⬅️  Back" => Ok(None),
         Ok(choice) => Ok(Some(choice)),
         Err(_) => Ok(None),
+    }
+}
+
+/// Show the unified settings dashboard
+pub fn show_settings_dashboard(config: &Config) -> Result<SettingsChoice> {
+    let profile = config.get_active_profile();
+    let endpoint = config.get_endpoint(None).ok();
+    
+    let profile_name = config.active_profile.clone();
+    let llm_status = match (profile, endpoint) {
+        (Some(_), Some(e)) => format!("{} ({} / {})", e.name, e.provider, e.model),
+        _ => "Not Configured".to_string(),
+    };
+    
+    let search_status = if config.web_search.enabled {
+        format!("Enabled ({})", config.web_search.provider)
+    } else {
+        "Disabled".to_string()
+    };
+
+    let prompt_status = profile.map(|p| p.prompt.clone()).unwrap_or_else(|| "default".to_string());
+
+    let options = vec![
+        SettingsChoice::SelectProfile,
+        SettingsChoice::SelectEndpoint,
+        SettingsChoice::EditEndpoint,
+        SettingsChoice::EditPrompt,
+        SettingsChoice::EditSearch,
+        SettingsChoice::EditGeneral,
+        SettingsChoice::EditApiKeys,
+        SettingsChoice::NewProfile,
+        SettingsChoice::Save,
+        SettingsChoice::Back,
+    ];
+
+    let ans: InquireResult<SettingsChoice> = Select::new(
+        &format!(
+            "⚙️  Settings Dashboard\n  Profile:  {}\n  Endpoint: {}\n  Search:   {}\n  Prompt:   {}\n",
+            profile_name, llm_status, search_status, prompt_status
+        ),
+        options
+    ).prompt();
+
+    match ans {
+        Ok(choice) => Ok(choice),
+        Err(_) => Ok(SettingsChoice::Back),
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ApiKeyEditChoice {
+    LlmKey,
+    SearchKey,
+    Back,
+}
+
+impl std::fmt::Display for ApiKeyEditChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApiKeyEditChoice::LlmKey => write!(f, "🤖 LLM API Key"),
+            ApiKeyEditChoice::SearchKey => write!(f, "🌐 Search API Key"),
+            ApiKeyEditChoice::Back => write!(f, "⬅️  Back"),
+        }
+    }
+}
+
+pub fn show_api_key_menu() -> Result<ApiKeyEditChoice> {
+    let options = vec![
+        ApiKeyEditChoice::LlmKey,
+        ApiKeyEditChoice::SearchKey,
+        ApiKeyEditChoice::Back,
+    ];
+
+    let ans: InquireResult<ApiKeyEditChoice> = Select::new("Edit API Keys", options).prompt();
+
+    match ans {
+        Ok(choice) => Ok(choice),
+        Err(_) => Ok(ApiKeyEditChoice::Back),
     }
 }

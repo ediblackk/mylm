@@ -105,11 +105,15 @@ Or jump directly into the full **Agentic TUI**:
 ai interactive
 ```
 
+The application features a **guided menu-style interface** that makes navigation intuitive and user-friendly. The menu system provides clear options and visual feedback, helping users quickly access different features and capabilities.
+
 In this mode, `mylm` operates in a "Think-Plan-Execute" loop. It can:
 - **Run Shell Commands**: Safely execute terminal commands to solve problems.
 - **Web Search**: Query the internet for real-time data using integrated search engines.
 - **Crawl Websites**: Extract content from specific URLs to provide deep analysis.
 - **Access Memory**: Store and retrieve information from its persistent vector database.
+
+> **App Screenshots**: You can add screenshots of the application interface to showcase the guided menu-style design and terminal user interface. Place them in a `docs/images/` directory and reference them here.
 
 ### 2. Direct Queries
 Ask questions directly from your shell. Your current context is automatically analyzed:
@@ -160,7 +164,17 @@ endpoints:
 
 ---
 
-## 🛡 License & Safety
+## 🗺️ Roadmap & Future Vision
+
+### Planned Enhancements
+
+- **Background Tasks with Job/Queue Manager**: Implement a robust background task processing system with job queuing and management capabilities for handling long-running operations asynchronously.
+
+- **Multi-Server Operations**: Integrate support for controlling multiple slave applications from a local master application, enabling distributed AI operations and remote control of AI instances across different servers.
+
+---
+
+## 🛡️ License & Safety
 
 Distributed under the **MIT License**.
 
