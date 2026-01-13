@@ -41,7 +41,7 @@ check_and_install_dependencies() {
     case $OS in
         ubuntu|debian|pop|mint)
             # Core build tools and libraries for mylm (OpenSSL, XCB, etc.) + tmux for terminal context
-            DEPS=("pkg-config" "libssl-dev" "libxcb1-dev" "libxcb-render0-dev" "libxcb-shape0-dev" "libxcb-xfixes0-dev" "clang" "build-essential" "cmake" "tmux" "mold")
+            DEPS=("pkg-config" "libssl-dev" "libxcb1-dev" "libxcb-render0-dev" "libxcb-shape0-dev" "libxcb-xfixes0-dev" "clang" "build-essential" "cmake" "tmux" "mold" "protobuf-compiler")
             for dep in "${DEPS[@]}"; do
                 if ! dpkg -l | grep -qw "$dep" &>/dev/null; then
                     MISSING_DEPS+=("$dep")
@@ -57,7 +57,7 @@ check_and_install_dependencies() {
             fi
             ;;
         fedora)
-            DEPS=("pkgconf-pkg-config" "openssl-devel" "libxcb-devel" "clang" "gcc-c++" "cmake" "tmux" "mold")
+            DEPS=("pkgconf-pkg-config" "openssl-devel" "libxcb-devel" "clang" "gcc-c++" "cmake" "tmux" "mold" "protobuf-compiler")
             for dep in "${DEPS[@]}"; do
                 if ! rpm -q "$dep" &> /dev/null; then
                     MISSING_DEPS+=("$dep")
@@ -72,7 +72,7 @@ check_and_install_dependencies() {
             fi
             ;;
         arch)
-            DEPS=("pkgconf" "openssl" "libxcb" "clang" "base-devel" "cmake" "tmux" "mold")
+            DEPS=("pkgconf" "openssl" "libxcb" "clang" "base-devel" "cmake" "tmux" "mold" "protobuf")
             for dep in "${DEPS[@]}"; do
                 if ! pacman -Qs "$dep" &> /dev/null; then
                     MISSING_DEPS+=("$dep")

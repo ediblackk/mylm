@@ -5,7 +5,7 @@ echo "🚀 Quick dev install..."
 
 # Check for dependencies
 MISSING_DEPS=()
-for dep in tmux mold sccache; do
+for dep in tmux mold sccache protoc; do
     if ! command -v "$dep" &> /dev/null; then
         MISSING_DEPS+=("$dep")
     fi
@@ -21,13 +21,13 @@ if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
             . /etc/os-release
             case $ID in
                 ubuntu|debian|pop|mint)
-                    sudo apt-get update && sudo apt-get install -y tmux mold
+                    sudo apt-get update && sudo apt-get install -y tmux mold protobuf-compiler
                     ;;
                 fedora)
-                    sudo dnf install -y tmux mold
+                    sudo dnf install -y tmux mold protobuf-compiler
                     ;;
                 arch)
-                    sudo pacman -S --noconfirm tmux mold
+                    sudo pacman -S --noconfirm tmux mold protobuf
                     ;;
             esac
         fi
