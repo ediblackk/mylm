@@ -645,6 +645,7 @@ async fn run_agent_loop(
     mut last_observation: Option<String>,
 ) {
     let mut loop_iteration = 0;
+    let mut consecutive_thoughts = 0;
 
     loop {
         loop_iteration += 1;
@@ -674,6 +675,7 @@ async fn run_agent_loop(
             Ok(AgentDecision::Message(msg, usage)) => {
                 let has_pending = agent_lock.has_pending_decision();
                 if has_pending {
+                    consecutive_thoughts = 0;
                     let _ = event_tx.send(TuiEvent::AgentResponse(msg, usage));
                     drop(agent_lock);
                     continue;
@@ -690,13 +692,22 @@ async fn run_agent_loop(
                     break;
                 }
 
+                consecutive_thoughts += 1;
+                if consecutive_thoughts >= 3 {
+                    let _ = event_tx.send(TuiEvent::AgentResponse(msg, usage));
+                    let _ = event_tx.send(TuiEvent::AgentResponseFinal("⚠️ Agent is talking without taking action. Stopping to prevent loop. Please try again with a more specific command.".to_string(), TokenUsage::default()));
+                    let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Idle));
+                    break;
+                }
+
                 // Otherwise, treat as a Thought and nudge to continue if not finished.
                 let _ = event_tx.send(TuiEvent::AgentResponse(msg, usage));
-                last_observation = Some("Thought acknowledged. Please continue with the next Action or provide a Final Answer.".to_string());
+                last_observation = Some("Observation: No Action or Final Answer detected. You MUST follow the ReAct format (Thought, Action, Action Input). If you have reached a conclusion, provide a 'Final Answer:'. Do not just talk; interact with the system using tools if needed.".to_string());
                 drop(agent_lock);
                 continue;
             }
             Ok(AgentDecision::Action { tool, args, kind }) => {
+                consecutive_thoughts = 0;
                 let _ = event_tx.send(TuiEvent::StatusUpdate(format!("Tool: '{}'", tool)));
                 let _ = event_tx.send(TuiEvent::ActivityUpdate {
                     summary: format!("Tool: {}", tool),

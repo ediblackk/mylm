@@ -3,13 +3,42 @@ set -e
 
 echo "🚀 Quick dev install..."
 
-# Check for tmux (prerequisite for Pop Terminal)
-if ! command -v tmux &> /dev/null; then
-    echo "⚠️  Warning: tmux is not installed. The 'Pop Terminal' feature requires it."
-    echo "   You can install it with: sudo apt install tmux (Linux) or brew install tmux (macOS)"
-    read -p "Continue anyway? [y/N]: " continue_anyway
-    if [[ ! "$continue_anyway" =~ ^[Yy]$ ]]; then
-        exit 1
+# Check for dependencies
+MISSING_DEPS=()
+for dep in tmux mold sccache; do
+    if ! command -v "$dep" &> /dev/null; then
+        MISSING_DEPS+=("$dep")
+    fi
+done
+
+if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
+    echo "⚠️  Missing required dev dependencies: ${MISSING_DEPS[*]}"
+    echo "   Note: mold and sccache are required by .cargo/config.toml for high-performance builds."
+    read -p "Attempt to install them now? (Requires sudo for some) [Y/n]: " install_deps
+    if [[ ! "$install_deps" =~ ^[Nn]$ ]]; then
+        # Check OS
+        if [ -f /etc/os-release ]; then
+            . /etc/os-release
+            case $ID in
+                ubuntu|debian|pop|mint)
+                    sudo apt-get update && sudo apt-get install -y tmux mold
+                    ;;
+                fedora)
+                    sudo dnf install -y tmux mold
+                    ;;
+                arch)
+                    sudo pacman -S --noconfirm tmux mold
+                    ;;
+            esac
+        fi
+        
+        # Install sccache via cargo
+        if ! command -v sccache &> /dev/null; then
+            echo "🚀 Installing sccache via cargo..."
+            cargo install sccache
+        fi
+    else
+        echo "⚠️  Continuing without dependencies. Build will likely fail."
     fi
 fi
 

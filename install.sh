@@ -41,7 +41,7 @@ check_and_install_dependencies() {
     case $OS in
         ubuntu|debian|pop|mint)
             # Core build tools and libraries for mylm (OpenSSL, XCB, etc.) + tmux for terminal context
-            DEPS=("pkg-config" "libssl-dev" "libxcb1-dev" "libxcb-render0-dev" "libxcb-shape0-dev" "libxcb-xfixes0-dev" "clang" "build-essential" "cmake" "tmux")
+            DEPS=("pkg-config" "libssl-dev" "libxcb1-dev" "libxcb-render0-dev" "libxcb-shape0-dev" "libxcb-xfixes0-dev" "clang" "build-essential" "cmake" "tmux" "mold")
             for dep in "${DEPS[@]}"; do
                 if ! dpkg -l | grep -qw "$dep" &>/dev/null; then
                     MISSING_DEPS+=("$dep")
@@ -57,7 +57,7 @@ check_and_install_dependencies() {
             fi
             ;;
         fedora)
-            DEPS=("pkgconf-pkg-config" "openssl-devel" "libxcb-devel" "clang" "gcc-c++" "cmake" "tmux")
+            DEPS=("pkgconf-pkg-config" "openssl-devel" "libxcb-devel" "clang" "gcc-c++" "cmake" "tmux" "mold")
             for dep in "${DEPS[@]}"; do
                 if ! rpm -q "$dep" &> /dev/null; then
                     MISSING_DEPS+=("$dep")
@@ -72,7 +72,7 @@ check_and_install_dependencies() {
             fi
             ;;
         arch)
-            DEPS=("pkgconf" "openssl" "libxcb" "clang" "base-devel" "cmake" "tmux")
+            DEPS=("pkgconf" "openssl" "libxcb" "clang" "base-devel" "cmake" "tmux" "mold")
             for dep in "${DEPS[@]}"; do
                 if ! pacman -Qs "$dep" &> /dev/null; then
                     MISSING_DEPS+=("$dep")
@@ -111,11 +111,15 @@ check_and_install_dependencies() {
             ;;
     esac
 
-    # Optional: sccache for faster builds
+    # sccache for faster builds (required by .cargo/config.toml)
     if ! command -v sccache &> /dev/null; then
-        read -p "Would you like to install sccache to speed up future builds? [y/N]: " install_sccache
-        if [[ "$install_sccache" =~ ^[Yy]$ ]]; then
-            cargo install sccache || echo "⚠️  Failed to install sccache via cargo, skipping."
+        echo "⚠️  sccache is not installed, but it is required by .cargo/config.toml for this project."
+        read -p "Would you like to install sccache now? [Y/n]: " install_sccache
+        if [[ ! "$install_sccache" =~ ^[Nn]$ ]]; then
+            echo "🚀 Installing sccache..."
+            cargo install sccache || echo "⚠️  Failed to install sccache via cargo."
+        else
+            echo "⚠️  Warning: Build will likely fail if sccache is missing."
         fi
     fi
 

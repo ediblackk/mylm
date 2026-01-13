@@ -495,7 +495,7 @@ impl Agent {
             # Operational Protocol (ReAct)\n\
             You have access to the following tools:\n\n\
             {}\n\
-            Use the following format:\n\n\
+            CRITICAL: You MUST use the following format for every step. Do not skip tags. Do not output free-form text outside these tags.\n\n\
             Question: the input question you must answer\n\
             Thought: you should always think about what to do\n\
             Action: the action to take, should be one of [{}]\n\
@@ -512,7 +512,12 @@ impl Agent {
             Observation: total 0\n\
             Thought: The directory is empty.\n\
             Final Answer: The directory is empty.\n\n\
-            IMPORTANT: After providing an Action and Action Input, you MUST stop generating and wait for the Observation. Do not hallucinate or predict the Observation. You MUST use the tools to interact with the system.\n\n\
+            IMPORTANT: \n\
+            1. You MUST use the tools to interact with the system.\n\
+            2. After providing an Action and Action Input, you MUST stop generating and wait for the Observation.\n\
+            3. Do not hallucinate or predict the Observation.\n\
+            4. ALWAYS prefix your thoughts with 'Thought:'.\n\
+            5. If you are stuck or need clarification, use 'Final Answer:' to ask the user.\n\n\
             Begin!",
             self.system_prompt_prefix,
             tools_desc,
