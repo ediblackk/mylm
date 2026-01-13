@@ -224,20 +224,12 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
 
         // Agent State
         Span::raw(" | "),
-        Span::styled("State: ", Style::default().fg(Color::Gray)),
         Span::styled(
             format!("{} {}", state_prefix, state_label),
             Style::default().fg(state_color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!(" ({})", elapsed_text), Style::default().fg(Color::DarkGray)),
     ];
-
-    if let Some(a) = last_activity {
-        let a = truncate_chars(&a, 80);
-        spans.push(Span::raw(" | "));
-        spans.push(Span::styled("Last Action: ", Style::default().fg(Color::Gray)));
-        spans.push(Span::styled(a, Style::default().fg(Color::DarkGray)));
-    }
 
     let stats_text = Line::from(spans);
 

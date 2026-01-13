@@ -6,6 +6,7 @@ pub mod fs;
 pub mod git;
 pub mod state;
 pub mod system;
+pub mod terminal_sight;
 
 pub use shell::ShellTool;
 pub use memory::MemoryTool;
@@ -15,3 +16,6 @@ pub use fs::{FileReadTool, FileWriteTool};
 pub use git::{GitStatusTool, GitLogTool, GitDiffTool};
 pub use state::StateTool;
 pub use system::SystemMonitorTool;
+pub use terminal_sight::TerminalSightTool;
+pub mod wait;
+pub use wait::WaitTool;

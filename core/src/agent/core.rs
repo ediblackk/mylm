@@ -325,11 +325,17 @@ impl Agent {
                         return Ok((msg, usage));
                     }
                     
-                    // If no Final Answer and no pending decision, the agent might be stuck or asking a question.
-                    // In a truly autonomous loop, we might want to prompt it to continue,
-                    // but for the TUI we return control to the user.
-                    let _ = event_tx.send(TuiEvent::StatusUpdate("".to_string()));
-                    return Ok((msg, usage));
+                    // If we get a message without "Final Answer:" and we're in an autonomous loop,
+                    // we should nudge the agent to continue if it hasn't reached a conclusion.
+                    // However, if it looks like a question to the user, we should stop.
+                    if msg.trim().ends_with('?') || msg.contains("Please") || msg.contains("Would you") {
+                        let _ = event_tx.send(TuiEvent::StatusUpdate("".to_string()));
+                        return Ok((msg, usage));
+                    }
+
+                    // Nudge to continue
+                    last_observation = Some("Please continue your task or provide a Final Answer if you are done.".to_string());
+                    continue;
                 }
                 AgentDecision::Action { tool, args, kind } => {
                     let _ = event_tx.send(TuiEvent::StatusUpdate(format!("Tool: '{}'", tool)));

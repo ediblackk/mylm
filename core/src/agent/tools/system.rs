@@ -90,36 +90,6 @@ impl SystemMonitorTool {
     }
 }
 
-pub struct TerminalSightTool {
-    event_tx: mpsc::UnboundedSender<TuiEvent>,
-}
-
-impl TerminalSightTool {
-    pub fn new(event_tx: mpsc::UnboundedSender<TuiEvent>) -> Self {
-        Self { event_tx }
-    }
-}
-
-#[async_trait::async_trait]
-impl crate::agent::tool::Tool for TerminalSightTool {
-    fn name(&self) -> &str { "terminal_sight" }
-    fn description(&self) -> &str { "Get a snapshot of the current terminal screen content. Useful to see what is currently displayed, including TUI apps or progress bars." }
-    fn usage(&self) -> &str { "terminal_sight" }
-    fn parameters(&self) -> serde_json::Value { serde_json::json!({}) }
-    fn kind(&self) -> crate::agent::tool::ToolKind { crate::agent::tool::ToolKind::Internal }
-
-    async fn call(&self, _args: &str) -> anyhow::Result<String> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.event_tx.send(TuiEvent::GetTerminalScreen(tx))
-            .map_err(|_| anyhow::anyhow!("Failed to contact UI for terminal sight"))?;
-        
-        let screen = rx.await
-            .map_err(|_| anyhow::anyhow!("UI failed to provide terminal sight"))?;
-            
-        Ok(screen)
-    }
-}
-
 fn format_bytes(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{} B", bytes)

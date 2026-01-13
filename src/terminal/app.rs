@@ -677,12 +677,22 @@ async fn run_agent_loop(
                     continue;
                 }
 
-                let _ = event_tx.send(TuiEvent::AgentResponseFinal(msg, usage));
-                if has_pending {
-                    drop(agent_lock);
-                    continue;
+                if msg.contains("Final Answer:") {
+                    let _ = event_tx.send(TuiEvent::AgentResponseFinal(msg, usage));
+                    break;
                 }
-                break;
+                
+                // If it looks like a question to the user, we should stop and wait for input.
+                if msg.trim().ends_with('?') || msg.contains("Please") || msg.contains("Would you") {
+                    let _ = event_tx.send(TuiEvent::AgentResponseFinal(msg, usage));
+                    break;
+                }
+
+                // Otherwise, treat as a Thought and nudge to continue if not finished.
+                let _ = event_tx.send(TuiEvent::AgentResponse(msg, usage));
+                last_observation = Some("Thought acknowledged. Please continue with the next Action or provide a Final Answer.".to_string());
+                drop(agent_lock);
+                continue;
             }
             Ok(AgentDecision::Action { tool, args, kind }) => {
                 let _ = event_tx.send(TuiEvent::StatusUpdate(format!("Tool: '{}'", tool)));

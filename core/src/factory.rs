@@ -71,7 +71,8 @@ pub async fn create_agent_for_session(
         Box::new(crate::agent::tools::git::GitDiffTool),
         Box::new(crate::agent::tools::state::StateTool::new(state_store.clone())),
         Box::new(crate::agent::tools::system::SystemMonitorTool::new()),
-        Box::new(crate::agent::tools::system::TerminalSightTool::new(event_tx.clone())),
+        Box::new(crate::agent::tools::terminal_sight::TerminalSightTool::new(event_tx.clone())),
+        Box::new(crate::agent::tools::wait::WaitTool),
     ];
 
     let system_prompt = crate::config::prompt::build_system_prompt(&ctx, "default", Some("WebSocket Session")).await?;

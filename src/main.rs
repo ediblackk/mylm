@@ -603,7 +603,8 @@ async fn handle_one_shot(
         Box::new(mylm_core::agent::tools::git::GitDiffTool) as Box<dyn mylm_core::agent::Tool>,
         Box::new(mylm_core::agent::tools::state::StateTool::new(state_store.clone())) as Box<dyn mylm_core::agent::Tool>,
         Box::new(mylm_core::agent::tools::system::SystemMonitorTool::new()) as Box<dyn mylm_core::agent::Tool>,
-        Box::new(mylm_core::agent::tools::system::TerminalSightTool::new(event_tx.clone())) as Box<dyn mylm_core::agent::Tool>,
+        Box::new(mylm_core::agent::tools::terminal_sight::TerminalSightTool::new(event_tx.clone())) as Box<dyn mylm_core::agent::Tool>,
+        Box::new(mylm_core::agent::tools::wait::WaitTool) as Box<dyn mylm_core::agent::Tool>,
     ];
 
     let categorizer = Arc::new(mylm_core::memory::categorizer::MemoryCategorizer::new(client.clone(), store.clone()));
