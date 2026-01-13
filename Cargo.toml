@@ -6,7 +6,7 @@ description = "A globally available, high-performance terminal AI assistant"
 authors = ["Your Name <you@example.com>"]
 
 [workspace]
-members = ["core", "server"]
+members = ["core"]
 
 [dependencies]
 mylm-core = { path = "./core" }
