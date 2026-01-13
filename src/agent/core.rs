@@ -122,7 +122,7 @@ impl Agent {
         }
 
         // --- Context Pruning ---
-        let context_limit = self.llm_client.config().max_context_tokens.min(100000);
+        let context_limit = self.llm_client.config().max_context_tokens;
         self.history = self.prune_history(self.history.clone(), context_limit);
 
         let mut request = ChatRequest::new(self.llm_client.model().to_string(), self.history.clone());
@@ -266,6 +266,7 @@ impl Agent {
         event_tx: tokio::sync::mpsc::UnboundedSender<crate::terminal::app::TuiEvent>,
         interrupt_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
         auto_approve: bool,
+        max_driver_loops: usize,
     ) -> Result<(String, TokenUsage), Box<dyn StdError + Send + Sync>> {
         // 1. Memory Context Injection (if enabled)
         if self.llm_client.config().memory.auto_context {
@@ -288,7 +289,13 @@ impl Agent {
         
         let mut last_observation = None;
 
+        let mut loop_iteration = 0;
         loop {
+            loop_iteration += 1;
+            if loop_iteration > max_driver_loops {
+                return Ok((format!("Error: Driver-level safety limit reached ({} loops). Potential infinite loop detected.", max_driver_loops), self.total_usage.clone()));
+            }
+
             if interrupt_flag.load(std::sync::atomic::Ordering::SeqCst) {
                 return Ok(("Interrupted by user.".to_string(), self.total_usage.clone()));
             }

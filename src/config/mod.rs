@@ -62,17 +62,24 @@ pub struct Config {
     #[serde(default)]
     pub memory: MemoryConfig,
 
+    /// Agent configuration
+    #[serde(default)]
+    pub agent: AgentConfig,
+
     /// Maximum context tokens to keep in history
+    ///
+    /// - None => use endpoint/model max context
+    /// - Some(n) => override context window to n
     #[serde(default = "default_context_limit")]
-    pub context_limit: usize,
+    pub context_limit: Option<usize>,
 
     /// Whether to show intermediate steps (thoughts/actions)
     #[serde(default = "default_verbose_mode")]
     pub verbose_mode: bool,
 }
 
-pub fn default_context_limit() -> usize {
-    100000
+pub fn default_context_limit() -> Option<usize> {
+    None
 }
 
 fn default_verbose_mode() -> bool {
@@ -124,6 +131,34 @@ fn default_true() -> bool {
     true
 }
 
+/// Agent configuration
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct AgentConfig {
+    /// Maximum number of iterations for the agent
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: usize,
+    /// Maximum number of driver loops for the agent
+    #[serde(default = "default_max_driver_loops")]
+    pub max_driver_loops: usize,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: default_max_iterations(),
+            max_driver_loops: default_max_driver_loops(),
+        }
+    }
+}
+
+fn default_max_iterations() -> usize {
+    10
+}
+
+fn default_max_driver_loops() -> usize {
+    30
+}
+
 /// Command execution configuration
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct CommandConfig {
@@ -155,7 +190,8 @@ impl Default for Config {
             commands: CommandConfig::default(),
             web_search: WebSearchConfig::default(),
             memory: MemoryConfig::default(),
-            context_limit: default_context_limit(),
+            agent: AgentConfig::default(),
+            context_limit: None,
             verbose_mode: default_verbose_mode(),
         }
     }
@@ -357,9 +393,16 @@ impl Config {
         
         loop {
             let options = vec![
-                format!("Context Limit: {}", self.context_limit),
+                format!(
+                    "Context Limit: {}",
+                    self.context_limit
+                        .map(|l| l.to_string())
+                        .unwrap_or_else(|| "Model Default".to_string())
+                ),
                 format!("Verbose Mode: {}", if self.verbose_mode { "On" } else { "Off" }),
                 format!("Auto-approve:  {}", if self.commands.allow_execution { "Enabled" } else { "Disabled" }),
+                format!("Max Iterations: {} (steps per request)", self.agent.max_iterations),
+                format!("Max Driver Loops: {} (session safety limit)", self.agent.max_driver_loops),
                 format!("Auto-Memory:   {}", if self.memory.auto_record { "Enabled" } else { "Disabled" }),
                 format!("Auto-Categorize: {}", if self.memory.auto_categorize { "Enabled" } else { "Disabled" }),
                 "⬅️  Back".to_string(),
@@ -373,10 +416,18 @@ impl Config {
 
             match selection {
                 0 => {
-                    self.context_limit = Input::with_theme(&theme)
-                        .with_prompt("Global context limit (history tokens)")
-                        .default(self.context_limit)
+                    let current = self.context_limit.unwrap_or(0);
+                    let val: String = Input::with_theme(&theme)
+                        .with_prompt("Global context limit (0 to use model default)")
+                        .with_initial_text(current.to_string())
                         .interact_text()?;
+
+                    let n = val.parse::<usize>().unwrap_or(0);
+                    if n == 0 {
+                        self.context_limit = None;
+                    } else {
+                        self.context_limit = Some(n);
+                    }
                 }
                 1 => {
                     self.verbose_mode = !self.verbose_mode;
@@ -385,11 +436,23 @@ impl Config {
                     self.commands.allow_execution = !self.commands.allow_execution;
                 }
                 3 => {
+                    self.agent.max_iterations = Input::with_theme(&theme)
+                        .with_prompt("Max steps (thoughts/actions) per single user request")
+                        .default(self.agent.max_iterations)
+                        .interact_text()?;
+                }
+                4 => {
+                    self.agent.max_driver_loops = Input::with_theme(&theme)
+                        .with_prompt("Safety limit: max total exchanges in one session")
+                        .default(self.agent.max_driver_loops)
+                        .interact_text()?;
+                }
+                5 => {
                     self.memory.auto_record = !self.memory.auto_record;
                     self.memory.auto_context = self.memory.auto_record;
                     self.memory.auto_categorize = self.memory.auto_record;
                 }
-                4 => {
+                6 => {
                     self.memory.auto_categorize = !self.memory.auto_categorize;
                 }
                 _ => break,
@@ -611,7 +674,8 @@ pub fn create_default_config() -> Config {
         },
         web_search: WebSearchConfig::default(),
         memory: MemoryConfig::default(),
-        context_limit: 100000,
+        agent: AgentConfig::default(),
+        context_limit: None,
         verbose_mode: false,
     }
 }

@@ -38,12 +38,20 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>, initial_query: O
     // Setup LLM Client (using default endpoint)
     let config = Config::load()?;
     let endpoint_config = config.get_endpoint(None)?;
-    // Use global context limit if user explicitly changed it from default, otherwise respect endpoint limit
-    let effective_context_limit = if config.context_limit != crate::config::default_context_limit() {
-        config.context_limit
-    } else {
-        endpoint_config.max_context_tokens
-    };
+    // Context limit override:
+    // - None => use endpoint/model max
+    // - Some(n) => use n
+    let effective_context_limit = config
+        .context_limit
+        .unwrap_or(endpoint_config.max_context_tokens);
+
+    // DEBUG LOG
+    // println!(
+    //     "DEBUG: config.context_limit={:?}, endpoint.max={}, effective={}",
+    //     config.context_limit,
+    //     endpoint_config.max_context_tokens,
+    //     effective_context_limit
+    // );
 
     let llm_config = LlmConfig::new(
         endpoint_config.provider.parse().map_err(|e| anyhow::anyhow!("{}", e))?,
@@ -97,7 +105,7 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>, initial_query: O
     tools.push(Box::new(crawl_tool) as Box<dyn Tool>);
 
     // Create Agent
-    let agent = Agent::new_with_iterations(llm_client, tools, system_prompt, 10, Some(store.clone()), Some(categorizer.clone()));
+    let agent = Agent::new_with_iterations(llm_client, tools, system_prompt, config.agent.max_iterations, Some(store.clone()), Some(categorizer.clone()));
 
     // Setup PTY with context CWD
     let (pty_manager, mut pty_rx) = spawn_pty(context.cwd.clone())?;
@@ -376,12 +384,9 @@ async fn run_loop(
                     app.config = new_config.clone();
                     
                     if let Ok(endpoint_config) = new_config.get_endpoint(None) {
-                        // Use global context limit if user explicitly changed it from default, otherwise respect endpoint limit
-                        let effective_context_limit = if new_config.context_limit != crate::config::default_context_limit() {
-                            new_config.context_limit
-                        } else {
-                            endpoint_config.max_context_tokens
-                        };
+                        let effective_context_limit = new_config
+                            .context_limit
+                            .unwrap_or(endpoint_config.max_context_tokens);
 
                         let llm_config = LlmConfig::new(
                             endpoint_config.provider.parse().unwrap_or(crate::llm::LlmProvider::OpenAiCompatible),
@@ -471,34 +476,10 @@ async fn run_loop(
                 TuiEvent::Input(ev) => {
                     match ev {
                         CrosstermEvent::Key(key) => {
-                            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                match key.code {
-                                    KeyCode::Char('x') => {
-                                        app.toggle_focus();
-                                        continue;
-                                    }
-                                    KeyCode::Char('v') => {
-                                        app.verbose_mode = !app.verbose_mode;
-                                        continue;
-                                    }
-                                    KeyCode::Char('t') => {
-                                        app.show_thoughts = !app.show_thoughts;
-                                        continue;
-                                    }
-                                    KeyCode::Char('a') => {
-                                        app.auto_approve = !app.auto_approve;
-                                        continue;
-                                    }
-                                    KeyCode::Char('c') => {
-                                        if app.state != AppState::Idle {
-                                            app.abort_current_task();
-                                            continue;
-                                        } else {
-                                            return Ok(());
-                                        }
-                                    }
-                                    _ => {}
-                                }
+                            // Global Focus Toggle (F2) - Works everywhere
+                            if key.code == KeyCode::F(2) {
+                                app.toggle_focus();
+                                continue;
                             }
 
                             match app.focus {
@@ -543,6 +524,34 @@ async fn run_loop(
                                     }
                                 }
                                 Focus::Chat => {
+                                    // Control shortcuts - only active when Chat is focused
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) {
+                                        match key.code {
+                                            KeyCode::Char('v') => {
+                                                app.verbose_mode = !app.verbose_mode;
+                                                continue;
+                                            }
+                                            KeyCode::Char('t') => {
+                                                app.show_thoughts = !app.show_thoughts;
+                                                continue;
+                                            }
+                                            KeyCode::Char('a') => {
+                                                let current = app.auto_approve.load(Ordering::SeqCst);
+                                                app.auto_approve.store(!current, Ordering::SeqCst);
+                                                continue;
+                                            }
+                                            KeyCode::Char('c') => {
+                                                if app.state != AppState::Idle {
+                                                    app.abort_current_task();
+                                                    continue;
+                                                } else {
+                                                    return Ok(());
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+
                                     if app.state == AppState::Idle || app.state == AppState::WaitingForUser {
                                         match key.code {
                                             KeyCode::Enter => {

@@ -67,7 +67,7 @@ pub struct App {
     pub interrupt_flag: Arc<AtomicBool>,
     pub verbose_mode: bool,
     pub show_thoughts: bool,
-    pub auto_approve: bool,
+    pub auto_approve: Arc<AtomicBool>,
     pub active_task: Option<tokio::task::JoinHandle<()>>,
     pub capturing_command_output: bool,
     pub command_output_buffer: String,
@@ -90,7 +90,7 @@ impl App {
         let mut session_monitor = SessionMonitor::new();
         session_monitor.set_max_context(max_ctx as u32);
         let verbose_mode = config.verbose_mode;
-        let auto_approve = config.commands.allow_execution;
+        let auto_approve = Arc::new(AtomicBool::new(config.commands.allow_execution));
 
         Self {
             terminal_parser: Parser::new(24, 80, 0), // Standard size, history handled separately
@@ -253,7 +253,8 @@ impl App {
             let monitor_ratio = self.session_monitor.get_context_ratio();
             let event_tx_clone = event_tx.clone();
             let interrupt_flag = self.interrupt_flag.clone();
-            let auto_approve = self.auto_approve;
+            let auto_approve = self.auto_approve.clone();
+            let max_driver_loops = self.config.agent.max_driver_loops;
             interrupt_flag.store(false, Ordering::SeqCst);
 
             let task = tokio::spawn(async move {
@@ -278,6 +279,7 @@ impl App {
                     event_tx_clone,
                     interrupt_flag,
                     auto_approve,
+                    max_driver_loops,
                     None
                 ).await;
             });
@@ -364,7 +366,8 @@ impl App {
                 let interrupt_flag = self.interrupt_flag.clone();
                 interrupt_flag.store(false, Ordering::SeqCst);
 
-                let auto_approve = self.auto_approve;
+                let auto_approve = self.auto_approve.clone();
+                let max_driver_loops = self.config.agent.max_driver_loops;
                 let task = tokio::spawn(async move {
                     // Manual execution via /exec
                     // Safety check
@@ -391,13 +394,19 @@ impl App {
                         event_tx_clone,
                         interrupt_flag,
                         auto_approve, // Now correctly respects auto_approve for future steps!
+                        max_driver_loops,
                         last_obs
                     ).await;
                 });
                 self.active_task = Some(task);
             }
             "/help" => {
-                self.chat_history.push(ChatMessage::assistant("Available commands:\n/profile <name> - Switch profile\n/config <key> <value> - Update active profile\n/exec <command> - Execute shell command\n/help - Show this help".to_string()));
+                self.chat_history.push(ChatMessage::assistant("Available commands:\n/profile <name> - Switch profile\n/config <key> <value> - Update active profile\n/exec <command> - Execute shell command\n/verbose - Toggle verbose mode\n/help - Show this help".to_string()));
+            }
+            "/verbose" => {
+                self.verbose_mode = !self.verbose_mode;
+                let status = if self.verbose_mode { "ON" } else { "OFF" };
+                self.chat_history.push(ChatMessage::assistant(format!("Verbose mode: {}", status)));
             }
             _ => {
                 self.chat_history.push(ChatMessage::assistant(format!("Unknown command: {}", cmd)));
@@ -491,12 +500,11 @@ async fn run_agent_loop(
     agent: Arc<Mutex<Agent>>,
     event_tx: mpsc::UnboundedSender<TuiEvent>,
     interrupt_flag: Arc<AtomicBool>,
-    auto_approve: bool,
+    auto_approve_flag: Arc<AtomicBool>,
+    max_driver_loops: usize,
     mut last_observation: Option<String>,
 ) {
     let mut loop_iteration = 0;
-    // Driver-level safety limit (should be higher than agent's max_iterations)
-    let max_driver_loops = 30;
 
     loop {
         loop_iteration += 1;
@@ -558,7 +566,7 @@ async fn run_agent_loop(
                         continue;
                     }
 
-                    if !auto_approve {
+                    if !auto_approve_flag.load(Ordering::SeqCst) {
                         let _ = event_tx.send(TuiEvent::SuggestCommand(cmd));
                         let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::WaitingForUser));
                         break; // Stop and wait for manual approval

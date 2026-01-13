@@ -1,21 +1,28 @@
 use crate::terminal::app::{App, Focus, AppState};
 use crate::llm::chat::MessageRole;
+use std::sync::atomic::Ordering;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style, Modifier},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 use tui_term::widget::PseudoTerminal;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
+    // Estimate top bar height based on width and content
+    let width = frame.area().width;
+    let stats_len = 170; // Profile + Prompt + Tokens + Cost + Time + Verbose + Auto-Approve
+    let stats_rows = (stats_len as f32 / width as f32).ceil() as u16;
+    let top_bar_height = 1 + stats_rows.max(1);
+
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(0)])
+        .constraints([Constraint::Length(top_bar_height), Constraint::Min(0)])
         .split(frame.area());
 
-    render_top_bar(frame, app, main_layout[0]);
+    render_top_bar(frame, app, main_layout[0], top_bar_height);
 
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
@@ -26,56 +33,58 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     render_chat(frame, app, chunks[1]);
 }
 
-fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
+fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
     let stats = app.session_monitor.get_stats();
     let duration = app.session_monitor.format_duration();
 
     let active_profile = app.config.active_profile.clone();
     let profile_data = app.config.get_active_profile();
-    let endpoint_name = profile_data.map(|p| p.endpoint.as_str()).unwrap_or("?");
-    let prompt_name = profile_data.map(|p| p.prompt.as_str()).unwrap_or("?");
     
-    let model_name = if let Ok(e) = app.config.get_endpoint(profile_data.map(|p| p.endpoint.as_str())) {
-        e.model.clone()
+    let (endpoint_name, model_name, model_max) = if let Ok(e) = app.config.get_endpoint(profile_data.map(|p| p.endpoint.as_str())) {
+        (e.name.as_str(), e.model.clone(), e.max_context_tokens)
     } else {
-        "unknown".to_string()
+        ("?", "unknown".to_string(), 0)
     };
+
+    let prompt_name = profile_data.map(|p| p.prompt.as_str()).unwrap_or("?");
 
     let (verbose_text, verbose_color) = if app.verbose_mode {
-        (" [VERBOSE: ON] ", Color::Magenta)
+        (" [VERBOSE: ON (Ctrl+v)] ", Color::Magenta)
     } else {
-        (" [VERBOSE: OFF] ", Color::DarkGray)
+        (" [VERBOSE: OFF (Ctrl+v)] ", Color::DarkGray)
     };
-    let auto_approve_text = if app.auto_approve { " [AUTO-APPROVE: ON] " } else { " [AUTO-APPROVE: OFF] " };
+    let auto_approve = app.auto_approve.load(Ordering::SeqCst);
+    let auto_approve_text = if auto_approve { " [AUTO-APPROVE: ON] " } else { " [AUTO-APPROVE: OFF] " };
 
-    let stats_text = vec![
-        Line::from(vec![
-            Span::styled("Profile: ", Style::default().fg(Color::Gray)),
-            Span::styled(active_profile, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::raw(" ("),
-            Span::styled(endpoint_name, Style::default().fg(Color::DarkGray)),
-            Span::raw(":"),
-            Span::styled(model_name, Style::default().fg(Color::DarkGray)),
-            Span::raw(") | "),
-            Span::styled("Prompt: ", Style::default().fg(Color::Gray)),
-            Span::styled(prompt_name, Style::default().fg(Color::White)),
-            Span::raw(" | "),
-            Span::styled("Tokens: ", Style::default().fg(Color::Gray)),
-            Span::styled(stats.total_tokens.to_string(), Style::default().fg(Color::Cyan)),
-            Span::raw(" ("),
-            Span::styled(stats.input_tokens.to_string(), Style::default().fg(Color::DarkGray)),
-            Span::raw("/"),
-            Span::styled(stats.output_tokens.to_string(), Style::default().fg(Color::DarkGray)),
-            Span::raw(") | "),
-            Span::styled("Cost: ", Style::default().fg(Color::Gray)),
-            Span::styled(format!("${:.2}", stats.cost), Style::default().fg(Color::Green)),
-            Span::raw(" | "),
-            Span::styled("Time: ", Style::default().fg(Color::Gray)),
-            Span::styled(duration, Style::default().fg(Color::Gray)),
-            Span::styled(verbose_text, Style::default().fg(verbose_color).add_modifier(Modifier::BOLD)),
-            Span::styled(auto_approve_text, Style::default().fg(if app.auto_approve { Color::Green } else { Color::Red }).add_modifier(Modifier::BOLD)),
-        ])
-    ];
+    let stats_text = Line::from(vec![
+        Span::styled("Profile: ", Style::default().fg(Color::Gray)),
+        Span::styled(active_profile, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::raw(" ("),
+        Span::styled(endpoint_name, Style::default().fg(Color::DarkGray)),
+        Span::raw(":"),
+        Span::styled(model_name, Style::default().fg(Color::DarkGray)),
+        Span::raw(") | "),
+        Span::styled("Prompt: ", Style::default().fg(Color::Gray)),
+        Span::styled(prompt_name, Style::default().fg(Color::White)),
+        Span::raw(" | "),
+        Span::styled("Tokens: ", Style::default().fg(Color::Gray)),
+        Span::styled(stats.total_tokens.to_string(), Style::default().fg(Color::Cyan)),
+        Span::raw(" ("),
+        Span::styled("↑", Style::default().fg(Color::DarkGray)),
+        Span::styled(stats.input_tokens.to_string(), Style::default().fg(Color::DarkGray)),
+        Span::raw("/"),
+        Span::styled("↓", Style::default().fg(Color::DarkGray)),
+        Span::styled(stats.output_tokens.to_string(), Style::default().fg(Color::DarkGray)),
+        Span::raw(") | "),
+        Span::styled("Cost: ", Style::default().fg(Color::Gray)),
+        Span::styled(format!("${:.2}", stats.cost), Style::default().fg(Color::Green)),
+        Span::raw(" | "),
+        Span::styled("Time: ", Style::default().fg(Color::Gray)),
+        Span::styled(duration, Style::default().fg(Color::Gray)),
+        Span::styled(verbose_text, Style::default().fg(verbose_color).add_modifier(Modifier::BOLD)),
+        Span::styled(auto_approve_text, Style::default().fg(if auto_approve { Color::Green } else { Color::Red }).add_modifier(Modifier::BOLD)),
+        Span::styled(" [F2: Focus] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    ]);
 
     let ratio = app.session_monitor.get_context_ratio();
     let gauge_color = if ratio > 0.8 {
@@ -86,17 +95,26 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         Color::Green
     };
 
-    let label = format!("Context: {}/{} ({:.0}%)",
-        stats.active_context_tokens,
-        stats.max_context_tokens,
-        ratio * 100.0
-    );
+    let label = if model_max > 0 && model_max != stats.max_context_tokens as usize {
+        format!("Context: {}/{} [Model Limit: {}] ({:.0}%)",
+            stats.active_context_tokens,
+            stats.max_context_tokens,
+            model_max,
+            ratio * 100.0
+        )
+    } else {
+        format!("Context: {}/{} ({:.0}%)",
+            stats.active_context_tokens,
+            stats.max_context_tokens,
+            ratio * 100.0
+        )
+    };
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Min(0),
         ])
         .split(area);
 
@@ -120,7 +138,9 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
         .ratio(ratio.clamp(0.0, 1.0))
         .label(label);
 
-    let stats_p = Paragraph::new(stats_text).alignment(ratatui::layout::Alignment::Right);
+    let stats_p = Paragraph::new(stats_text)
+        .alignment(ratatui::layout::Alignment::Right)
+        .wrap(Wrap { trim: true });
 
     frame.render_widget(version_p, top_row_chunks[0]);
     frame.render_widget(gauge, top_row_chunks[1]);
@@ -129,7 +149,7 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn render_terminal(frame: &mut Frame, app: &mut App, area: Rect) {
     let title = match app.focus {
-        Focus::Terminal => " Terminal (Focus: Ctrl+x) ",
+        Focus::Terminal => " Terminal (Focus: F2) ",
         _ => " Terminal ",
     };
 
@@ -215,7 +235,7 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
         .split(area);
 
     let title = match app.focus {
-        Focus::Chat => " AI Chat (Focus: Ctrl+x) ",
+        Focus::Chat => " AI Chat (Focus: F2) ",
         _ => " AI Chat ",
     };
 

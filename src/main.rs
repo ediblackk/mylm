@@ -500,7 +500,7 @@ async fn handle_one_shot(
     ];
 
     let categorizer = Arc::new(crate::memory::categorizer::MemoryCategorizer::new(client.clone(), store.clone()));
-    let mut agent = crate::agent::Agent::new_with_iterations(client, tools, system_prompt, 10, Some(store), Some(categorizer));
+    let mut agent = crate::agent::Agent::new_with_iterations(client, tools, system_prompt, config.agent.max_iterations, Some(store), Some(categorizer));
     
     let messages = vec![
         crate::llm::chat::ChatMessage::user(query.to_string()),
@@ -509,7 +509,7 @@ async fn handle_one_shot(
     // Dummy interrupt flag for one-shot
     let interrupt_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    match agent.run(messages, event_tx, interrupt_flag, auto_approve).await {
+    match agent.run(messages, event_tx, interrupt_flag, auto_approve, config.agent.max_driver_loops).await {
         Ok((response, _usage)) => {
             // Stop the log task
             log_handle.abort();
@@ -608,7 +608,7 @@ fn toggle_tmux_autostart() -> Result<()> {
                 new_content.push_str(snippet_start);
                 new_content.push('\n');
                 new_content.push_str("if command -v tmux &> /dev/null && [ -z \"$TMUX\" ] && [ -n \"$PS1\" ]; then\n");
-                new_content.push_str("    tmux attach-session -t mylm 2>/dev/null || tmux new-session -s mylm\n");
+                new_content.push_str("    tmux new-session -s \"mylm-$(date +%s)-$$-$RANDOM\"\n");
                 new_content.push_str("fi\n");
                 new_content.push_str(snippet_end);
                 new_content.push('\n');

@@ -47,19 +47,43 @@ if [ "$BUILT_VERSION" == "$INSTALLED_VERSION" ]; then
         shell_rc="$HOME/.bashrc"
     fi
 
+    snippet_start="# --- mylm tmux auto-start ---"
+    snippet_end="# --- end mylm tmux auto-start ---"
+
     if [ -n "$shell_rc" ] && [ -f "$shell_rc" ]; then
-        if grep -q "mylm tmux auto-start" "$shell_rc"; then
-            echo "✅ tmux auto-start is already configured in $shell_rc."
+        if grep -q "$snippet_start" "$shell_rc"; then
+            if grep -q "tmux attach-session -t mylm" "$shell_rc" || grep -q "tmux new-session -s mylm" "$shell_rc"; then
+                echo "⚠️  Found legacy tmux auto-start config that attaches to the shared session 'mylm' (this causes mirroring)."
+                echo "🔧 Upgrading to isolated per-terminal tmux sessions..."
+
+                awk -v start="$snippet_start" -v end="$snippet_end" '
+                    $0 == start { in_snippet = 1; next }
+                    $0 == end   { in_snippet = 0; next }
+                    !in_snippet { print }
+                ' "$shell_rc" > "${shell_rc}.mylm_tmp" && mv "${shell_rc}.mylm_tmp" "$shell_rc"
+
+                echo "" >> "$shell_rc"
+                echo "$snippet_start" >> "$shell_rc"
+                echo 'if command -v tmux &> /dev/null && [ -z "$TMUX" ] && [ -n "$PS1" ]; then' >> "$shell_rc"
+                echo '    tmux new-session -s "mylm-$(date +%s)-$$-$RANDOM"' >> "$shell_rc"
+                echo 'fi' >> "$shell_rc"
+                echo "$snippet_end" >> "$shell_rc"
+
+                echo "✅ Upgraded tmux auto-start snippet in $shell_rc."
+                echo "💡 Changes will take effect in new terminal sessions."
+            else
+                echo "✅ tmux auto-start is already configured in $shell_rc."
+            fi
             # Proceed without asking
         else
             read -p "Enable global seamless context via tmux? [y/N]: " enable_tmux
             if [[ "$enable_tmux" =~ ^[Yy]$ ]]; then
                 echo "" >> "$shell_rc"
-                echo "# --- mylm tmux auto-start ---" >> "$shell_rc"
+                echo "$snippet_start" >> "$shell_rc"
                 echo 'if command -v tmux &> /dev/null && [ -z "$TMUX" ] && [ -n "$PS1" ]; then' >> "$shell_rc"
-                echo '    tmux attach-session -t mylm 2>/dev/null || tmux new-session -s mylm' >> "$shell_rc"
+                echo '    tmux new-session -s "mylm-$(date +%s)-$$-$RANDOM"' >> "$shell_rc"
                 echo 'fi' >> "$shell_rc"
-                echo "# --- end mylm tmux auto-start ---" >> "$shell_rc"
+                echo "$snippet_end" >> "$shell_rc"
                 echo "✅ Added tmux auto-start snippet to $shell_rc."
                 echo "💡 Changes will take effect in new terminal sessions."
             else
