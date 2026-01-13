@@ -123,6 +123,22 @@ if [ "$BUILT_VERSION" == "$INSTALLED_VERSION" ]; then
         echo "⚠️  Could not find shell configuration file to enable tmux auto-start."
     fi
 
+    # --- Shell Alias Configuration ---
+    echo ""
+    echo "🔍 Configuring shell alias..."
+    if [ -n "$shell_rc" ] && [ -f "$shell_rc" ]; then
+        if ! grep -q "alias ai=" "$shell_rc"; then
+            read -p "Set 'ai' alias in $shell_rc? [y/N]: " set_alias
+            if [[ "$set_alias" =~ ^[Yy]$ ]]; then
+                echo "alias ai='/usr/local/bin/mylm'" >> "$shell_rc"
+                echo "✅ Alias 'ai' added to $shell_rc."
+                echo "💡 Please restart your shell or run 'source $shell_rc' to apply changes."
+            fi
+        else
+            echo "✅ Alias 'ai' is already configured in $shell_rc."
+        fi
+    fi
+
     echo ""
     echo "� Use 'install.sh' for optimized release builds."
 else
