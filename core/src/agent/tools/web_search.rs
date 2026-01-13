@@ -148,6 +148,10 @@ impl Tool for WebSearchTool {
         "Provide a search query. Example: 'latest Rust version' or 'who won the Super Bowl 2025'."
     }
 
+    fn kind(&self) -> crate::agent::tool::ToolKind {
+        crate::agent::tool::ToolKind::Web
+    }
+
     async fn call(&self, args: &str) -> Result<String> {
         if !self.config.enabled {
             bail!("Web search is currently disabled. Please enable it in configuration.");

@@ -1,42 +1,36 @@
 use crate::terminal::pty::PtyManager;
-use crate::executor::{CommandExecutor, allowlist::CommandAllowlist, safety::SafetyChecker};
-use crate::llm::chat::ChatMessage;
-use crate::llm::TokenUsage;
-use crate::agent::{Agent, AgentDecision, ToolKind};
+use mylm_core::memory::graph::MemoryGraph;
+use mylm_core::executor::{CommandExecutor, allowlist::CommandAllowlist, safety::SafetyChecker};
+use mylm_core::llm::chat::ChatMessage;
+use mylm_core::llm::TokenUsage;
+use mylm_core::agent::{Agent, AgentDecision, ToolKind};
 use crate::terminal::session::SessionMonitor;
+use mylm_core::context::pack::ContextBuilder;
 use vt100::Parser;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 use tokio::sync::Mutex;
 
 use tokio::sync::mpsc;
+pub use mylm_core::terminal::app::{AppState, TuiEvent};
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub enum AppState {
-    Idle,
-    Thinking(String),      // Provider info
+#[derive(Debug, Clone)]
+pub struct ActivityEntry {
     #[allow(dead_code)]
-    Streaming(String),     // Progress or partial content
-    ExecutingTool(String), // Tool name
-    WaitingForUser,        // Auto-approve off
-    Error(String),
+    pub at: Instant,
+    pub summary: String,
+    pub detail: Option<String>,
 }
 
-#[derive(Debug)]
-pub enum TuiEvent {
-    Input(crossterm::event::Event),
-    Pty(Vec<u8>),
-    PtyWrite(Vec<u8>),
-    InternalObservation(Vec<u8>),
-    AgentResponse(String, TokenUsage),
-    StatusUpdate(String),
-    CondensedHistory(Vec<ChatMessage>),
-    ConfigUpdate(crate::config::Config),
-    SuggestCommand(String),
-    ExecuteTerminalCommand(String, tokio::sync::oneshot::Sender<String>),
-    GetTerminalScreen(tokio::sync::oneshot::Sender<String>),
-    AppStateUpdate(AppState),
-    Tick,
+#[derive(Debug, Clone)]
+pub struct PendingStream {
+    #[allow(dead_code)]
+    pub started_at: Instant,
+    pub chars: Vec<char>,
+    pub rendered: usize,
+    pub msg_index: usize,
+    pub usage: TokenUsage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,7 +42,7 @@ pub enum Focus {
 pub struct App {
     pub terminal_parser: Parser,
     pub pty_manager: PtyManager,
-    pub config: crate::config::Config,
+    pub config: mylm_core::config::Config,
     pub agent: Arc<Mutex<Agent>>,
     pub chat_input: String,
     pub cursor_position: usize,
@@ -64,6 +58,9 @@ pub struct App {
     pub terminal_auto_scroll: bool,
     pub terminal_size: (u16, u16),
     pub status_message: Option<String>,
+    pub state_started_at: Instant,
+    pub activity_log: Vec<ActivityEntry>,
+    pub pending_stream: Option<PendingStream>,
     pub interrupt_flag: Arc<AtomicBool>,
     pub verbose_mode: bool,
     pub show_thoughts: bool,
@@ -79,10 +76,14 @@ pub struct App {
     pub pending_echo_suppression: String,
     pub pending_clean_command: Option<String>,
     pub raw_buffer: Vec<u8>,
+    pub session_id: String,
+    pub show_memory_view: bool,
+    pub memory_graph: MemoryGraph,
+    pub memory_graph_scroll: usize,
 }
 
 impl App {
-    pub fn new(pty_manager: PtyManager, agent: Agent, config: crate::config::Config) -> Self {
+    pub fn new(pty_manager: PtyManager, agent: Agent, config: mylm_core::config::Config) -> Self {
         let max_ctx = agent.llm_client.config().max_context_tokens;
         let input_price = agent.llm_client.config().input_price_per_1k;
         let output_price = agent.llm_client.config().output_price_per_1k;
@@ -91,6 +92,8 @@ impl App {
         session_monitor.set_max_context(max_ctx as u32);
         let verbose_mode = config.verbose_mode;
         let auto_approve = Arc::new(AtomicBool::new(config.commands.allow_execution));
+
+        let session_id = agent.session_id.clone();
 
         Self {
             terminal_parser: Parser::new(24, 80, 0), // Standard size, history handled separately
@@ -111,6 +114,9 @@ impl App {
             terminal_auto_scroll: true,
             terminal_size: (24, 80),
             status_message: None,
+            state_started_at: Instant::now(),
+            activity_log: Vec::new(),
+            pending_stream: None,
             interrupt_flag: Arc::new(AtomicBool::new(false)),
             verbose_mode,
             show_thoughts: true,
@@ -126,6 +132,10 @@ impl App {
             pending_echo_suppression: String::new(),
             pending_clean_command: None,
             raw_buffer: Vec::new(),
+            session_id,
+            show_memory_view: false,
+            memory_graph: MemoryGraph::default(),
+            memory_graph_scroll: 0,
         }
     }
 
@@ -228,16 +238,20 @@ impl App {
                 return;
             }
 
-            // Capture full terminal history for context
-            let history_height = 2000;
+            // Build prompt with context packs
+            let history_height = 5000; // Capture more for the builder to decide
             let width = self.terminal_size.1;
             let mut temp_parser = Parser::new(history_height, width, 0);
             temp_parser.process(&self.raw_buffer);
             let terminal_content = temp_parser.screen().contents();
-            
-            // Limit the content size if necessary (though 2000 lines is usually safe)
-            // The prompt format is strict:
-            let final_message = format!("{}\n\n---\n[TERMINAL STATE ATTACHMENT]\n{}", input, terminal_content);
+
+            let builder = ContextBuilder::new(self.config.context_profile);
+            let mut final_message = input.clone();
+
+            // 1. Terminal Pack
+            if let Some(pack) = builder.build_terminal_pack(&terminal_content) {
+                final_message.push_str(&pack.render());
+            }
 
             self.chat_history.push(ChatMessage::user(&final_message));
             self.chat_input.clear();
@@ -466,26 +480,85 @@ impl App {
             .join("sessions");
         
         std::fs::create_dir_all(&data_dir)?;
-        let path = data_dir.join("latest.json");
-        let content = serde_json::to_string(&self.chat_history)?;
-        std::fs::write(path, content)?;
+
+        let stats = self.session_monitor.get_stats();
+        let preview = self.chat_history.iter()
+            .rev()
+            .find(|m| m.role == mylm_core::llm::chat::MessageRole::Assistant)
+            .map(|m| m.content.chars().take(100).collect::<String>())
+            .unwrap_or_else(|| "New Session".to_string());
+
+        let session = crate::terminal::session::Session {
+            id: self.session_id.clone(),
+            timestamp: chrono::Utc::now(),
+            history: self.chat_history.clone(),
+            metadata: crate::terminal::session::SessionMetadata {
+                last_message_preview: preview,
+                message_count: self.chat_history.len(),
+                total_tokens: stats.total_tokens,
+                input_tokens: stats.input_tokens,
+                output_tokens: stats.output_tokens,
+                cost: stats.cost,
+                elapsed_seconds: self.session_monitor.duration().as_secs(),
+            },
+            terminal_history: self.raw_buffer.clone(),
+        };
+
+        let content = serde_json::to_string_pretty(&session)?;
+        
+        // Save unique file
+        let filename = format!("session_{}.json", self.session_id);
+        let path = data_dir.join(filename);
+        std::fs::write(&path, &content)?;
+
+        // Update latest.json (as a copy for simplicity and compatibility across platforms without symlink worries)
+        let latest_path = data_dir.join("latest.json");
+        std::fs::write(latest_path, content)?;
+        
         Ok(())
     }
 
-    pub fn load_session() -> Result<Vec<ChatMessage>, Box<dyn std::error::Error>> {
-        let path = dirs::data_dir()
+    pub fn load_session(id: Option<&str>) -> Result<crate::terminal::session::Session, Box<dyn std::error::Error>> {
+        let data_dir = dirs::data_dir()
             .ok_or("Could not find data directory")?
             .join("mylm")
-            .join("sessions")
-            .join("latest.json");
+            .join("sessions");
+        
+        let filename = match id {
+            Some(id) => if id.ends_with(".json") { id.to_string() } else { format!("session_{}.json", id) },
+            None => "latest.json".to_string(),
+        };
+
+        let path = data_dir.join(filename);
         
         if !path.exists() {
-            return Ok(Vec::new());
+            return Err("Session not found".into());
         }
 
         let content = std::fs::read_to_string(path)?;
-        let history: Vec<ChatMessage> = serde_json::from_str(&content)?;
-        Ok(history)
+        
+        // Try to parse as new Session format first
+        if let Ok(session) = serde_json::from_str::<crate::terminal::session::Session>(&content) {
+            Ok(session)
+        } else {
+            // Fallback to legacy ChatHistory format (Vec<ChatMessage>)
+            let history: Vec<ChatMessage> = serde_json::from_str(&content)?;
+            Ok(crate::terminal::session::Session {
+                id: "legacy".to_string(),
+                timestamp: chrono::Utc::now(),
+                history,
+                metadata: crate::terminal::session::SessionMetadata {
+                    last_message_preview: "Legacy Session".to_string(),
+                    message_count: 0,
+                    total_tokens: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cost: 0.0,
+                    elapsed_seconds: 0,
+                },
+                terminal_history: Vec::new(),
+            })
+        }
     }
 
     pub fn handle_terminal_input(&mut self, bytes: &[u8]) {
@@ -493,6 +566,71 @@ impl App {
         // Reset terminal scroll on input if auto-scroll is enabled or just to be helpful
         self.terminal_scroll = 0;
         self.terminal_auto_scroll = true;
+    }
+
+    pub fn copy_text_to_clipboard(&mut self, text: String) {
+        match arboard::Clipboard::new() {
+            Ok(mut clipboard) => {
+                if let Err(e) = clipboard.set_text(text) {
+                    self.status_message = Some(format!("Clipboard error: {}", e));
+                } else {
+                    self.status_message = Some("Copied to clipboard".to_string());
+                }
+            },
+            Err(e) => {
+                 self.status_message = Some(format!("Clipboard init error: {}", e));
+            }
+        }
+    }
+
+    pub fn copy_last_ai_response_to_clipboard(&mut self) {
+        if let Some(msg) = self.chat_history.iter().rev().find(|m| m.role == mylm_core::llm::chat::MessageRole::Assistant) {
+            // Clean up the message if needed (though user asked for "plain text", usually the content is markdown/text)
+            // We'll just copy the content directly as that's usually what is desired.
+            self.copy_text_to_clipboard(msg.content.clone());
+        } else {
+            self.status_message = Some("No AI response to copy".to_string());
+        }
+    }
+
+    pub fn copy_terminal_buffer_to_clipboard(&mut self) {
+         let history_height = 5000;
+         let width = self.terminal_size.1;
+         let mut temp_parser = Parser::new(history_height, width, 0);
+         temp_parser.process(&self.raw_buffer);
+         let content = temp_parser.screen().contents();
+         self.copy_text_to_clipboard(content);
+    }
+
+    pub fn set_state(&mut self, state: AppState) {
+        self.state = state;
+        self.state_started_at = Instant::now();
+    }
+
+    pub fn push_activity(&mut self, summary: impl Into<String>, detail: Option<String>) {
+        self.activity_log.push(ActivityEntry {
+            at: Instant::now(),
+            summary: summary.into(),
+            detail,
+        });
+        if self.activity_log.len() > 200 {
+            let overflow = self.activity_log.len() - 200;
+            self.activity_log.drain(0..overflow);
+        }
+    }
+
+    pub fn start_streaming_final_answer(&mut self, content: String, usage: TokenUsage) {
+        // Insert a placeholder assistant message and fill it incrementally from ticks.
+        self.chat_history.push(ChatMessage::assistant(String::new()));
+        let msg_index = self.chat_history.len().saturating_sub(1);
+        self.pending_stream = Some(PendingStream {
+            started_at: Instant::now(),
+            chars: content.chars().collect(),
+            rendered: 0,
+            msg_index,
+            usage,
+        });
+        self.set_state(AppState::Streaming("Answer".to_string()));
     }
 }
 
@@ -524,21 +662,34 @@ async fn run_agent_loop(
         let provider = agent_lock.llm_client.config().provider.to_string();
         let model = agent_lock.llm_client.config().model.clone();
         let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Thinking(format!("{} ({})", model, provider))));
+        let _ = event_tx.send(TuiEvent::ActivityUpdate {
+            summary: "Thinking".to_string(),
+            detail: Some(format!("Model: {} | Provider: {}", model, provider)),
+        });
         
         let step_res = agent_lock.step(last_observation.take()).await;
         match step_res {
             Ok(AgentDecision::Message(msg, usage)) => {
                 let has_pending = agent_lock.has_pending_decision();
-                let _ = event_tx.send(TuiEvent::AgentResponse(msg, usage));
+                if has_pending {
+                    let _ = event_tx.send(TuiEvent::AgentResponse(msg, usage));
+                    drop(agent_lock);
+                    continue;
+                }
+
+                let _ = event_tx.send(TuiEvent::AgentResponseFinal(msg, usage));
                 if has_pending {
                     drop(agent_lock);
                     continue;
                 }
-                let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Idle));
                 break;
             }
             Ok(AgentDecision::Action { tool, args, kind }) => {
                 let _ = event_tx.send(TuiEvent::StatusUpdate(format!("Tool: '{}'", tool)));
+                let _ = event_tx.send(TuiEvent::ActivityUpdate {
+                    summary: format!("Tool: {}", tool),
+                    detail: Some(args.clone()),
+                });
                 
                 if kind == ToolKind::Terminal {
                     let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::ExecutingTool(tool.clone())));
@@ -556,19 +707,13 @@ async fn run_agent_loop(
                         format!("{} {}", tool, args)
                     };
 
-                    // Safety check
-                    let executor = CommandExecutor::new(CommandAllowlist::new(), SafetyChecker::new());
-                    if let Err(e) = executor.check_safety(&cmd) {
-                        last_observation = Some(format!("Error: Safety Check Failed: {}", e));
-                        let err_log = format!("\r\n\x1b[31m[Safety Check Failed]:\x1b[0m {}\r\n", e);
-                        let _ = event_tx.send(TuiEvent::PtyWrite(err_log.into_bytes()));
-                        drop(agent_lock);
-                        continue;
-                    }
-
                     if !auto_approve_flag.load(Ordering::SeqCst) {
                         let _ = event_tx.send(TuiEvent::SuggestCommand(cmd));
                         let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::WaitingForUser));
+                        let _ = event_tx.send(TuiEvent::ActivityUpdate {
+                            summary: "Waiting for approval".to_string(),
+                            detail: Some("Auto-approve is OFF".to_string()),
+                        });
                         break; // Stop and wait for manual approval
                     }
 
@@ -601,13 +746,72 @@ async fn run_agent_loop(
                 } else {
                     // Internal tool
                     let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::ExecutingTool(tool.clone())));
-                    let observation = match agent_lock.tools.get(&tool) {
-                        Some(t) => match t.call(&args).await {
-                            Ok(output) => output,
-                            Err(e) => format!("Error: {}", e),
-                        },
-                        None => format!("Error: Tool '{}' not found.", tool),
+                    
+                    // Parse retry logic for internal tools
+                    let mut observation = String::new();
+                    let mut success = false;
+                    let mut retry_count = 0;
+                    
+                    while !success && retry_count < 2 {
+                        let t_args = if retry_count == 0 { args.clone() } else {
+                            // If it failed once, it might be a JSON formatting issue.
+                            // We can't easily "fix" the args here without a new LLM call,
+                            // but ShellTool/others already handle basic ReAct fallback.
+                            args.clone()
+                        };
+
+                        let call_res = match agent_lock.tools.get(&tool) {
+                            Some(t) => t.call(&t_args).await,
+                            None => Err(anyhow::anyhow!("Tool '{}' not found", tool)),
+                        };
+
+                        match call_res {
+                            Ok(out) => {
+                                observation = out;
+                                success = true;
+                            }
+                            Err(e) => {
+                                // Check if it's a safety/allowlist error
+                                let err_str = e.to_string();
+                                if err_str.contains("allowlist") || err_str.contains("dangerous") {
+                                    // STOP on safety/allowlist failure as requested
+                                    let _ = event_tx.send(TuiEvent::AgentResponseFinal(format!("⛔ Terminal command blocked: {}", err_str), TokenUsage::default()));
+                                    let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::WaitingForUser));
+                                    let _ = event_tx.send(TuiEvent::ActivityUpdate {
+                                        summary: "Action Blocked".to_string(),
+                                        detail: Some(err_str),
+                                    });
+                                    return; // TERMINATE the loop
+                                }
+                                
+                                observation = format!("Error: {}", e);
+                                retry_count += 1;
+                                
+                                if retry_count == 1 {
+                                    // TODO: Implement hidden LLM inquiry for "parser watcher" / "fix failed"
+                                    // For now, we report the error and let it try again or fail.
+                                }
+                            }
+                        }
+                    }
+
+                    // Show details (verbose mode will render detail, non-verbose just summary)
+                    let detail = if observation.len() > 1200 {
+                        Some(format!("{}… [truncated]", &observation[..1200]))
+                    } else {
+                        Some(observation.clone())
                     };
+                    if tool == "web_search" {
+                        let _ = event_tx.send(TuiEvent::ActivityUpdate {
+                            summary: "Web search results".to_string(),
+                            detail,
+                        });
+                    } else if tool == "crawl" {
+                        let _ = event_tx.send(TuiEvent::ActivityUpdate {
+                            summary: "Crawl results".to_string(),
+                            detail,
+                        });
+                    }
                     
                     // Log to PTY - SUPPRESSED for Internal Tools
                     // Only ShellTool outputs (via ToolKind::Terminal path above) should appear in the Terminal Pane.
@@ -628,12 +832,12 @@ async fn run_agent_loop(
                 }
             }
             Ok(AgentDecision::Error(e)) => {
-                let _ = event_tx.send(TuiEvent::AgentResponse(format!("Error: {}", e), TokenUsage::default()));
+                let _ = event_tx.send(TuiEvent::AgentResponseFinal(format!("Error: {}", e), TokenUsage::default()));
                 let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Error(e)));
                 break;
             }
             Err(e) => {
-                let _ = event_tx.send(TuiEvent::AgentResponse(format!("Error: {}", e), TokenUsage::default()));
+                let _ = event_tx.send(TuiEvent::AgentResponseFinal(format!("Error: {}", e), TokenUsage::default()));
                 let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Error(e.to_string())));
                 break;
             }

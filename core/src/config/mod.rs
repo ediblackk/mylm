@@ -76,6 +76,37 @@ pub struct Config {
     /// Whether to show intermediate steps (thoughts/actions)
     #[serde(default = "default_verbose_mode")]
     pub verbose_mode: bool,
+
+    /// Context budgeting profile
+    #[serde(default)]
+    pub context_profile: ContextProfile,
+}
+
+/// Context budgeting profile
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub enum ContextProfile {
+    /// Minimal context: Core system info only
+    Minimal,
+    /// Balanced context: Core + Git Summary + Adaptive Memory + Terminal (on demand)
+    Balanced,
+    /// Verbose context: Full Git + Full Terminal History + Detailed Memory
+    Verbose,
+}
+
+impl Default for ContextProfile {
+    fn default() -> Self {
+        ContextProfile::Balanced
+    }
+}
+
+impl std::fmt::Display for ContextProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ContextProfile::Minimal => write!(f, "Minimal"),
+            ContextProfile::Balanced => write!(f, "Balanced"),
+            ContextProfile::Verbose => write!(f, "Verbose"),
+        }
+    }
 }
 
 pub fn default_context_limit() -> Option<usize> {
@@ -169,6 +200,14 @@ pub struct CommandConfig {
     /// Paths to custom allowlist files
     #[serde(default)]
     pub allowlist_paths: Vec<PathBuf>,
+
+    /// Additional explicitly allowed commands (exact command names, e.g. "bash", "git")
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
+
+    /// Explicitly blocked commands (exact command names, e.g. "rm")
+    #[serde(default)]
+    pub blocked_commands: Vec<String>,
 }
 
 /// Get the default endpoint name
@@ -193,6 +232,7 @@ impl Default for Config {
             agent: AgentConfig::default(),
             context_limit: None,
             verbose_mode: default_verbose_mode(),
+            context_profile: ContextProfile::default(),
         }
     }
 }
@@ -401,8 +441,11 @@ impl Config {
                 ),
                 format!("Verbose Mode: {}", if self.verbose_mode { "On" } else { "Off" }),
                 format!("Auto-approve:  {}", if self.commands.allow_execution { "Enabled" } else { "Disabled" }),
+                format!("Allowed Commands: {}", self.commands.allowed_commands.len()),
+                format!("Blocked Commands: {}", self.commands.blocked_commands.len()),
                 format!("Max Iterations: {} (steps per request)", self.agent.max_iterations),
                 format!("Max Driver Loops: {} (session safety limit)", self.agent.max_driver_loops),
+                format!("Context Profile: {}", self.context_profile),
                 format!("Auto-Memory:   {}", if self.memory.auto_record { "Enabled" } else { "Disabled" }),
                 format!("Auto-Categorize: {}", if self.memory.auto_categorize { "Enabled" } else { "Disabled" }),
                 "⬅️  Back".to_string(),
@@ -436,23 +479,51 @@ impl Config {
                     self.commands.allow_execution = !self.commands.allow_execution;
                 }
                 3 => {
+                    edit_string_list(
+                        &theme,
+                        "Allowed Commands (exact command names)",
+                        &mut self.commands.allowed_commands,
+                    )?;
+                }
+                4 => {
+                    edit_string_list(
+                        &theme,
+                        "Blocked Commands (exact command names)",
+                        &mut self.commands.blocked_commands,
+                    )?;
+                }
+                5 => {
                     self.agent.max_iterations = Input::with_theme(&theme)
                         .with_prompt("Max steps (thoughts/actions) per single user request")
                         .default(self.agent.max_iterations)
                         .interact_text()?;
                 }
-                4 => {
+                6 => {
                     self.agent.max_driver_loops = Input::with_theme(&theme)
                         .with_prompt("Safety limit: max total exchanges in one session")
                         .default(self.agent.max_driver_loops)
                         .interact_text()?;
                 }
-                5 => {
+                7 => {
+                    let profiles = vec![
+                        ContextProfile::Minimal,
+                        ContextProfile::Balanced,
+                        ContextProfile::Verbose,
+                    ];
+                    let items: Vec<String> = profiles.iter().map(|p| p.to_string()).collect();
+                    let idx = Select::with_theme(&theme)
+                        .with_prompt("Select Context Profile")
+                        .items(&items)
+                        .default(1)
+                        .interact()?;
+                    self.context_profile = profiles[idx];
+                }
+                8 => {
                     self.memory.auto_record = !self.memory.auto_record;
                     self.memory.auto_context = self.memory.auto_record;
                     self.memory.auto_categorize = self.memory.auto_record;
                 }
-                6 => {
+                9 => {
                     self.memory.auto_categorize = !self.memory.auto_categorize;
                 }
                 _ => break,
@@ -511,6 +582,64 @@ impl Config {
         }
         Ok(())
     }
+}
+
+fn edit_string_list(theme: &ColorfulTheme, title: &str, list: &mut Vec<String>) -> Result<()> {
+    loop {
+        let mut options: Vec<String> = Vec::new();
+        options.push("➕ Add".to_string());
+        if !list.is_empty() {
+            options.push("➖ Remove".to_string());
+            options.push("🧹 Clear".to_string());
+        }
+        options.push("⬅️  Back".to_string());
+
+        let sel = Select::with_theme(theme)
+            .with_prompt(title)
+            .items(&options)
+            .default(0)
+            .interact()?;
+
+        let choice = options.get(sel).map(|s| s.as_str()).unwrap_or("⬅️  Back");
+        match choice {
+            "➕ Add" => {
+                let val: String = Input::with_theme(theme)
+                    .with_prompt("Command name")
+                    .interact_text()?;
+                let v = val.trim();
+                if !v.is_empty() {
+                    if !list.iter().any(|x| x == v) {
+                        list.push(v.to_string());
+                    }
+                }
+            }
+            "➖ Remove" => {
+                if list.is_empty() {
+                    continue;
+                }
+                let items = list.clone();
+                let idx = Select::with_theme(theme)
+                    .with_prompt("Remove which?")
+                    .items(&items)
+                    .default(0)
+                    .interact()?;
+                if idx < list.len() {
+                    list.remove(idx);
+                }
+            }
+            "🧹 Clear" => {
+                if dialoguer::Confirm::with_theme(theme)
+                    .with_prompt("Clear all entries?")
+                    .default(false)
+                    .interact()?
+                {
+                    list.clear();
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(())
 }
 
 /// Find the configuration file in standard locations
@@ -671,11 +800,14 @@ pub fn create_default_config() -> Config {
         commands: CommandConfig {
             allow_execution: false,
             allowlist_paths: vec![],
+            allowed_commands: vec![],
+            blocked_commands: vec![],
         },
         web_search: WebSearchConfig::default(),
         memory: MemoryConfig::default(),
         agent: AgentConfig::default(),
         context_limit: None,
         verbose_mode: false,
+        context_profile: ContextProfile::default(),
     }
 }

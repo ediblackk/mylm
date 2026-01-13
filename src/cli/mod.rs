@@ -101,6 +101,28 @@ pub enum Commands {
         #[command(subcommand)]
         cmd: Option<ConfigCommand>,
     },
+    
+    /// Manage chat sessions
+    Session {
+        #[command(subcommand)]
+        cmd: SessionCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SessionCommand {
+    /// List all saved sessions
+    List,
+    /// Resume a specific session
+    Resume {
+        /// Session ID or Filename
+        id: String,
+    },
+    /// Delete a session
+    Delete {
+        /// Session ID or Filename
+        id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]

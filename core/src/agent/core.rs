@@ -1,7 +1,8 @@
 //! Agent Core Implementation
 use crate::llm::{LlmClient, chat::{ChatMessage, ChatRequest, MessageRole}, TokenUsage};
 use crate::agent::tool::{Tool, ToolKind};
-use crate::memory::{VectorStore, MemoryCategorizer};
+use crate::memory::{MemoryCategorizer};
+use crate::terminal::app::TuiEvent;
 use std::error::Error as StdError;
 use serde_json;
 use std::sync::Arc;
@@ -29,7 +30,7 @@ pub struct Agent {
     pub tools: HashMap<String, Box<dyn Tool>>,
     pub max_iterations: usize,
     pub system_prompt_prefix: String,
-    pub memory_store: Option<Arc<VectorStore>>,
+    pub memory_store: Option<Arc<crate::memory::store::VectorStore>>,
     pub categorizer: Option<Arc<MemoryCategorizer>>,
     pub session_id: String,
     
@@ -50,7 +51,7 @@ impl Agent {
         tools: Vec<Box<dyn Tool>>,
         system_prompt_prefix: String,
         max_iterations: usize,
-        memory_store: Option<Arc<VectorStore>>,
+        memory_store: Option<Arc<crate::memory::store::VectorStore>>,
         categorizer: Option<Arc<MemoryCategorizer>>,
     ) -> Self {
         let mut tool_map = HashMap::new();
@@ -122,7 +123,10 @@ impl Agent {
         }
 
         // --- Context Pruning ---
-        let context_limit = self.llm_client.config().max_context_tokens;
+        // Reserve space for the response (default 1000 if not specified, or config max_tokens)
+        let response_reserve = self.llm_client.config().max_tokens.unwrap_or(1000) as usize;
+        let context_limit = self.llm_client.config().max_context_tokens.saturating_sub(response_reserve);
+        
         self.history = self.prune_history(self.history.clone(), context_limit);
 
         let mut request = ChatRequest::new(self.llm_client.model().to_string(), self.history.clone());
@@ -263,7 +267,7 @@ impl Agent {
     pub async fn run(
         &mut self,
         mut history: Vec<ChatMessage>,
-        event_tx: tokio::sync::mpsc::UnboundedSender<crate::terminal::app::TuiEvent>,
+        event_tx: tokio::sync::mpsc::UnboundedSender<TuiEvent>,
         interrupt_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
         auto_approve: bool,
         max_driver_loops: usize,
@@ -272,13 +276,14 @@ impl Agent {
         if self.llm_client.config().memory.auto_context {
             if let Some(store) = &self.memory_store {
                 if let Some(last_user_msg) = history.iter().rev().find(|m| m.role == MessageRole::User) {
-                    let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate("Searching memory...".to_string()));
+                    let _ = event_tx.send(TuiEvent::StatusUpdate("Searching memory...".to_string()));
                     let memories = store.search_memory(&last_user_msg.content, 5).await.unwrap_or_default();
                     if !memories.is_empty() {
                         let context = self.build_context_from_memories(&memories);
-                        // Inject context as a system reminder or prepended to user msg
+                        // Inject context appended to user msg (Context Pack style)
                         if let Some(user_idx) = history.iter().rposition(|m| m.role == MessageRole::User) {
-                            history[user_idx].content = format!("{}\n\n## User Query\n{}", context, history[user_idx].content);
+                            history[user_idx].content.push_str("\n\n");
+                            history[user_idx].content.push_str(&context);
                         }
                     }
                 }
@@ -300,19 +305,34 @@ impl Agent {
                 return Ok(("Interrupted by user.".to_string(), self.total_usage.clone()));
             }
 
-            let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate("Thinking...".to_string()));
+            let _ = event_tx.send(TuiEvent::StatusUpdate("Thinking...".to_string()));
             
             match self.step(last_observation.take()).await? {
                 AgentDecision::Message(msg, usage) => {
-                    let _ = event_tx.send(crate::terminal::app::TuiEvent::AgentResponse(msg.clone(), usage.clone()));
+                    let _ = event_tx.send(TuiEvent::AgentResponse(msg.clone(), usage.clone()));
+                    
+                    // If we have a pending decision (like an Action queued after a Thought),
+                    // continue the loop immediately to execute it.
                     if self.has_pending_decision() {
                         continue;
                     }
-                    let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate("".to_string()));
+
+                    // For "Autonomous" mode, we look for "Final Answer:" to know when to stop.
+                    // If it's just a message without Final Answer, and we're in the middle of a task,
+                    // we might want to continue. But for now, we follow the ReAct pattern.
+                    if msg.contains("Final Answer:") {
+                        let _ = event_tx.send(TuiEvent::StatusUpdate("".to_string()));
+                        return Ok((msg, usage));
+                    }
+                    
+                    // If no Final Answer and no pending decision, the agent might be stuck or asking a question.
+                    // In a truly autonomous loop, we might want to prompt it to continue,
+                    // but for the TUI we return control to the user.
+                    let _ = event_tx.send(TuiEvent::StatusUpdate("".to_string()));
                     return Ok((msg, usage));
                 }
                 AgentDecision::Action { tool, args, kind } => {
-                    let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate(format!("Tool: '{}'", tool)));
+                    let _ = event_tx.send(TuiEvent::StatusUpdate(format!("Tool: '{}'", tool)));
 
                     if tool == "execute_command" && !auto_approve {
                         let cmd = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&args) {
@@ -322,7 +342,7 @@ impl Agent {
                         } else {
                             args.clone()
                         };
-                        let _ = event_tx.send(crate::terminal::app::TuiEvent::SuggestCommand(cmd));
+                        let _ = event_tx.send(TuiEvent::SuggestCommand(cmd));
                         
                         let last_msg = self.history.last().map(|m| m.content.clone()).unwrap_or_default();
                         let mut truncated = last_msg;
@@ -345,20 +365,20 @@ impl Agent {
                     let observation = match self.tools.get(&tool) {
                         Some(t) => match t.call(&processed_args).await {
                             Ok(output) => output,
-                            Err(e) => format!("Error: {}", e),
+                            Err(e) => format!("Error: {}. Analyze the failure and try a different command or approach if possible.", e),
                         },
-                        None => format!("Error: Tool '{}' not found.", tool),
+                        None => format!("Error: Tool '{}' not found. Check the available tools list.", tool),
                     };
 
                     if kind == ToolKind::Internal {
                         let obs_log = format!("\x1b[32m[Observation]:\x1b[0m {}\r\n", observation.trim());
-                        let _ = event_tx.send(crate::terminal::app::TuiEvent::InternalObservation(obs_log.into_bytes()));
+                        let _ = event_tx.send(TuiEvent::InternalObservation(obs_log.into_bytes()));
                     }
 
                     last_observation = Some(observation);
                 }
                 AgentDecision::Error(e) => {
-                    let _ = event_tx.send(crate::terminal::app::TuiEvent::StatusUpdate("".to_string()));
+                    let _ = event_tx.send(TuiEvent::StatusUpdate("".to_string()));
                     return Err(e.into());
                 }
             }
@@ -528,4 +548,3 @@ impl Agent {
         Ok(())
     }
 }
-

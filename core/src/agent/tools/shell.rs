@@ -1,7 +1,6 @@
 use crate::agent::tool::Tool;
 use crate::executor::CommandExecutor;
 use crate::context::TerminalContext;
-use crate::memory::VectorStore;
 use crate::terminal::app::TuiEvent;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -13,7 +12,7 @@ pub struct ShellTool {
     executor: Arc<CommandExecutor>,
     _context: TerminalContext,
     event_tx: mpsc::UnboundedSender<TuiEvent>,
-    memory_store: Option<Arc<VectorStore>>,
+    memory_store: Option<Arc<crate::memory::store::VectorStore>>,
     categorizer: Option<Arc<crate::memory::MemoryCategorizer>>,
     session_id: Option<String>,
 }
@@ -24,7 +23,7 @@ impl ShellTool {
         executor: Arc<CommandExecutor>,
         context: TerminalContext,
         event_tx: mpsc::UnboundedSender<TuiEvent>,
-        memory_store: Option<Arc<VectorStore>>,
+        memory_store: Option<Arc<crate::memory::store::VectorStore>>,
         categorizer: Option<Arc<crate::memory::MemoryCategorizer>>,
         session_id: Option<String>,
     ) -> Self {
@@ -55,7 +54,7 @@ impl Tool for ShellTool {
         self.executor.check_safety(args)?;
 
         // 2. Read Terminal Screen Context
-        let (screen_tx, screen_rx) = oneshot::channel();
+        let (screen_tx, screen_rx) = oneshot::channel::<String>();
         let _ = self.event_tx.send(TuiEvent::GetTerminalScreen(screen_tx));
         let mut screen_content = screen_rx.await.unwrap_or_default();
         
@@ -66,13 +65,12 @@ impl Tool for ShellTool {
         }
         
         // 3. Request execution via TUI Event
-        let (tx, rx) = oneshot::channel();
+        let (tx, rx) = oneshot::channel::<String>();
         let _ = self.event_tx.send(TuiEvent::ExecuteTerminalCommand(args.to_string(), tx));
         
         // 4. Await result from PTY capture
         let output = rx.await.map_err(|_| anyhow::anyhow!("Failed to receive command output from TUI"))?;
 
-        // 5. Auto-record to memory if enabled
         // 5. Auto-record to memory if enabled
         if let Some(store) = &self.memory_store {
             if let Ok(memory_id) = store.record_command(args, &output, 0, self.session_id.clone()).await {

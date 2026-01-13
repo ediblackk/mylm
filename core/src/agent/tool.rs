@@ -8,6 +8,8 @@ pub enum ToolKind {
     Internal,
     /// Execute visibly in Terminal (e.g., Shell).
     Terminal,
+    /// Web-based tools (search, crawl)
+    Web,
 }
 
 /// A trait for tools that can be executed by the agent.

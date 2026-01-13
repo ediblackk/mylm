@@ -4,20 +4,24 @@ pub mod ui;
 pub mod session;
 
 use crate::terminal::app::{App, Focus, AppState, TuiEvent};
+use mylm_core::memory::graph::MemoryGraph;
 use crate::terminal::pty::spawn_pty;
 use crate::terminal::ui::render;
-use crate::llm::{LlmClient, LlmConfig, chat::ChatMessage};
-use crate::agent::{Agent, Tool};
-use crate::agent::tools::{ShellTool, MemoryTool, WebSearchTool, CrawlTool};
-use crate::executor::CommandExecutor;
-use crate::executor::allowlist::CommandAllowlist;
-use crate::executor::safety::SafetyChecker;
-use crate::config::Config;
-use crate::config::prompt::build_system_prompt;
-use crate::context::TerminalContext;
+use mylm_core::llm::{LlmClient, LlmConfig};
+use mylm_core::agent::{Agent, Tool};
+use mylm_core::agent::tools::{
+    ShellTool, MemoryTool, WebSearchTool, CrawlTool, FileReadTool, FileWriteTool,
+    GitStatusTool, GitLogTool, GitDiffTool, StateTool, SystemMonitorTool,
+};
+use mylm_core::executor::CommandExecutor;
+use mylm_core::executor::allowlist::CommandAllowlist;
+use mylm_core::executor::safety::SafetyChecker;
+use mylm_core::config::Config;
+use mylm_core::config::prompt::build_system_prompt;
+use mylm_core::context::TerminalContext;
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{self, Event as CrosstermEvent, KeyCode, KeyModifiers},
+    event::{self, Event as CrosstermEvent, KeyCode, KeyModifiers, EnableBracketedPaste, DisableBracketedPaste},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -26,11 +30,11 @@ use std::{io, time::Duration};
 use tokio::sync::mpsc;
 use std::sync::atomic::Ordering;
 
-pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>, initial_query: Option<String>, initial_context: Option<TerminalContext>, initial_terminal_context: Option<crate::context::terminal::TerminalContext>) -> Result<()> {
+pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>, initial_query: Option<String>, initial_context: Option<TerminalContext>, initial_terminal_context: Option<mylm_core::context::terminal::TerminalContext>) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let size = terminal.size()?;
@@ -65,8 +69,10 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>, initial_query: O
     let llm_client = std::sync::Arc::new(LlmClient::new(llm_config)?);
 
     // Setup Agent dependencies
+    let mut allowlist = CommandAllowlist::new();
+    allowlist.apply_config(&config.commands);
     let executor = std::sync::Arc::new(CommandExecutor::new(
-        CommandAllowlist::new(),
+        allowlist,
         SafetyChecker::new(),
     ));
     let context = if let Some(ctx) = initial_context {
@@ -80,8 +86,11 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>, initial_query: O
         .join("mylm")
         .join("memory");
     std::fs::create_dir_all(&data_dir)?;
-    let store = std::sync::Arc::new(crate::memory::VectorStore::new(data_dir.to_str().unwrap()).await?);
-    let categorizer = std::sync::Arc::new(crate::memory::categorizer::MemoryCategorizer::new(llm_client.clone(), store.clone()));
+    let store = std::sync::Arc::new(mylm_core::memory::VectorStore::new(data_dir.to_str().unwrap()).await?);
+    let categorizer = std::sync::Arc::new(mylm_core::memory::categorizer::MemoryCategorizer::new(llm_client.clone(), store.clone()));
+    
+    // Initialize state store
+    let state_store = std::sync::Arc::new(std::sync::RwLock::new(mylm_core::state::StateStore::new()?));
 
     // Build hierarchical system prompt
     let prompt_name = config.get_active_profile()
@@ -98,11 +107,20 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>, initial_query: O
     let memory_tool = MemoryTool::new(store.clone());
     let web_search_tool = WebSearchTool::new(config.web_search.clone(), event_tx.clone());
     let crawl_tool = CrawlTool::new(event_tx.clone());
+    let state_tool = StateTool::new(state_store.clone());
+    let system_tool = SystemMonitorTool::new();
     
     tools.push(Box::new(shell_tool) as Box<dyn Tool>);
     tools.push(Box::new(memory_tool) as Box<dyn Tool>);
     tools.push(Box::new(web_search_tool) as Box<dyn Tool>);
     tools.push(Box::new(crawl_tool) as Box<dyn Tool>);
+    tools.push(Box::new(state_tool) as Box<dyn Tool>);
+    tools.push(Box::new(system_tool) as Box<dyn Tool>);
+    tools.push(Box::new(FileReadTool) as Box<dyn Tool>);
+    tools.push(Box::new(FileWriteTool) as Box<dyn Tool>);
+    tools.push(Box::new(GitStatusTool) as Box<dyn Tool>);
+    tools.push(Box::new(GitLogTool) as Box<dyn Tool>);
+    tools.push(Box::new(GitDiffTool) as Box<dyn Tool>);
 
     // Create Agent
     let agent = Agent::new_with_iterations(llm_client, tools, system_prompt, config.agent.max_iterations, Some(store.clone()), Some(categorizer.clone()));
@@ -157,8 +175,19 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>, initial_query: O
         }
     }
 
-    if let Some(history) = initial_history {
-        app.chat_history = history;
+    if let Some(session) = initial_session {
+        app.chat_history = session.history;
+        app.session_id = session.id;
+        app.session_monitor.resume_stats(&session.metadata);
+
+        if !session.terminal_history.is_empty() {
+            // Restore saved terminal history
+            app.process_terminal_data(&session.terminal_history);
+            
+            // Add a visual divider to separate history from the resumed session
+            let divider = "\r\n\x1b[2m--- mylm session resumed ---\x1b[0m\r\n\r\n";
+            app.process_terminal_data(divider.as_bytes());
+        }
     }
 
     if let Some(query) = initial_query {
@@ -205,6 +234,7 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>, initial_query: O
         event_tx,
         executor,
         store,
+        state_store,
     ).await;
 
     // Save session on exit
@@ -214,7 +244,8 @@ pub async fn run_tui(initial_history: Option<Vec<ChatMessage>>, initial_query: O
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
-        LeaveAlternateScreen
+        LeaveAlternateScreen,
+        DisableBracketedPaste
     )?;
     terminal.show_cursor()?;
 
@@ -230,8 +261,9 @@ async fn run_loop(
     app: &mut App,
     event_rx: &mut mpsc::UnboundedReceiver<TuiEvent>,
     event_tx: mpsc::UnboundedSender<TuiEvent>,
-    executor: std::sync::Arc<CommandExecutor>,
-    store: std::sync::Arc<crate::memory::VectorStore>,
+    _executor: std::sync::Arc<CommandExecutor>,
+    store: std::sync::Arc<mylm_core::memory::VectorStore>,
+    state_store: std::sync::Arc<std::sync::RwLock<mylm_core::state::StateStore>>,
 ) -> io::Result<()> {
     loop {
         terminal.draw(|f| render(f, app))?;
@@ -239,47 +271,86 @@ async fn run_loop(
         if let Some(event) = event_rx.recv().await {
             match event {
                 TuiEvent::Pty(data) => {
-                    // Check if we need to suppress the echo of the wrapper command
+                    let mut data_to_process = data.clone();
+                    
+                    // 1. Handle Echo Suppression (at start of command)
+                    // We look for the "stty -echo;" signature which indicates our wrapper is being echoed.
                     if !app.pending_echo_suppression.is_empty() {
-                        let data_str = String::from_utf8_lossy(&data).to_string();
-                        // Normalize newlines for comparison
-                        let normalized_data = data_str.replace("\r\n", "\n").replace('\r', "\n");
-                        let normalized_expected = app.pending_echo_suppression.replace("\r\n", "\n").replace('\r', "\n");
-                        
-                        // Check if the incoming data matches the start of what we expect
-                        // We are lenient with the match to handle PTY quirks
-                        if normalized_expected.starts_with(&normalized_data) {
-                            // It matches! Remove this part from the expected buffer
-                            let remaining = normalized_expected[normalized_data.len()..].to_string();
-                            app.pending_echo_suppression = remaining;
+                        let data_str = String::from_utf8_lossy(&data_to_process);
+                        if let Some(pos) = data_str.find("stty -echo;") {
+                            // Found the wrapper start! Discard everything in this packet up to the next newline.
+                            app.pending_echo_suppression.clear();
                             
-                            // If we've suppressed everything (or just have a newline left), we are done
-                            if app.pending_echo_suppression.trim().is_empty() {
+                            if let Some(clean_cmd) = app.pending_clean_command.take() {
+                                // Inject a clean version of the command for the user to see
+                                let display = format!("\x1b[32m> {}\x1b[0m\r\n", clean_cmd.trim());
+                                app.process_terminal_data(display.as_bytes());
+                            }
+                            
+                            // Search for newline AFTER the start of the wrapper
+                            if let Some(nl_pos) = data_str[pos..].find('\r').or_else(|| data_str[pos..].find('\n')) {
+                                // Skip the rest of the line that contained the wrapper
+                                let skip_len = pos + nl_pos + 1;
+                                if skip_len < data_to_process.len() {
+                                    data_to_process = data_to_process[skip_len..].to_vec();
+                                } else {
+                                    data_to_process.clear();
+                                }
+                            } else {
+                                // Wrapper line is not finished in this packet, discard everything after the start for now
+                                data_to_process = data_to_process[..pos].to_vec();
+                            }
+                        } else {
+                            // Fallback: check if the packet is part of the expected echo (for slow PTYs)
+                            let normalized_data = data_str.replace("\r\n", "\n").replace('\r', "\n");
+                            let normalized_expected = app.pending_echo_suppression.replace("\r\n", "\n").replace('\r', "\n");
+                            
+                            if normalized_expected.starts_with(&normalized_data) {
+                                let remaining = normalized_expected[normalized_data.len()..].to_string();
+                                app.pending_echo_suppression = remaining;
+                                data_to_process.clear();
+                            } else {
+                                // Mismatch, stop suppression to avoid losing real output
                                 app.pending_echo_suppression.clear();
-                                
-                                // Show the clean command to the user
-                                if let Some(clean_cmd) = app.pending_clean_command.take() {
-                                    // Make it look like a real prompt interaction
-                                    let display = format!("\x1b[32m> {}\x1b[0m\r\n", clean_cmd.trim());
-                                    app.process_terminal_data(display.as_bytes());
+                            }
+                        }
+                    }
+
+                    // 2. Handle Marker Suppression (at end of command)
+                    // We also want to hide the "_MYLM_EOF_..." line from the visible terminal.
+                    if !data_to_process.is_empty() {
+                        let data_str = String::from_utf8_lossy(&data_to_process);
+                        if let Some(pos) = data_str.find("_MYLM_EOF_") {
+                            // Found the end marker!
+                            // We want to suppress the line containing the marker, but keep anything after it (like a prompt).
+                            let mut filtered = data_to_process[..pos].to_vec();
+                            
+                            // If there was a newline right before it, try to clean that up too to avoid an empty line
+                            if let Some(last) = filtered.last() {
+                                if *last == b'\n' || *last == b'\r' {
+                                    filtered.pop();
                                 }
                             }
-                            // Drop this data packet as it was just the echo
-                            continue;
-                        } else {
-                            // Mismatch! The PTY sent something we didn't expect.
-                            // Maybe there was a prompt before the echo?
-                            // Or maybe the shell formatted the echo differently.
-                            // To be safe and avoid swallowing real output, we abort suppression.
-                            // However, we might want to check if the *data* contains the *start* of the expectation
-                            // but that's complex. For now, simply aborting is safer.
+                            if let Some(last) = filtered.last() {
+                                if *last == b'\n' || *last == b'\r' {
+                                    filtered.pop();
+                                }
+                            }
+
+                            // Search for newline AFTER the marker
+                            if let Some(nl_pos) = data_str[pos..].find('\r').or_else(|| data_str[pos..].find('\n')) {
+                                let after_pos = pos + nl_pos + 1;
+                                if after_pos < data_to_process.len() {
+                                    filtered.extend_from_slice(&data_to_process[after_pos..]);
+                                }
+                            }
                             
-                            // One edge case: The data might be "prompt > stty..."
-                            // But usually we assume we are at a prompt.
-                            
-                            app.pending_echo_suppression.clear();
-                            // Proceed to process data normally
+                            data_to_process = filtered;
                         }
+                    }
+
+                    if data_to_process.is_empty() && !app.capturing_command_output {
+                        continue;
                     }
 
                     let screen = app.terminal_parser.screen();
@@ -311,7 +382,9 @@ async fn run_loop(
                         }
                     }
 
-                    app.process_terminal_data(&data);
+                    if !data_to_process.is_empty() {
+                        app.process_terminal_data(&data_to_process);
+                    }
 
                     if app.capturing_command_output {
                         let text = String::from_utf8_lossy(&data);
@@ -357,8 +430,15 @@ async fn run_loop(
                     app.add_assistant_message(response, usage);
                     app.status_message = None;
                 }
+                TuiEvent::AgentResponseFinal(response, usage) => {
+                    app.start_streaming_final_answer(response, usage);
+                    app.status_message = None;
+                }
                 TuiEvent::StatusUpdate(status) => {
                     app.status_message = if status.is_empty() { None } else { Some(status) };
+                }
+                TuiEvent::ActivityUpdate { summary, detail } => {
+                    app.push_activity(summary, detail);
                 }
                 TuiEvent::CondensedHistory(history) => {
                     app.set_history(history);
@@ -378,7 +458,10 @@ async fn run_loop(
                     app.status_message = None;
                 }
                 TuiEvent::AppStateUpdate(state) => {
-                    app.state = state;
+                    app.set_state(state);
+                }
+                TuiEvent::MemoryGraphUpdate(graph) => {
+                    app.memory_graph = graph;
                 }
                 TuiEvent::ConfigUpdate(new_config) => {
                     app.config = new_config.clone();
@@ -389,7 +472,7 @@ async fn run_loop(
                             .unwrap_or(endpoint_config.max_context_tokens);
 
                         let llm_config = LlmConfig::new(
-                            endpoint_config.provider.parse().unwrap_or(crate::llm::LlmProvider::OpenAiCompatible),
+                            endpoint_config.provider.parse().unwrap_or(mylm_core::llm::LlmProvider::OpenAiCompatible),
                             endpoint_config.base_url.clone(),
                             endpoint_config.model.clone(),
                             Some(endpoint_config.api_key.clone()),
@@ -415,15 +498,33 @@ async fn run_loop(
                                 let mut tools: Vec<Box<dyn Tool>> = Vec::new();
                                 let agent_session_id = agent.session_id.clone();
                                 let categorizer = agent.categorizer.as_ref().cloned();
-                                let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone(), Some(store.clone()), categorizer, Some(agent_session_id));
+
+                                // Re-create executor with updated allowlist from config
+                                let mut allowlist = CommandAllowlist::new();
+                                allowlist.apply_config(&new_config.commands);
+                                let updated_executor = std::sync::Arc::new(CommandExecutor::new(
+                                    allowlist,
+                                    mylm_core::executor::safety::SafetyChecker::new(),
+                                ));
+
+                                let shell_tool = ShellTool::new(updated_executor, context.clone(), event_tx.clone(), Some(store.clone()), categorizer, Some(agent_session_id));
                                 let memory_tool = MemoryTool::new(store.clone());
                                 let web_search_tool = WebSearchTool::new(new_config.web_search.clone(), event_tx.clone());
                                 let crawl_tool = CrawlTool::new(event_tx.clone());
+                                let state_tool = StateTool::new(state_store.clone());
+                                let system_tool = SystemMonitorTool::new();
                                 
                                 tools.push(Box::new(shell_tool) as Box<dyn Tool>);
                                 tools.push(Box::new(memory_tool) as Box<dyn Tool>);
                                 tools.push(Box::new(web_search_tool) as Box<dyn Tool>);
                                 tools.push(Box::new(crawl_tool) as Box<dyn Tool>);
+                                tools.push(Box::new(state_tool) as Box<dyn Tool>);
+                                tools.push(Box::new(system_tool) as Box<dyn Tool>);
+                                tools.push(Box::new(FileReadTool) as Box<dyn Tool>);
+                                tools.push(Box::new(FileWriteTool) as Box<dyn Tool>);
+                                tools.push(Box::new(GitStatusTool) as Box<dyn Tool>);
+                                tools.push(Box::new(GitLogTool) as Box<dyn Tool>);
+                                tools.push(Box::new(GitDiffTool) as Box<dyn Tool>);
 
                                 let mut tool_map = std::collections::HashMap::new();
                                 for tool in tools {
@@ -434,7 +535,7 @@ async fn run_loop(
                         }
                     }
                     
-                    if let Some(path) = crate::config::find_config_file() {
+                    if let Some(path) = mylm_core::config::find_config_file() {
                         let _ = new_config.save(path);
                     }
                 }
@@ -472,6 +573,28 @@ async fn run_loop(
                 }
                 TuiEvent::Tick => {
                     app.tick_count += 1;
+
+                    // Incremental rendering of streamed final answer.
+                    // We render a small batch per tick to keep UI responsive.
+                    if let Some(pending) = &mut app.pending_stream {
+                        let batch = 48usize;
+                        let end = (pending.rendered + batch).min(pending.chars.len());
+                        if end > pending.rendered {
+                            let slice: String = pending.chars[pending.rendered..end].iter().collect();
+                            if let Some(msg) = app.chat_history.get_mut(pending.msg_index) {
+                                msg.content.push_str(&slice);
+                            }
+                            pending.rendered = end;
+                        }
+
+                        if pending.rendered >= pending.chars.len() {
+                            // Apply usage accounting once at end of stream.
+                            let usage = pending.usage.clone();
+                            app.pending_stream = None;
+                            app.session_monitor.add_usage(&usage, app.input_price, app.output_price);
+                            app.set_state(AppState::Idle);
+                        }
+                    }
                 }
                 TuiEvent::Input(ev) => {
                     match ev {
@@ -479,6 +602,28 @@ async fn run_loop(
                             // Global Focus Toggle (F2) - Works everywhere
                             if key.code == KeyCode::F(2) {
                                 app.toggle_focus();
+                                continue;
+                            }
+
+                            // Global Memory View Toggle (F3)
+                            if key.code == KeyCode::F(3) {
+                                app.show_memory_view = !app.show_memory_view;
+                                if app.show_memory_view {
+                                    let store_clone = store.clone();
+                                    let event_tx_clone = event_tx.clone();
+                                    // Use last user message or "project" as query
+                                    let query = app.chat_history.iter()
+                                        .rev()
+                                        .find(|m| m.role == mylm_core::llm::chat::MessageRole::User)
+                                        .map(|m| m.content.clone())
+                                        .unwrap_or_else(|| "project".to_string());
+                                    
+                                    tokio::spawn(async move {
+                                        if let Ok(graph) = MemoryGraph::generate_related_graph(&store_clone, &query, 10).await {
+                                            let _ = event_tx_clone.send(TuiEvent::MemoryGraphUpdate(graph));
+                                        }
+                                    });
+                                }
                                 continue;
                             }
 
@@ -499,11 +644,19 @@ async fn run_loop(
                                     let input = match key.code {
                                         KeyCode::Char(c) => {
                                             if key.modifiers.contains(KeyModifiers::CONTROL) {
-                                                match c {
-                                                    'l' => vec![12],
-                                                    'u' => vec![21],
-                                                    'c' => vec![3],
-                                                    _ => vec![c as u8],
+                                                if c.is_ascii_alphabetic() {
+                                                    vec![c.to_ascii_uppercase() as u8 - 64]
+                                                } else {
+                                                    match c {
+                                                        '@' => vec![0],
+                                                        '[' => vec![27],
+                                                        '\\' => vec![28],
+                                                        ']' => vec![29],
+                                                        '^' => vec![30],
+                                                        '_' => vec![31],
+                                                        '?' => vec![127],
+                                                        _ => vec![c as u8],
+                                                    }
                                                 }
                                             } else {
                                                 c.to_string().into_bytes()
@@ -527,6 +680,14 @@ async fn run_loop(
                                     // Control shortcuts - only active when Chat is focused
                                     if key.modifiers.contains(KeyModifiers::CONTROL) {
                                         match key.code {
+                                            KeyCode::Char('y') => {
+                                                app.copy_last_ai_response_to_clipboard();
+                                                continue;
+                                            }
+                                            KeyCode::Char('b') => {
+                                                app.copy_terminal_buffer_to_clipboard();
+                                                continue;
+                                            }
                                             KeyCode::Char('v') => {
                                                 app.verbose_mode = !app.verbose_mode;
                                                 continue;
@@ -569,8 +730,20 @@ async fn run_loop(
                                             KeyCode::Right => app.move_cursor_right(),
                                             KeyCode::Home => app.move_cursor_home(),
                                             KeyCode::End => app.move_cursor_end(),
-                                            KeyCode::Up => app.scroll_chat_up(),
-                                            KeyCode::Down => app.scroll_chat_down(),
+                                            KeyCode::Up => {
+                                                if app.show_memory_view {
+                                                    app.memory_graph_scroll = app.memory_graph_scroll.saturating_sub(1);
+                                                } else {
+                                                    app.scroll_chat_up();
+                                                }
+                                            }
+                                            KeyCode::Down => {
+                                                if app.show_memory_view {
+                                                    app.memory_graph_scroll = app.memory_graph_scroll.saturating_add(1);
+                                                } else {
+                                                    app.scroll_chat_down();
+                                                }
+                                            }
                                             KeyCode::PageUp => {
                                                 for _ in 0..10 { app.scroll_chat_up(); }
                                             }
@@ -608,6 +781,18 @@ async fn run_loop(
                             
                             // Resize PTY and reflow content
                             app.resize_pty(term_width, term_height);
+                        }
+                        CrosstermEvent::Paste(text) => {
+                            match app.focus {
+                                Focus::Chat => {
+                                    for c in text.chars() {
+                                        app.enter_char(c);
+                                    }
+                                }
+                                Focus::Terminal => {
+                                    app.handle_terminal_input(text.as_bytes());
+                                }
+                            }
                         }
                         _ => {}
                     }

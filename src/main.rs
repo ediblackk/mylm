@@ -8,28 +8,21 @@ use clap::Parser;
 use console::Style;
 use std::sync::Arc;
 
-use crate::cli::{Cli, Commands, MemoryCommand, ConfigCommand, EditCommand, hub::HubChoice};
-use crate::config::Config;
-use crate::context::TerminalContext;
-use crate::llm::{LlmClient, LlmConfig};
-use crate::output::OutputFormatter;
+use crate::cli::{Cli, Commands, MemoryCommand, ConfigCommand, EditCommand, hub::HubChoice, SessionCommand};
+use mylm_core::config::Config;
+use mylm_core::context::TerminalContext;
+use mylm_core::llm::{LlmClient, LlmConfig};
+use mylm_core::output::OutputFormatter;
 use crate::terminal::app::App;
 
-mod agent;
 mod cli;
-mod config;
-mod context;
-mod executor;
-mod llm;
-mod memory;
-mod output;
 mod terminal;
 
 /// Main entry point for the AI assistant CLI
 #[tokio::main]
 async fn main() -> Result<()> {
     // Capture context IMMEDIATELY before any output to ensure we get the clean terminal state
-    let initial_context = crate::context::TerminalContext::collect_sync();
+    let initial_context = mylm_core::context::TerminalContext::collect_sync();
     
     // Parse command-line arguments
     let cli = Cli::parse();
@@ -134,14 +127,14 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
 
         Some(Commands::Setup { warmup }) => {
             if *warmup {
-                crate::memory::VectorStore::warmup().await?;
+                mylm_core::memory::VectorStore::warmup().await?;
             } else {
                 if config.endpoints.is_empty() {
                     println!("🤖 Welcome to mylm! Let's get you set up.");
                 }
                 let mut mut_config = config.clone();
                 handle_settings_dashboard(&mut mut_config).await?;
-                crate::memory::VectorStore::warmup().await?;
+                mylm_core::memory::VectorStore::warmup().await?;
             }
         }
 
@@ -179,7 +172,7 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
                 .join("memory");
             
             std::fs::create_dir_all(&data_dir)?;
-            let store = memory::VectorStore::new(data_dir.to_str().unwrap()).await?;
+            let store = mylm_core::memory::store::VectorStore::new(data_dir.to_str().unwrap()).await?;
 
             match cmd {
                 MemoryCommand::Add { content } => {
@@ -208,7 +201,7 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
                     let ans = inquire::Select::new("Select Active Profile", profiles).prompt()?;
                     let mut new_config = config.clone();
                     new_config.active_profile = ans;
-                    if let Some(path) = crate::config::find_config_file() {
+                    if let Some(path) = mylm_core::config::find_config_file() {
                         new_config.save(path)?;
                         println!("Active profile set to {}", new_config.active_profile);
                     }
@@ -217,7 +210,7 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
                     let mut mut_config = config.clone();
                     let name = inquire::Text::new("New profile name:").prompt()?;
                     if !name.trim().is_empty() {
-                        mut_config.profiles.push(crate::config::Profile {
+                        mut_config.profiles.push(mylm_core::config::Profile {
                             name: name.clone(),
                             endpoint: mut_config.default_endpoint.clone(),
                             prompt: "default".to_string(),
@@ -232,8 +225,8 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
                             let profile = config.get_active_profile()
                                 .map(|p| p.prompt.clone())
                                 .unwrap_or_else(|| "default".to_string());
-                            let path = crate::config::prompt::get_prompts_dir().join(format!("{}.md", profile));
-                            let _ = crate::config::prompt::load_prompt(&profile)?;
+                            let path = mylm_core::config::prompt::get_prompts_dir().join(format!("{}.md", profile));
+                            let _ = mylm_core::config::prompt::load_prompt(&profile)?;
                             let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
                             std::process::Command::new(editor).arg(path).status()?;
                         }
@@ -250,6 +243,10 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
             }
         }
 
+        Some(Commands::Session { cmd }) => {
+            handle_session_command(cmd, &config).await?;
+        }
+
         None => {
             handle_hub(&config, &formatter, initial_context).await?;
         }
@@ -259,12 +256,12 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
 }
 
 /// Handle the interactive hub menu
-async fn handle_hub(config: &Config, formatter: &OutputFormatter, initial_context: crate::context::TerminalContext) -> Result<()> {
+async fn handle_hub(config: &Config, formatter: &OutputFormatter, initial_context: mylm_core::context::TerminalContext) -> Result<()> {
     loop {
         let choice = crate::cli::hub::show_hub(config).await?;
         match choice {
             HubChoice::PopTerminal => {
-                let context = crate::context::TerminalContext::collect().await;
+                let context = mylm_core::context::TerminalContext::collect().await;
                 terminal::run_tui(None, None, Some(context), Some(initial_context.terminal)).await?;
                 break;
             }
@@ -282,9 +279,9 @@ async fn handle_hub(config: &Config, formatter: &OutputFormatter, initial_contex
                 tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
             }
             HubChoice::ResumeSession => {
-                match App::load_session() {
-                    Ok(history) => {
-                        terminal::run_tui(Some(history), None, None, None).await?;
+                match App::load_session(None) {
+                    Ok(session) => {
+                        terminal::run_tui(Some(session), None, None, None).await?;
                         break;
                     }
                     Err(e) => {
@@ -306,7 +303,106 @@ async fn handle_hub(config: &Config, formatter: &OutputFormatter, initial_contex
                 let mut mut_config = config.clone();
                 handle_settings_dashboard(&mut mut_config).await?;
             }
+            HubChoice::ManageSessions => {
+                let sessions = list_sessions()?;
+                if sessions.is_empty() {
+                    println!("No saved sessions found.");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+                
+                let session_options: Vec<String> = sessions.iter()
+                    .map(|s| format!("{} | {} ({} msgs)", s.id, s.timestamp.format("%Y-%m-%d %H:%M"), s.metadata.message_count))
+                    .collect();
+
+                if let Some(choice) = crate::cli::hub::show_session_select(session_options)? {
+                    let idx = choice.find(" | ").unwrap_or(choice.len());
+                    let id = &choice[..idx];
+                    match App::load_session(Some(id)) {
+                        Ok(session) => {
+                            terminal::run_tui(Some(session), None, None, None).await?;
+                            break;
+                        }
+                        Err(e) => println!("❌ Failed to load session: {}", e),
+                    }
+                }
+            }
             HubChoice::Exit => break,
+        }
+    }
+    Ok(())
+}
+
+fn list_sessions() -> Result<Vec<crate::terminal::session::Session>> {
+    let data_dir = dirs::data_dir()
+        .context("Could not find data directory")?
+        .join("mylm")
+        .join("sessions");
+    
+    if !data_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut sessions = Vec::new();
+    for entry in std::fs::read_dir(data_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
+            let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if filename.starts_with("session_") {
+                let content = std::fs::read_to_string(&path)?;
+                if let Ok(session) = serde_json::from_str::<crate::terminal::session::Session>(&content) {
+                    sessions.push(session);
+                }
+            }
+        }
+    }
+
+    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    Ok(sessions)
+}
+
+async fn handle_session_command(cmd: &SessionCommand, _config: &Config) -> Result<()> {
+    match cmd {
+        SessionCommand::List => {
+            let sessions = list_sessions()?;
+            if sessions.is_empty() {
+                println!("No saved sessions found.");
+            } else {
+                let blue = Style::new().blue().bold();
+                let dim = Style::new().dim();
+                println!("{:<20} | {:<20} | {:<30}", blue.apply_to("ID"), "Date", "Last Message");
+                println!("{}", "-".repeat(75));
+                for s in sessions {
+                    println!("{:<20} | {:<20} | {:<30}",
+                        s.id,
+                        s.timestamp.format("%Y-%m-%d %H:%M"),
+                        dim.apply_to(s.metadata.last_message_preview)
+                    );
+                }
+            }
+        }
+        SessionCommand::Resume { id } => {
+            match App::load_session(Some(id)) {
+                Ok(session) => {
+                    terminal::run_tui(Some(session), None, None, None).await?;
+                }
+                Err(e) => println!("❌ Failed to load session: {}", e),
+            }
+        }
+        SessionCommand::Delete { id } => {
+            let data_dir = dirs::data_dir()
+                .context("Could not find data directory")?
+                .join("mylm")
+                .join("sessions");
+            let filename = if id.ends_with(".json") { id.to_string() } else { format!("session_{}.json", id) };
+            let path = data_dir.join(filename);
+            if path.exists() {
+                std::fs::remove_file(path)?;
+                println!("✅ Session deleted.");
+            } else {
+                println!("❌ Session not found.");
+            }
         }
     }
     Ok(())
@@ -361,15 +457,15 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                 let profile = config.get_active_profile()
                     .map(|p| p.prompt.clone())
                     .unwrap_or_else(|| "default".to_string());
-                let path = crate::config::prompt::get_prompts_dir().join(format!("{}.md", profile));
-                let _ = crate::config::prompt::load_prompt(&profile)?;
+                let path = mylm_core::config::prompt::get_prompts_dir().join(format!("{}.md", profile));
+                let _ = mylm_core::config::prompt::load_prompt(&profile)?;
                 let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
                 std::process::Command::new(editor).arg(path).status()?;
             }
             crate::cli::hub::SettingsChoice::NewProfile => {
                 let name = inquire::Text::new("New profile name:").prompt()?;
                 if !name.trim().is_empty() {
-                    config.profiles.push(crate::config::Profile {
+                    config.profiles.push(mylm_core::config::Profile {
                         name: name.clone(),
                         endpoint: config.default_endpoint.clone(),
                         prompt: "default".to_string(),
@@ -389,7 +485,7 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                 }
             }
             crate::cli::hub::SettingsChoice::Save => {
-                if let Some(path) = crate::config::find_config_file().or_else(|| {
+                if let Some(path) = mylm_core::config::find_config_file().or_else(|| {
                     dirs::config_dir().map(|d| d.join("mylm").join("mylm.yaml"))
                 }) {
                     if let Some(parent) = path.parent() {
@@ -436,7 +532,7 @@ async fn handle_one_shot(
     let prompt_name = config.get_active_profile()
         .map(|p| p.prompt.as_str())
         .unwrap_or("default");
-    let system_prompt = crate::config::prompt::build_system_prompt(&ctx, prompt_name, Some("CLI (Single Query)")).await?;
+    let system_prompt = mylm_core::config::prompt::build_system_prompt(&ctx, prompt_name, Some("CLI (Single Query)")).await?;
 
     println!("{} Querying {}...",
         blue.apply_to("🤖"),
@@ -452,9 +548,9 @@ async fn handle_one_shot(
         _ => false, // Default to false for direct queries for safety
     };
 
-    let allowlist = crate::executor::allowlist::CommandAllowlist::new();
-    let safety_checker = crate::executor::safety::SafetyChecker::new();
-    let executor = Arc::new(crate::executor::CommandExecutor::new(
+    let allowlist = mylm_core::executor::allowlist::CommandAllowlist::new();
+    let safety_checker = mylm_core::executor::safety::SafetyChecker::new();
+    let executor = Arc::new(mylm_core::executor::CommandExecutor::new(
         allowlist,
         safety_checker,
     ));
@@ -489,21 +585,32 @@ async fn handle_one_shot(
         .join("mylm")
         .join("memory");
     std::fs::create_dir_all(&data_dir)?;
-    let store = Arc::new(crate::memory::VectorStore::new(data_dir.to_str().unwrap()).await?);
+    let store = Arc::new(mylm_core::memory::VectorStore::new(data_dir.to_str().unwrap()).await?);
+
+    // Initialize state store
+    let state_store = Arc::new(std::sync::RwLock::new(mylm_core::state::StateStore::new()?));
 
     // Load tools
-    let tools: Vec<Box<dyn crate::agent::Tool>> = vec![
-        Box::new(crate::agent::tools::shell::ShellTool::new(executor, ctx.clone(), event_tx.clone(), Some(store.clone()), Some(Arc::new(crate::memory::MemoryCategorizer::new(client.clone(), store.clone()))), None)) as Box<dyn crate::agent::Tool>,
-        Box::new(crate::agent::tools::web_search::WebSearchTool::new(config.web_search.clone(), event_tx.clone())) as Box<dyn crate::agent::Tool>,
-        Box::new(crate::agent::tools::memory::MemoryTool::new(store.clone())) as Box<dyn crate::agent::Tool>,
-        Box::new(crate::agent::tools::crawl::CrawlTool::new(event_tx.clone())) as Box<dyn crate::agent::Tool>,
+    let tools: Vec<Box<dyn mylm_core::agent::Tool>> = vec![
+        Box::new(mylm_core::agent::tools::shell::ShellTool::new(executor, ctx.clone(), event_tx.clone(), Some(store.clone()), Some(Arc::new(mylm_core::memory::MemoryCategorizer::new(client.clone(), store.clone()))), None)) as Box<dyn mylm_core::agent::Tool>,
+        Box::new(mylm_core::agent::tools::web_search::WebSearchTool::new(config.web_search.clone(), event_tx.clone())) as Box<dyn mylm_core::agent::Tool>,
+        Box::new(mylm_core::agent::tools::memory::MemoryTool::new(store.clone())) as Box<dyn mylm_core::agent::Tool>,
+        Box::new(mylm_core::agent::tools::crawl::CrawlTool::new(event_tx.clone())) as Box<dyn mylm_core::agent::Tool>,
+        Box::new(mylm_core::agent::tools::fs::FileReadTool) as Box<dyn mylm_core::agent::Tool>,
+        Box::new(mylm_core::agent::tools::fs::FileWriteTool) as Box<dyn mylm_core::agent::Tool>,
+        Box::new(mylm_core::agent::tools::git::GitStatusTool) as Box<dyn mylm_core::agent::Tool>,
+        Box::new(mylm_core::agent::tools::git::GitLogTool) as Box<dyn mylm_core::agent::Tool>,
+        Box::new(mylm_core::agent::tools::git::GitDiffTool) as Box<dyn mylm_core::agent::Tool>,
+        Box::new(mylm_core::agent::tools::state::StateTool::new(state_store.clone())) as Box<dyn mylm_core::agent::Tool>,
+        Box::new(mylm_core::agent::tools::system::SystemMonitorTool::new()) as Box<dyn mylm_core::agent::Tool>,
+        Box::new(mylm_core::agent::tools::system::TerminalSightTool::new(event_tx.clone())) as Box<dyn mylm_core::agent::Tool>,
     ];
 
-    let categorizer = Arc::new(crate::memory::categorizer::MemoryCategorizer::new(client.clone(), store.clone()));
-    let mut agent = crate::agent::Agent::new_with_iterations(client, tools, system_prompt, config.agent.max_iterations, Some(store), Some(categorizer));
+    let categorizer = Arc::new(mylm_core::memory::categorizer::MemoryCategorizer::new(client.clone(), store.clone()));
+    let mut agent = mylm_core::agent::Agent::new_with_iterations(client, tools, system_prompt, config.agent.max_iterations, Some(store), Some(categorizer));
     
     let messages = vec![
-        crate::llm::chat::ChatMessage::user(query.to_string()),
+        mylm_core::llm::chat::ChatMessage::user(query.to_string()),
     ];
 
     // Dummy interrupt flag for one-shot

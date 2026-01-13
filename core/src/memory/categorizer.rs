@@ -1,16 +1,16 @@
 use crate::llm::{LlmClient, chat::{ChatMessage, ChatRequest}};
-use crate::memory::store::{VectorStore, MemoryCategory};
+use crate::memory::store::MemoryCategory;
 use anyhow::{Result, Context};
 use std::sync::Arc;
 use chrono::Utc;
 
 pub struct MemoryCategorizer {
     llm_client: Arc<LlmClient>,
-    store: Arc<VectorStore>,
+    store: Arc<crate::memory::store::VectorStore>,
 }
 
 impl MemoryCategorizer {
-    pub fn new(llm_client: Arc<LlmClient>, store: Arc<VectorStore>) -> Self {
+    pub fn new(llm_client: Arc<LlmClient>, store: Arc<crate::memory::store::VectorStore>) -> Self {
         Self { llm_client, store }
     }
 

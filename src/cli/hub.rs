@@ -1,5 +1,5 @@
 use inquire::{Select, error::InquireResult};
-use crate::config::Config;
+use mylm_core::config::Config;
 use anyhow::Result;
 use console::Style;
 
@@ -10,6 +10,7 @@ pub enum HubChoice {
     ResumeSession,
     StartTui,
     QuickQuery,
+    ManageSessions,
     Configuration,
     Exit,
 }
@@ -18,7 +19,7 @@ impl std::fmt::Display for HubChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             HubChoice::PopTerminal => {
-                if crate::context::terminal::TerminalContext::is_inside_tmux() {
+                if mylm_core::context::terminal::TerminalContext::is_inside_tmux() {
                     write!(f, "🚀 Pop Terminal with Seamless Context")
                 } else {
                     write!(f, "🚀 Pop Terminal (Limited Context - Not in tmux)")
@@ -29,6 +30,7 @@ impl std::fmt::Display for HubChoice {
             HubChoice::StartTui => write!(f, "✨ Start Fresh TUI Session"),
             HubChoice::QuickQuery => write!(f, "⚡ Quick Query"),
             HubChoice::Configuration => write!(f, "⚙️  Configuration"),
+            HubChoice::ManageSessions => write!(f, "📂 Manage Sessions"),
             HubChoice::Exit => write!(f, "❌ Exit"),
         }
     }
@@ -99,6 +101,7 @@ pub async fn show_hub(config: &Config) -> Result<HubChoice> {
     options.extend(vec![
         HubChoice::StartTui,
         HubChoice::QuickQuery,
+        HubChoice::ManageSessions,
         HubChoice::Configuration,
         HubChoice::Exit,
     ]);
@@ -132,6 +135,19 @@ pub fn show_endpoint_select(endpoints: Vec<String>, _current: &str) -> Result<Op
 
     let ans: InquireResult<String> = Select::new("Select Endpoint", options)
         .prompt();
+
+    match ans {
+        Ok(choice) if choice == "⬅️  Back" => Ok(None),
+        Ok(choice) => Ok(Some(choice)),
+        Err(_) => Ok(None),
+    }
+}
+
+pub fn show_session_select(sessions: Vec<String>) -> Result<Option<String>> {
+    let mut options = sessions;
+    options.push("⬅️  Back".to_string());
+
+    let ans: InquireResult<String> = Select::new("Select Session to Resume", options).prompt();
 
     match ans {
         Ok(choice) if choice == "⬅️  Back" => Ok(None),
@@ -278,10 +294,10 @@ async fn print_banner(config: &Config) {
         _ => "Not Configured".to_string(),
     };
 
-    let ctx = crate::context::TerminalContext::collect_sync();
+    let ctx = mylm_core::context::TerminalContext::collect_sync();
     let cwd = ctx.cwd().unwrap_or_else(|| "unknown".to_string());
     let branch = ctx.git_branch().unwrap_or_else(|| "none".to_string());
-    let tmux_status = if crate::context::terminal::TerminalContext::is_inside_tmux() {
+    let tmux_status = if mylm_core::context::terminal::TerminalContext::is_inside_tmux() {
         green.apply_to("Active")
     } else {
         Style::new().yellow().apply_to("Inactive (No Scrollback)")

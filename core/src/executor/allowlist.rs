@@ -117,6 +117,12 @@ impl CommandAllowlist {
         Self::default()
     }
 
+    /// Apply allow/deny lists from configuration (exact command names).
+    pub fn apply_config(&mut self, cfg: &crate::config::CommandConfig) {
+        self.custom_allowed.extend(cfg.allowed_commands.iter().cloned());
+        self.custom_blocked.extend(cfg.blocked_commands.iter().cloned());
+    }
+
     /// Check if a command is allowed
     pub fn is_allowed(&self, command: &str) -> bool {
         let cmd = command.trim();

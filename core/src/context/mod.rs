@@ -13,6 +13,7 @@ use std::path::PathBuf;
 pub mod git;
 pub mod system;
 pub mod terminal;
+pub mod pack;
 
 /// Collected terminal context
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]

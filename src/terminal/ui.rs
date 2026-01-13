@@ -1,5 +1,5 @@
 use crate::terminal::app::{App, Focus, AppState};
-use crate::llm::chat::MessageRole;
+use mylm_core::llm::chat::MessageRole;
 use std::sync::atomic::Ordering;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -13,7 +13,7 @@ use tui_term::widget::PseudoTerminal;
 pub fn render(frame: &mut Frame, app: &mut App) {
     // Estimate top bar height based on width and content
     let width = frame.area().width;
-    let stats_len = 170; // Profile + Prompt + Tokens + Cost + Time + Verbose + Auto-Approve
+    let stats_len = 210; // Estimated length for Profile + Prompt + Tokens + Cost + Time + Flags + State
     let stats_rows = (stats_len as f32 / width as f32).ceil() as u16;
     let top_bar_height = 1 + stats_rows.max(1);
 
@@ -29,8 +29,125 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(main_layout[1]);
 
-    render_terminal(frame, app, chunks[0]);
-    render_chat(frame, app, chunks[1]);
+    if app.show_memory_view {
+        render_memory_view(frame, app, main_layout[1]);
+    } else {
+        render_terminal(frame, app, chunks[0]);
+        render_chat(frame, app, chunks[1]);
+    }
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i >= max_chars.saturating_sub(1) {
+            break;
+        }
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
+fn render_memory_view(frame: &mut Frame, app: &mut App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .split(area);
+
+    let list_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Memory Nodes (Scroll: Up/Down) ")
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let mut items = Vec::new();
+    for node in &app.memory_graph.nodes {
+        let title = node.memory.content.lines().next().unwrap_or("Empty Memory");
+        let truncated_title = if title.len() > 50 {
+            format!("{}...", &title[..47])
+        } else {
+            title.to_string()
+        };
+        
+        let type_tag = format!("[{}] ", node.memory.r#type);
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(type_tag, Style::default().fg(Color::Cyan)),
+            Span::raw(truncated_title),
+        ])));
+    }
+
+    if items.is_empty() {
+        items.push(ListItem::new(Line::from("No related memories found.")));
+    }
+
+    let list = List::new(items)
+        .block(list_block)
+        .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::DarkGray))
+        .highlight_symbol("> ");
+
+    // We use memory_graph_scroll to select which item is highlighted
+    let mut list_state = ratatui::widgets::ListState::default();
+    if !app.memory_graph.nodes.is_empty() {
+        let idx = app.memory_graph_scroll % app.memory_graph.nodes.len();
+        list_state.select(Some(idx));
+    }
+
+    frame.render_stateful_widget(list, chunks[0], &mut list_state);
+
+    // Render details of selected node
+    let detail_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Memory Details & Connections ")
+        .border_style(Style::default().fg(Color::Cyan));
+
+    if !app.memory_graph.nodes.is_empty() {
+        let idx = app.memory_graph_scroll % app.memory_graph.nodes.len();
+        let node = &app.memory_graph.nodes[idx];
+        
+        let mut detail_lines = Vec::new();
+        detail_lines.push(Line::from(vec![
+            Span::styled("ID: ", Style::default().fg(Color::Gray)),
+            Span::raw(node.memory.id.to_string()),
+        ]));
+        detail_lines.push(Line::from(vec![
+            Span::styled("Type: ", Style::default().fg(Color::Gray)),
+            Span::raw(node.memory.r#type.to_string()),
+        ]));
+        if let Some(cat) = &node.memory.category_id {
+            detail_lines.push(Line::from(vec![
+                Span::styled("Category: ", Style::default().fg(Color::Gray)),
+                Span::raw(cat),
+            ]));
+        }
+        detail_lines.push(Line::from(""));
+        detail_lines.push(Line::from(Span::styled("Content:", Style::default().add_modifier(Modifier::UNDERLINED))));
+        
+        for line in node.memory.content.lines() {
+            detail_lines.push(Line::from(line));
+        }
+        
+        detail_lines.push(Line::from(""));
+        detail_lines.push(Line::from(Span::styled("Connections:", Style::default().add_modifier(Modifier::UNDERLINED))));
+        if node.connections.is_empty() {
+            detail_lines.push(Line::from(" (No direct connections identified)"));
+        } else {
+            for conn_id in &node.connections {
+                detail_lines.push(Line::from(format!(" - Linked to Memory {}", conn_id)));
+            }
+        }
+
+        let p = Paragraph::new(detail_lines)
+            .block(detail_block)
+            .wrap(Wrap { trim: true });
+        frame.render_widget(p, chunks[1]);
+    } else {
+        let p = Paragraph::new("Select a memory to see details.")
+            .block(detail_block);
+        frame.render_widget(p, chunks[1]);
+    }
 }
 
 fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
@@ -39,13 +156,6 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
 
     let active_profile = app.config.active_profile.clone();
     let profile_data = app.config.get_active_profile();
-    
-    let (endpoint_name, model_name, model_max) = if let Ok(e) = app.config.get_endpoint(profile_data.map(|p| p.endpoint.as_str())) {
-        (e.name.as_str(), e.model.clone(), e.max_context_tokens)
-    } else {
-        ("?", "unknown".to_string(), 0)
-    };
-
     let prompt_name = profile_data.map(|p| p.prompt.as_str()).unwrap_or("?");
 
     let (verbose_text, verbose_color) = if app.verbose_mode {
@@ -56,26 +166,52 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
     let auto_approve = app.auto_approve.load(Ordering::SeqCst);
     let auto_approve_text = if auto_approve { " [AUTO-APPROVE: ON] " } else { " [AUTO-APPROVE: OFF] " };
 
-    let stats_text = Line::from(vec![
+    // Agent state indicator (moved into top header to avoid duplicated status bars).
+    let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let frame_char = spinner[(app.tick_count % spinner.len() as u64) as usize];
+
+    let elapsed = app.state_started_at.elapsed();
+    let elapsed_ms = elapsed.as_millis();
+    let elapsed_text = if elapsed_ms >= 1000 {
+        format!("{:.1}s", elapsed.as_secs_f64())
+    } else {
+        format!("{}ms", elapsed_ms)
+    };
+
+    let (state_label, state_color) = match &app.state {
+        AppState::Idle => ("Ready".to_string(), Color::Green),
+        AppState::Thinking(info) => (format!("Thinking ({})", info), Color::Yellow),
+        AppState::Streaming(info) => (format!("Streaming ({})", info), Color::Green),
+        AppState::ExecutingTool(tool) => (format!("Executing ({})", tool), Color::Cyan),
+        AppState::WaitingForUser => ("Waiting for approval".to_string(), Color::Magenta),
+        AppState::Error(err) => (format!("Error ({})", err), Color::Red),
+    };
+    let state_prefix = if app.state == AppState::Idle { "●" } else { frame_char };
+
+    let last_activity = app.activity_log.last().map(|e| {
+        if app.verbose_mode {
+            if let Some(d) = e.detail.as_deref() {
+                let d1 = d.lines().next().unwrap_or("").trim();
+                if d1.is_empty() {
+                    e.summary.clone()
+                } else {
+                    format!("{}: {}", e.summary, d1)
+                }
+            } else {
+                e.summary.clone()
+            }
+        } else {
+            e.summary.clone()
+        }
+    });
+
+    let mut spans = vec![
         Span::styled("Profile: ", Style::default().fg(Color::Gray)),
         Span::styled(active_profile, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Span::raw(" ("),
-        Span::styled(endpoint_name, Style::default().fg(Color::DarkGray)),
-        Span::raw(":"),
-        Span::styled(model_name, Style::default().fg(Color::DarkGray)),
-        Span::raw(") | "),
+        Span::raw(" | "),
         Span::styled("Prompt: ", Style::default().fg(Color::Gray)),
         Span::styled(prompt_name, Style::default().fg(Color::White)),
         Span::raw(" | "),
-        Span::styled("Tokens: ", Style::default().fg(Color::Gray)),
-        Span::styled(stats.total_tokens.to_string(), Style::default().fg(Color::Cyan)),
-        Span::raw(" ("),
-        Span::styled("↑", Style::default().fg(Color::DarkGray)),
-        Span::styled(stats.input_tokens.to_string(), Style::default().fg(Color::DarkGray)),
-        Span::raw("/"),
-        Span::styled("↓", Style::default().fg(Color::DarkGray)),
-        Span::styled(stats.output_tokens.to_string(), Style::default().fg(Color::DarkGray)),
-        Span::raw(") | "),
         Span::styled("Cost: ", Style::default().fg(Color::Gray)),
         Span::styled(format!("${:.2}", stats.cost), Style::default().fg(Color::Green)),
         Span::raw(" | "),
@@ -84,47 +220,57 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
         Span::styled(verbose_text, Style::default().fg(verbose_color).add_modifier(Modifier::BOLD)),
         Span::styled(auto_approve_text, Style::default().fg(if auto_approve { Color::Green } else { Color::Red }).add_modifier(Modifier::BOLD)),
         Span::styled(" [F2: Focus] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-    ]);
+        Span::styled(" [F3: Memory] ", Style::default().fg(if app.show_memory_view { Color::Green } else { Color::Yellow }).add_modifier(Modifier::BOLD)),
+
+        // Agent State
+        Span::raw(" | "),
+        Span::styled("State: ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("{} {}", state_prefix, state_label),
+            Style::default().fg(state_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" ({})", elapsed_text), Style::default().fg(Color::DarkGray)),
+    ];
+
+    if let Some(a) = last_activity {
+        let a = truncate_chars(&a, 80);
+        spans.push(Span::raw(" | "));
+        spans.push(Span::styled("Last Action: ", Style::default().fg(Color::Gray)));
+        spans.push(Span::styled(a, Style::default().fg(Color::DarkGray)));
+    }
+
+    let stats_text = Line::from(spans);
 
     let ratio = app.session_monitor.get_context_ratio();
-    let gauge_color = if ratio > 0.8 {
+    let gauge_color = if ratio >= 0.8 {
         Color::Red
-    } else if ratio > 0.5 {
+    } else if ratio >= 0.5 {
         Color::Yellow
     } else {
         Color::Green
     };
 
-    let label = if model_max > 0 && model_max != stats.max_context_tokens as usize {
-        format!("Context: {}/{} [Model Limit: {}] ({:.0}%)",
-            stats.active_context_tokens,
-            stats.max_context_tokens,
-            model_max,
-            ratio * 100.0
-        )
-    } else {
-        format!("Context: {}/{} ({:.0}%)",
-            stats.active_context_tokens,
-            stats.max_context_tokens,
-            ratio * 100.0
-        )
-    };
+    let label = format!("Context: {} / {} ({:.0}%)",
+        stats.active_context_tokens,
+        stats.max_context_tokens,
+        (ratio * 100.0).clamp(0.0, 100.0)
+    );
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
-            Constraint::Min(0),
+            Constraint::Min(0),    // Session Stats
+            Constraint::Length(1), // Gauge row
         ])
         .split(area);
 
-    let top_row_chunks = Layout::default()
+    let bottom_row_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(18), // Version
             Constraint::Min(0),     // Gauge
         ])
-        .split(rows[0]);
+        .split(rows[1]);
 
     let version_text = format!(" myLM v{}-{} ", env!("CARGO_PKG_VERSION"), env!("BUILD_NUMBER"));
     let version_p = Paragraph::new(Span::styled(
@@ -142,9 +288,9 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
         .alignment(ratatui::layout::Alignment::Right)
         .wrap(Wrap { trim: true });
 
-    frame.render_widget(version_p, top_row_chunks[0]);
-    frame.render_widget(gauge, top_row_chunks[1]);
-    frame.render_widget(stats_p, rows[1]);
+    frame.render_widget(stats_p, rows[0]);
+    frame.render_widget(version_p, bottom_row_chunks[0]);
+    frame.render_widget(gauge, bottom_row_chunks[1]);
 }
 
 fn render_terminal(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -231,7 +377,7 @@ fn render_terminal(frame: &mut Frame, app: &mut App, area: Rect) {
 fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(3)])
+        .constraints([Constraint::Min(3), Constraint::Length(5)])
         .split(area);
 
     let title = match app.focus {
@@ -271,10 +417,10 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
 
         let mut lines_to_render = Vec::new();
         
-        let delimiter = "\n\n---\n[TERMINAL STATE ATTACHMENT]";
-        let (display_content, has_hidden_context) = if m.content.contains(delimiter) {
-            let parts: Vec<&str> = m.content.split(delimiter).collect();
-            (parts[0], true)
+        // Hide Context Packs (Terminal Snapshot, etc.)
+        let delimiter = "\n\n## Terminal Snapshot";
+        let (display_content, has_hidden_context) = if let Some(idx) = m.content.find(delimiter) {
+            (&m.content[..idx], true)
         } else {
             (m.content.as_str(), false)
         };

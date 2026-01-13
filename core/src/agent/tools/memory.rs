@@ -1,17 +1,16 @@
 use crate::agent::tool::Tool;
-use crate::memory::VectorStore;
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use std::sync::Arc;
 
 /// A tool for interacting with the long-term vector memory.
 pub struct MemoryTool {
-    store: Arc<VectorStore>,
+    store: Arc<crate::memory::store::VectorStore>,
 }
 
 impl MemoryTool {
     /// Create a new MemoryTool
-    pub fn new(store: Arc<VectorStore>) -> Self {
+    pub fn new(store: Arc<crate::memory::store::VectorStore>) -> Self {
         Self { store }
     }
 }
