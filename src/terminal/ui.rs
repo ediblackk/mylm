@@ -37,20 +37,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn truncate_chars(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_string();
-    }
-    let mut out = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i >= max_chars.saturating_sub(1) {
-            break;
-        }
-        out.push(c);
-    }
-    out.push('…');
-    out
-}
 
 fn render_memory_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
@@ -188,24 +174,7 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
     };
     let state_prefix = if app.state == AppState::Idle { "●" } else { frame_char };
 
-    let last_activity = app.activity_log.last().map(|e| {
-        if app.verbose_mode {
-            if let Some(d) = e.detail.as_deref() {
-                let d1 = d.lines().next().unwrap_or("").trim();
-                if d1.is_empty() {
-                    e.summary.clone()
-                } else {
-                    format!("{}: {}", e.summary, d1)
-                }
-            } else {
-                e.summary.clone()
-            }
-        } else {
-            e.summary.clone()
-        }
-    });
-
-    let mut spans = vec![
+    let spans = vec![
         Span::styled("Profile: ", Style::default().fg(Color::Gray)),
         Span::styled(active_profile, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         Span::raw(" | "),

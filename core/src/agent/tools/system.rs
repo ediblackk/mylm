@@ -1,7 +1,5 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio::sync::mpsc;
-use crate::terminal::app::TuiEvent;
 use crate::agent::tool::{Tool, ToolKind};
 use sysinfo::{System, ProcessRefreshKind, CpuRefreshKind, Networks, RefreshKind};
 

@@ -19,7 +19,9 @@ pub use mylm_core::terminal::app::{AppState, TuiEvent};
 pub struct ActivityEntry {
     #[allow(dead_code)]
     pub at: Instant,
+    #[allow(dead_code)]
     pub summary: String,
+    #[allow(dead_code)]
     pub detail: Option<String>,
 }
 
