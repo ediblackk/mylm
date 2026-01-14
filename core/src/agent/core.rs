@@ -271,6 +271,7 @@ impl Agent {
         interrupt_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
         auto_approve: bool,
         max_driver_loops: usize,
+        mut approval_rx: Option<tokio::sync::mpsc::Receiver<bool>>,
     ) -> Result<(String, TokenUsage), Box<dyn StdError + Send + Sync>> {
         // 1. Memory Context Injection (if enabled)
         if self.llm_client.config().memory.auto_context {
@@ -349,13 +350,33 @@ impl Agent {
                             args.clone()
                         };
                         let _ = event_tx.send(TuiEvent::SuggestCommand(cmd));
-                        
-                        let last_msg = self.history.last().map(|m| m.content.clone()).unwrap_or_default();
-                        let mut truncated = last_msg;
-                        if let Some(pos) = truncated.find("Observation:") {
-                            truncated.truncate(pos);
+
+                        if let Some(rx) = &mut approval_rx {
+                            // Wait for approval
+                            let _ = event_tx.send(TuiEvent::StatusUpdate("Waiting for approval...".to_string()));
+                            match rx.recv().await {
+                                Some(true) => {
+                                    let _ = event_tx.send(TuiEvent::StatusUpdate("Approved.".to_string()));
+                                    // Proceed to execution
+                                }
+                                Some(false) => {
+                                    let _ = event_tx.send(TuiEvent::StatusUpdate("Denied.".to_string()));
+                                    last_observation = Some("Error: User denied the execution of this command.".to_string());
+                                    continue;
+                                }
+                                None => {
+                                    return Ok(("Error: Approval channel closed.".to_string(), self.total_usage.clone()));
+                                }
+                            }
+                        } else {
+                            // Legacy behavior: return to caller to handle approval
+                            let last_msg = self.history.last().map(|m| m.content.clone()).unwrap_or_default();
+                            let mut truncated = last_msg;
+                            if let Some(pos) = truncated.find("Observation:") {
+                                truncated.truncate(pos);
+                            }
+                            return Ok((truncated.trim().to_string(), self.total_usage.clone()));
                         }
-                        return Ok((truncated.trim().to_string(), self.total_usage.clone()));
                     }
 
                     // Extract arguments from JSON if necessary (for tool calling API)

@@ -617,7 +617,7 @@ async fn handle_one_shot(
     // Dummy interrupt flag for one-shot
     let interrupt_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    match agent.run(messages, event_tx, interrupt_flag, auto_approve, config.agent.max_driver_loops).await {
+    match agent.run(messages, event_tx, interrupt_flag, auto_approve, config.agent.max_driver_loops, None).await {
         Ok((response, _usage)) => {
             // Stop the log task
             log_handle.abort();

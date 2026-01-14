@@ -19,11 +19,20 @@ pub enum ClientMessage {
         client: ClientInfo,
         auth: AuthInfo,
     },
+    #[serde(alias = "CREATE_TASK")]
     CreateSession {
+        #[serde(default)]
         profile: String,
+        #[serde(default)]
         enable_terminal: bool,
     },
     ListSessions,
+    #[serde(alias = "GET_PROJECT_INFO")]
+    GetProjectInfo,
+    #[serde(alias = "SWITCH_WORKSPACE")]
+    SwitchWorkspace {
+        path: String,
+    },
     ResumeSession {
         session_id: Uuid,
     },
@@ -78,6 +87,10 @@ pub enum ServerEvent {
     HelloAck {
         server: ServerInfo,
         capabilities: Capabilities,
+    },
+    ProjectInfo {
+        root_path: String,
+        files: Vec<FileInfo>,
     },
     SessionCreated {
         session_id: Uuid,
@@ -150,6 +163,28 @@ pub enum ServerEvent {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolRequest {
+    ReadFile { path: String },
+    WriteFile { path: String, content: String },
+    ListFiles { path: String },
+    GetDiagnostics,
+    ShowDiff { left: String, right: String, title: String },
+    OpenFile { path: String, line: Option<u32> },
+    RevealInExplorer { path: String },
+    TerminalCreate { name: Option<String>, shell: Option<String> },
+    TerminalInput { terminal_id: String, data: String },
+    TerminalKill { terminal_id: String },
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ToolResponse {
+    pub ok: bool,
+    pub result: Option<serde_json::Value>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ServerInfo {
     pub name: String,
     pub version: String,
@@ -166,6 +201,14 @@ pub struct Capabilities {
 pub struct SessionSummary {
     pub session_id: Uuid,
     pub title: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FileInfo {
+    pub path: String,
+    pub name: String,
+    pub is_directory: bool,
+    pub children: Option<Vec<FileInfo>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

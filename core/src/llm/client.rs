@@ -105,7 +105,7 @@ impl LlmClient {
         let body = OpenAiRequest {
             model: self.config.model.clone(),
             messages: &request.messages,
-            max_tokens: self.config.max_tokens,
+            max_completion_tokens: self.config.max_tokens,
             temperature: self.config.temperature,
             stream: Some(false),
             tools: request.tools.as_ref().map(|t| t.iter().map(|tool| OpenAiTool {
@@ -400,7 +400,7 @@ impl LlmClient {
         let body = OpenAiRequest {
             model: self.config.model.clone(),
             messages: &request.messages,
-            max_tokens: self.config.max_tokens,
+            max_completion_tokens: self.config.max_tokens,
             temperature: self.config.temperature,
             stream: Some(true),
             tools: request.tools.as_ref().map(|t| t.iter().map(|tool| OpenAiTool {
@@ -545,7 +545,8 @@ struct OpenAiRequest<'a> {
     model: String,
     #[serde(borrow)]
     messages: &'a Vec<ChatMessage>,
-    max_tokens: Option<u32>,
+    #[serde(rename = "max_completion_tokens")]
+    max_completion_tokens: Option<u32>,
     temperature: Option<f32>,
     #[serde(default)]
     stream: Option<bool>,
