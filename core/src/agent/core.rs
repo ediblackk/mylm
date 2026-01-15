@@ -20,6 +20,8 @@ pub enum AgentDecision {
         args: String,
         kind: ToolKind,
     },
+    /// The LLM output a tool call that couldn't be parsed correctly.
+    MalformedAction(String),
     /// The agent has reached maximum iterations or an error occurred.
     Error(String),
 }
@@ -203,21 +205,21 @@ impl Agent {
         let action_re = Regex::new(r"(?m)^Action:\s*(.*)")?;
         let action_input_re = Regex::new(r"(?ms)^Action Input:\s*(.*)$")?;
 
-        let action = action_re.captures(&content).map(|c| c[1].trim().to_string());
-        
-        // Action Input might be multi-line or followed by other tags, we need to be careful
-        // Often it's at the end of the message or followed by "Observation:"
-        let action_input = if let Some(caps) = action_input_re.captures(&content) {
-            let mut val = caps[1].trim().to_string();
-            if let Some(pos) = val.find("Observation:") {
-                val.truncate(pos);
-            }
-            Some(val.trim().to_string())
-        } else {
-            None
-        };
+        let action_match = action_re.captures(&content);
+        let action_input_match = action_input_re.captures(&content);
 
-        if let (Some(tool_name), Some(args)) = (action, action_input) {
+        if action_match.is_some() || action_input_match.is_some() {
+            let tool_name = action_match.as_ref().map(|c| c[1].trim().to_string());
+            
+            let args = action_input_match.as_ref().map(|caps| {
+                let mut val = caps[1].trim().to_string();
+                if let Some(pos) = val.find("Observation:") {
+                    val.truncate(pos);
+                }
+                val.trim().to_string()
+            });
+
+            if let (Some(tool_name), Some(args)) = (tool_name, args) {
             // Repetition Check
             if let Some((last_tool, last_args)) = &self.last_tool_call {
                 if *last_tool == tool_name && *last_args == args {
@@ -255,7 +257,17 @@ impl Agent {
                 }
             }
             
-            return Ok(action_decision);
+                return Ok(action_decision);
+            } else {
+                // Detected partial or malformed action
+                let mut error_msg = String::from("Malformed tool call detected.");
+                if action_match.is_none() {
+                    error_msg.push_str(" Missing 'Action:' tag.");
+                } else if action_input_re.captures(&content).is_none() {
+                    error_msg.push_str(" Missing 'Action Input:' tag.");
+                }
+                return Ok(AgentDecision::MalformedAction(error_msg));
+            }
         }
 
         // 3. Final Answer or just a message
@@ -294,6 +306,8 @@ impl Agent {
         self.reset(history);
         
         let mut last_observation = None;
+        let mut retry_count = 0;
+        let max_retries = 3;
 
         let mut loop_iteration = 0;
         loop {
@@ -310,6 +324,7 @@ impl Agent {
             
             match self.step(last_observation.take()).await? {
                 AgentDecision::Message(msg, usage) => {
+                    retry_count = 0; // Reset on successful message
                     let _ = event_tx.send(TuiEvent::AgentResponse(msg.clone(), usage.clone()));
                     
                     // If we have a pending decision (like an Action queued after a Thought),
@@ -339,6 +354,7 @@ impl Agent {
                     continue;
                 }
                 AgentDecision::Action { tool, args, kind } => {
+                    retry_count = 0; // Reset on successful action
                     let _ = event_tx.send(TuiEvent::StatusUpdate(format!("Tool: '{}'", tool)));
 
                     if tool == "execute_command" && !auto_approve {
@@ -392,7 +408,11 @@ impl Agent {
                     let observation = match self.tools.get(&tool) {
                         Some(t) => match t.call(&processed_args).await {
                             Ok(output) => output,
-                            Err(e) => format!("Error: {}. Analyze the failure and try a different command or approach if possible.", e),
+                            Err(e) => {
+                                let error_msg = format!("Tool Error: {}. Analyze the failure and try a different command or approach if possible.", e);
+                                let _ = event_tx.send(TuiEvent::StatusUpdate(format!("❌ Tool '{}' failed", tool)));
+                                error_msg
+                            },
                         },
                         None => format!("Error: Tool '{}' not found. Check the available tools list.", tool),
                     };
@@ -403,6 +423,29 @@ impl Agent {
                     }
 
                     last_observation = Some(observation);
+                }
+                AgentDecision::MalformedAction(error) => {
+                    retry_count += 1;
+                    if retry_count > max_retries {
+                        let fatal_error = format!("Fatal: Failed to parse agent response after {} attempts. Last error: {}", max_retries, error);
+                        let _ = event_tx.send(TuiEvent::StatusUpdate(fatal_error.clone()));
+                        return Ok((fatal_error, self.total_usage.clone()));
+                    }
+
+                    let _ = event_tx.send(TuiEvent::StatusUpdate(format!("⚠️ {} Retrying ({}/{})", error, retry_count, max_retries)));
+                    
+                    // Nudge the model to follow the format
+                    let nudge = format!(
+                        "{}\n\n\
+                        IMPORTANT: You must follow the ReAct format exactly:\n\
+                        Thought: <your reasoning>\n\
+                        Action: <tool name>\n\
+                        Action Input: <tool arguments>\n\n\
+                        Do not include any other text after Action Input.",
+                        error
+                    );
+                    last_observation = Some(nudge);
+                    continue;
                 }
                 AgentDecision::Error(e) => {
                     let _ = event_tx.send(TuiEvent::StatusUpdate("".to_string()));
@@ -516,29 +559,22 @@ impl Agent {
             # Operational Protocol (ReAct)\n\
             You have access to the following tools:\n\n\
             {}\n\
-            CRITICAL: You MUST use the following format for every step. Do not skip tags. Do not output free-form text outside these tags.\n\n\
-            Question: the input question you must answer\n\
-            Thought: you should always think about what to do\n\
-            Action: the action to take, should be one of [{}]\n\
-            Action Input: the input to the action\n\
-            Observation: the result of the action (STOP after providing Action Input and wait for this)\n\
-            ... (this Thought/Action/Action Input/Observation can repeat N times)\n\
-            Thought: I now know the final answer\n\
-            Final Answer: the final answer to the original input question\n\n\
-            ## Example\n\
-            Question: list files in current directory\n\
-            Thought: I need to use the ls command to list files.\n\
-            Action: execute_command\n\
-            Action Input: ls -la\n\
-            Observation: total 0\n\
-            Thought: The directory is empty.\n\
-            Final Answer: The directory is empty.\n\n\
-            IMPORTANT: \n\
+            CRITICAL: Every agent turn MUST terminate explicitly and unambiguously. \
+            A turn may be **one and only one** of the following: A tool invocation OR a final answer. Never both.\n\n\
+            ## Tool Invocation Format\n\
+            Thought: <your reasoning>\n\
+            Action: <tool name from [{}]>\n\
+            Action Input: <tool arguments>\n\n\
+            ## Final Answer Format\n\
+            Thought: <your reasoning>\n\
+            Final Answer: <your final response to the user>\n\n\
+            ## Rules\n\
             1. You MUST use the tools to interact with the system.\n\
             2. After providing an Action and Action Input, you MUST stop generating and wait for the Observation.\n\
             3. Do not hallucinate or predict the Observation.\n\
             4. ALWAYS prefix your thoughts with 'Thought:'.\n\
-            5. If you are stuck or need clarification, use 'Final Answer:' to ask the user.\n\n\
+            5. If you are stuck or need clarification, use 'Final Answer:' to ask the user.\n\
+            6. Do not include any text after 'Action Input:' or 'Final Answer:'.\n\n\
             Begin!",
             self.system_prompt_prefix,
             tools_desc,

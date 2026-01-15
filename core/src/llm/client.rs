@@ -106,7 +106,6 @@ impl LlmClient {
             model: self.config.model.clone(),
             messages: &request.messages,
             max_completion_tokens: self.config.max_tokens,
-            temperature: self.config.temperature,
             stream: Some(false),
             tools: request.tools.as_ref().map(|t| t.iter().map(|tool| OpenAiTool {
                 type_: tool.type_.clone(),
@@ -401,7 +400,6 @@ impl LlmClient {
             model: self.config.model.clone(),
             messages: &request.messages,
             max_completion_tokens: self.config.max_tokens,
-            temperature: self.config.temperature,
             stream: Some(true),
             tools: request.tools.as_ref().map(|t| t.iter().map(|tool| OpenAiTool {
                 type_: tool.type_.clone(),
@@ -547,7 +545,8 @@ struct OpenAiRequest<'a> {
     messages: &'a Vec<ChatMessage>,
     #[serde(rename = "max_completion_tokens")]
     max_completion_tokens: Option<u32>,
-    temperature: Option<f32>,
+    // Note: max_tokens removed - newer models only support max_completion_tokens
+    // Note: temperature removed - not all OpenAI-compatible endpoints support it
     #[serde(default)]
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]

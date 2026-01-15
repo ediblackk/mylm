@@ -1,0 +1,57 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build-server-debug",
+            "type": "shell",
+            "command": "cargo build",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": ["$rustc"]
+        },
+        {
+            "label": "build-server-release",
+            "type": "shell",
+            "command": "cargo build --release",
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared"
+            },
+            "problemMatcher": ["$rustc"]
+        },
+        {
+            "label": "build-frontend",
+            "type": "shell",
+            "command": "cd javi/frontend_main && npm run build",
+            "group": "build",
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "sync-vscode-webview",
+            "type": "shell",
+            "command": "cd javi/vscode && node scripts/sync-ui.js",
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "compile-vscode-extension",
+            "type": "npm",
+            "script": "compile",
+            "path": "javi/vscode",
+            "group": "build",
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            }
+        }
+    ]
+}

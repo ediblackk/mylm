@@ -646,6 +646,8 @@ async fn run_agent_loop(
 ) {
     let mut loop_iteration = 0;
     let mut consecutive_thoughts = 0;
+    let mut retry_count = 0;
+    let max_retries = 3;
 
     loop {
         loop_iteration += 1;
@@ -672,10 +674,37 @@ async fn run_agent_loop(
         
         let step_res = agent_lock.step(last_observation.take()).await;
         match step_res {
+            Ok(AgentDecision::MalformedAction(error)) => {
+                retry_count += 1;
+                if retry_count > max_retries {
+                    let fatal_error = format!("Fatal: Failed to parse agent response after {} attempts. Last error: {}", max_retries, error);
+                    let _ = event_tx.send(TuiEvent::StatusUpdate(fatal_error.clone()));
+                    let _ = event_tx.send(TuiEvent::AgentResponseFinal(fatal_error, TokenUsage::default()));
+                    let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Idle));
+                    break;
+                }
+
+                let _ = event_tx.send(TuiEvent::StatusUpdate(format!("⚠️ {} Retrying ({}/{})", error, retry_count, max_retries)));
+                
+                // Nudge the model to follow the format
+                let nudge = format!(
+                    "{}\n\n\
+                    IMPORTANT: You must follow the ReAct format exactly:\n\
+                    Thought: <your reasoning>\n\
+                    Action: <tool name>\n\
+                    Action Input: <tool arguments>\n\n\
+                    Do not include any other text after Action Input.",
+                    error
+                );
+                last_observation = Some(nudge);
+                drop(agent_lock);
+                continue;
+            }
             Ok(AgentDecision::Message(msg, usage)) => {
                 let has_pending = agent_lock.has_pending_decision();
                 if has_pending {
                     consecutive_thoughts = 0;
+                    retry_count = 0;
                     let _ = event_tx.send(TuiEvent::AgentResponse(msg, usage));
                     drop(agent_lock);
                     continue;
@@ -708,6 +737,7 @@ async fn run_agent_loop(
             }
             Ok(AgentDecision::Action { tool, args, kind }) => {
                 consecutive_thoughts = 0;
+                retry_count = 0;
                 let _ = event_tx.send(TuiEvent::StatusUpdate(format!("Tool: '{}'", tool)));
                 let _ = event_tx.send(TuiEvent::ActivityUpdate {
                     summary: format!("Tool: {}", tool),

@@ -3,6 +3,9 @@ set -e
 
 echo "🚀 Quick dev install..."
 
+# Ensure cargo bin is in PATH (sccache lives there)
+export PATH="$HOME/.cargo/bin:$PATH"
+
 # Check for dependencies
 MISSING_DEPS=()
 for dep in tmux mold sccache protoc; do
@@ -32,10 +35,17 @@ if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
             esac
         fi
         
-        # Install sccache via cargo
-        if ! command -v sccache &> /dev/null; then
-            echo "🚀 Installing sccache via cargo..."
+        # Install/verify sccache via cargo
+        echo "🔍 Checking sccache..."
+        if command -v sccache &> /dev/null; then
+            CURRENT_SCCACHE=$(which sccache 2>/dev/null || echo "not-found")
+            echo "ℹ️  sccache found at: $CURRENT_SCCACHE"
+            echo "   Version: $(sccache --version 2>/dev/null || echo 'unknown')"
+        else
+            echo "🚀 sccache not found, installing via cargo..."
             cargo install sccache
+            # Refresh PATH to ensure sccache is available
+            export PATH="$HOME/.cargo/bin:$PATH"
         fi
     else
         echo "⚠️  Continuing without dependencies. Build will likely fail."
