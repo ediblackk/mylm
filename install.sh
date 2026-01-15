@@ -6,7 +6,10 @@ set -e
 # Configuration Setup
 CONFIG_DIR="$HOME/.config/mylm"
 CONFIG_FILE="$CONFIG_DIR/mylm.yaml"
-BINARY_DEST="/usr/local/bin/mylm"
+# NOTE: This installer is intentionally "no-sudo".
+# Install into user-space by default.
+PREFIX="${MYLM_PREFIX:-$HOME/.local}"
+BINARY_DEST="$PREFIX/bin/mylm"
 
 # --- Utility Functions ---
 
@@ -37,6 +40,77 @@ check_and_install_dependencies() {
     fi
 
     MISSING_DEPS=()
+
+    # This script will NEVER attempt to install system packages (no sudo).
+    # We only detect + print actionable guidance.
+    detect_pm() {
+        if command -v apt-get &> /dev/null; then echo "apt"; return 0; fi
+        if command -v dnf &> /dev/null; then echo "dnf"; return 0; fi
+        if command -v pacman &> /dev/null; then echo "pacman"; return 0; fi
+        if command -v zypper &> /dev/null; then echo "zypper"; return 0; fi
+        if command -v apk &> /dev/null; then echo "apk"; return 0; fi
+        if command -v xbps-install &> /dev/null; then echo "xbps"; return 0; fi
+        if command -v emerge &> /dev/null; then echo "emerge"; return 0; fi
+        if command -v nix-env &> /dev/null || command -v nix &> /dev/null; then echo "nix"; return 0; fi
+        if command -v brew &> /dev/null; then echo "brew"; return 0; fi
+        echo "unknown"
+    }
+
+    print_install_guidance() {
+        local pm
+        pm="$(detect_pm)"
+
+        echo ""
+        echo "⚠️  Missing system dependencies: ${MISSING_DEPS[*]}"
+        echo "🔒 This installer runs without sudo, so it will NOT install system packages for you."
+        echo "➡️  Install the missing packages using your system's package manager, then re-run this script."
+        echo ""
+
+        case "$pm" in
+            apt)
+                echo "Debian/Ubuntu example:"
+                echo "  sudo apt-get update && sudo apt-get install -y ${MISSING_DEPS[*]}"
+                ;;
+            dnf)
+                echo "Fedora example:"
+                echo "  sudo dnf install -y ${MISSING_DEPS[*]}"
+                ;;
+            pacman)
+                echo "Arch example:"
+                echo "  sudo pacman -S --needed ${MISSING_DEPS[*]}"
+                ;;
+            zypper)
+                echo "OpenSUSE example (package names may differ):"
+                echo "  sudo zypper install ${MISSING_DEPS[*]}"
+                ;;
+            apk)
+                echo "Alpine example (package names differ; may need -dev variants):"
+                echo "  doas apk add ${MISSING_DEPS[*]}"
+                ;;
+            xbps)
+                echo "Void Linux example (package names may differ):"
+                echo "  sudo xbps-install -S ${MISSING_DEPS[*]}"
+                ;;
+            emerge)
+                echo "Gentoo example (use emerge equivalents):"
+                echo "  sudo emerge ${MISSING_DEPS[*]}"
+                ;;
+            nix)
+                echo "Nix example (prefer a nix shell/flake; names differ):"
+                echo "  nix shell nixpkgs#openssl nixpkgs#pkg-config nixpkgs#clang nixpkgs#cmake nixpkgs#tmux nixpkgs#protobuf"
+                ;;
+            brew)
+                echo "Homebrew example (macOS/Linuxbrew; names may differ):"
+                echo "  brew install ${MISSING_DEPS[*]}"
+                ;;
+            *)
+                echo "Package manager not detected. Install the packages manually for your distro."
+                ;;
+        esac
+        echo ""
+        echo "🛑 Aborting build until dependencies are installed."
+        exit 1
+    }
     
     case $OS in
         ubuntu|debian|pop|mint)
@@ -48,12 +122,7 @@ check_and_install_dependencies() {
                 fi
             done
             if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
-                echo "⚠️  Missing dependencies: ${MISSING_DEPS[*]}"
-                read -p "Would you like to install them now? (Requires sudo) [Y/n]: " install_deps
-                if [[ ! "$install_deps" =~ ^[Nn]$ ]]; then
-                    sudo apt-get update
-                    sudo apt-get install -y "${MISSING_DEPS[@]}"
-                fi
+                print_install_guidance
             fi
             ;;
         fedora)
@@ -64,11 +133,7 @@ check_and_install_dependencies() {
                 fi
             done
             if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
-                echo "⚠️  Missing dependencies: ${MISSING_DEPS[*]}"
-                read -p "Would you like to install them now? (Requires sudo) [Y/n]: " install_deps
-                if [[ ! "$install_deps" =~ ^[Nn]$ ]]; then
-                    sudo dnf install -y "${MISSING_DEPS[@]}"
-                fi
+                print_install_guidance
             fi
             ;;
         arch)
@@ -79,11 +144,7 @@ check_and_install_dependencies() {
                 fi
             done
             if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
-                echo "⚠️  Missing dependencies: ${MISSING_DEPS[*]}"
-                read -p "Would you like to install them now? (Requires sudo) [Y/n]: " install_deps
-                if [[ ! "$install_deps" =~ ^[Nn]$ ]]; then
-                    sudo pacman -S --noconfirm "${MISSING_DEPS[@]}"
-                fi
+                print_install_guidance
             fi
             ;;
         Darwin)
@@ -96,18 +157,16 @@ check_and_install_dependencies() {
                     fi
                 done
                 if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
-                    echo "⚠️  Missing dependencies: ${MISSING_DEPS[*]}"
-                    read -p "Would you like to install them now? [Y/n]: " install_deps
-                    if [[ ! "$install_deps" =~ ^[Nn]$ ]]; then
-                        brew install "${MISSING_DEPS[@]}"
-                    fi
+                    print_install_guidance
                 fi
             else
                 echo "⚠️  Homebrew not found. Please ensure you have 'openssl', 'pkg-config', and 'tmux' installed manually."
             fi
             ;;
         *)
-            echo "⚠️  Unsupported or unknown OS: $OS. Please ensure you have the required build tools installed manually."
+            echo "⚠️  Unsupported or unknown OS: $OS."
+            echo "🔒 This installer runs without sudo, so it cannot install system dependencies."
+            echo "➡️  Ensure build dependencies are installed (OpenSSL dev libs, libxcb dev libs, clang, cmake, protobuf, tmux)."
             ;;
     esac
 
@@ -180,16 +239,52 @@ build_binary() {
 install_binary() {
     local profile=${1:-"release"}
     echo "📦 Installing/Updating binary to $BINARY_DEST..."
-    sudo cp target/$profile/mylm "$BINARY_DEST"
-    sudo chmod +x "$BINARY_DEST"
-    
-    # Also update /usr/local/bin/ai if it exists to maintain compatibility
-    if [ -f "/usr/local/bin/ai" ]; then
-        sudo cp target/$profile/mylm /usr/local/bin/ai
-        sudo chmod +x /usr/local/bin/ai
-    fi
+    mkdir -p "$(dirname "$BINARY_DEST")"
+    cp "target/$profile/mylm" "$BINARY_DEST"
+    chmod +x "$BINARY_DEST"
     
     echo "✅ Binary installed successfully."
+}
+
+ensure_path_has_prefix_bin() {
+    local bin_dir
+    bin_dir="$(dirname "$BINARY_DEST")"
+
+    # Already in PATH
+    if echo ":$PATH:" | grep -q ":${bin_dir}:"; then
+        return 0
+    fi
+
+    echo ""
+    echo "🔍 Ensuring $bin_dir is on your PATH..."
+
+    # Determine shell config
+    local shell_rc=""
+    if [[ "${SHELL:-}" == *"zsh"* ]]; then
+        shell_rc="$HOME/.zshrc"
+        if ! grep -q "${bin_dir}" "$shell_rc" 2>/dev/null; then
+            echo "export PATH=\"${bin_dir}:\$PATH\"" >> "$shell_rc"
+            echo "✅ Added PATH update to $shell_rc"
+        fi
+    elif [[ "${SHELL:-}" == *"bash"* ]]; then
+        shell_rc="$HOME/.bashrc"
+        if ! grep -q "${bin_dir}" "$shell_rc" 2>/dev/null; then
+            echo "export PATH=\"${bin_dir}:\$PATH\"" >> "$shell_rc"
+            echo "✅ Added PATH update to $shell_rc"
+        fi
+    elif [[ "${SHELL:-}" == *"fish"* ]]; then
+        shell_rc="$HOME/.config/fish/config.fish"
+        mkdir -p "$(dirname "$shell_rc")"
+        if ! grep -q "${bin_dir}" "$shell_rc" 2>/dev/null; then
+            echo "set -gx PATH ${bin_dir} \$PATH" >> "$shell_rc"
+            echo "✅ Added PATH update to $shell_rc"
+        fi
+    else
+        echo "⚠️  Could not detect your shell. Ensure '$bin_dir' is on your PATH manually."
+        return 0
+    fi
+
+    echo "💡 Restart your shell or re-source your shell config for PATH changes to take effect."
 }
 
 setup_shell_alias() {
@@ -198,10 +293,13 @@ setup_shell_alias() {
     echo "🔍 Configuring shell alias..."
     
     local shell_rc=""
-    if [[ "$SHELL" == *"zsh"* ]]; then
+    if [[ "${SHELL:-}" == *"zsh"* ]]; then
         shell_rc="$HOME/.zshrc"
-    elif [[ "$SHELL" == *"bash"* ]]; then
+    elif [[ "${SHELL:-}" == *"bash"* ]]; then
         shell_rc="$HOME/.bashrc"
+    elif [[ "${SHELL:-}" == *"fish"* ]]; then
+        shell_rc="$HOME/.config/fish/config.fish"
+        mkdir -p "$(dirname "$shell_rc")"
     fi
 
     if [ -n "$shell_rc" ]; then
@@ -225,22 +323,42 @@ setup_shell_alias() {
             fi
         fi
 
-        if grep -q "alias $chosen_alias=" "$shell_rc"; then
+        if grep -q "alias $chosen_alias=" "$shell_rc" 2>/dev/null; then
             echo "⚠️  Found an existing '$chosen_alias' alias in $shell_rc."
             if [ "$mandatory" == "true" ]; then
-                sed -i "/alias $chosen_alias=/d" "$shell_rc"
-                echo "alias $chosen_alias='$BINARY_DEST'" >> "$shell_rc"
+                if command -v perl &> /dev/null; then
+                    perl -0777 -i -pe "s/^alias\s+${chosen_alias}=.*\n//mg" "$shell_rc"
+                else
+                    sed -i "/alias $chosen_alias=/d" "$shell_rc" 2>/dev/null || true
+                fi
+                if [[ "$shell_rc" == *"config.fish" ]]; then
+                    echo "alias $chosen_alias '$BINARY_DEST'" >> "$shell_rc"
+                else
+                    echo "alias $chosen_alias='$BINARY_DEST'" >> "$shell_rc"
+                fi
                 echo "✅ Alias updated in $shell_rc."
             else
                 read -p "Would you like to replace it? [y/N]: " replace_alias
                 if [[ "$replace_alias" =~ ^[Yy]$ ]]; then
-                    sed -i "/alias $chosen_alias=/d" "$shell_rc"
-                    echo "alias $chosen_alias='$BINARY_DEST'" >> "$shell_rc"
+                    if command -v perl &> /dev/null; then
+                        perl -0777 -i -pe "s/^alias\s+${chosen_alias}=.*\n//mg" "$shell_rc"
+                    else
+                        sed -i "/alias $chosen_alias=/d" "$shell_rc" 2>/dev/null || true
+                    fi
+                    if [[ "$shell_rc" == *"config.fish" ]]; then
+                        echo "alias $chosen_alias '$BINARY_DEST'" >> "$shell_rc"
+                    else
+                        echo "alias $chosen_alias='$BINARY_DEST'" >> "$shell_rc"
+                    fi
                     echo "✅ Alias updated in $shell_rc."
                 fi
             fi
         else
-            echo "alias $chosen_alias='$BINARY_DEST'" >> "$shell_rc"
+            if [[ "$shell_rc" == *"config.fish" ]]; then
+                echo "alias $chosen_alias '$BINARY_DEST'" >> "$shell_rc"
+            else
+                echo "alias $chosen_alias='$BINARY_DEST'" >> "$shell_rc"
+            fi
             echo "✅ Alias '$chosen_alias' added to $shell_rc."
         fi
         echo "💡 Please restart your shell or run 'source $shell_rc' to apply changes."
@@ -261,10 +379,13 @@ setup_tmux_autostart() {
     echo "   - It's the only way to capture full scrollback history seamlessly."
     
     local shell_rc=""
-    if [[ "$SHELL" == *"zsh"* ]]; then
+    if [[ "${SHELL:-}" == *"zsh"* ]]; then
         shell_rc="$HOME/.zshrc"
-    elif [[ "$SHELL" == *"bash"* ]]; then
+    elif [[ "${SHELL:-}" == *"bash"* ]]; then
         shell_rc="$HOME/.bashrc"
+    elif [[ "${SHELL:-}" == *"fish"* ]]; then
+        shell_rc="$HOME/.config/fish/config.fish"
+        mkdir -p "$(dirname "$shell_rc")"
     fi
 
     local snippet_start="# --- mylm tmux auto-start ---"
@@ -284,9 +405,15 @@ setup_tmux_autostart() {
 
             echo "" >> "$shell_rc"
             echo "$snippet_start" >> "$shell_rc"
-            echo 'if command -v tmux &> /dev/null && [ -z "$TMUX" ] && [ -n "$PS1" ]; then' >> "$shell_rc"
-            echo '    tmux new-session -s "mylm-$(date +%s)-$$-$RANDOM"' >> "$shell_rc"
-            echo 'fi' >> "$shell_rc"
+            if [[ "$shell_rc" == *"config.fish" ]]; then
+                echo 'if type -q tmux; and test -z "$TMUX"; and status is-interactive' >> "$shell_rc"
+                echo '    tmux new-session -s "mylm-"(date +%s)"-"(echo %self)"-"(random)' >> "$shell_rc"
+                echo 'end' >> "$shell_rc"
+            else
+                echo 'if command -v tmux &> /dev/null && [ -z "$TMUX" ] && [ -n "$PS1" ]; then' >> "$shell_rc"
+                echo '    tmux new-session -s "mylm-$(date +%s)-$$-$RANDOM"' >> "$shell_rc"
+                echo 'fi' >> "$shell_rc"
+            fi
             echo "$snippet_end" >> "$shell_rc"
 
             echo "✅ Upgraded tmux auto-start snippet in $shell_rc."
@@ -307,9 +434,15 @@ setup_tmux_autostart() {
     if [ -n "$shell_rc" ] && [ -f "$shell_rc" ]; then
         echo "" >> "$shell_rc"
         echo "$snippet_start" >> "$shell_rc"
-        echo 'if command -v tmux &> /dev/null && [ -z "$TMUX" ] && [ -n "$PS1" ]; then' >> "$shell_rc"
-        echo '    tmux new-session -s "mylm-$(date +%s)-$$-$RANDOM"' >> "$shell_rc"
-        echo 'fi' >> "$shell_rc"
+        if [[ "$shell_rc" == *"config.fish" ]]; then
+            echo 'if type -q tmux; and test -z "$TMUX"; and status is-interactive' >> "$shell_rc"
+            echo '    tmux new-session -s "mylm-"(date +%s)"-"(echo %self)"-"(random)' >> "$shell_rc"
+            echo 'end' >> "$shell_rc"
+        else
+            echo 'if command -v tmux &> /dev/null && [ -z "$TMUX" ] && [ -n "$PS1" ]; then' >> "$shell_rc"
+            echo '    tmux new-session -s "mylm-$(date +%s)-$$-$RANDOM"' >> "$shell_rc"
+            echo 'fi' >> "$shell_rc"
+        fi
         echo "$snippet_end" >> "$shell_rc"
         echo "✅ Added tmux auto-start snippet to $shell_rc."
         echo "💡 Changes will take effect in new terminal sessions."
@@ -346,16 +479,9 @@ full_installation() {
         cargo clean
     fi
     
-    # Temporary: Use dev-install.sh for faster iteration during development phase
-    echo "⚠️  Using dev-install.sh for development build..."
-    if [ -f "./dev-install.sh" ]; then
-        chmod +x dev-install.sh
-        ./dev-install.sh
-    else
-        echo "❌ dev-install.sh not found, falling back to standard build..."
-        build_binary "true"
-        install_binary
-    fi
+    build_binary "true"
+    install_binary
+    ensure_path_has_prefix_bin
     setup_shell_alias "true"
     setup_tmux_autostart
     run_setup "true"
@@ -383,17 +509,10 @@ update_existing() {
     fi
 
     check_and_install_dependencies
-    
-    # Temporary: Use dev-install.sh for faster iteration during development phase
-    echo "⚠️  Using dev-install.sh for development build..."
-    if [ -f "./dev-install.sh" ]; then
-        chmod +x dev-install.sh
-        ./dev-install.sh
-    else
-        echo "❌ dev-install.sh not found, falling back to standard build..."
-        build_binary "false"
-        install_binary
-    fi
+
+    build_binary "false"
+    install_binary
+    ensure_path_has_prefix_bin
     
     echo ""
     echo "✅ Update complete! (Your configuration and aliases were preserved)"

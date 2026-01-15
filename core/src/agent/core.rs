@@ -7,7 +7,7 @@ use std::error::Error as StdError;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::sync::Arc;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use regex::Regex;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -20,6 +20,176 @@ pub struct ShortKeyAction {
     pub input: Option<serde_json::Value>,
     #[serde(rename = "f")]
     pub final_answer: Option<String>,
+}
+
+/// Try to parse a [`ShortKeyAction`](core/src/agent/core.rs:14) from arbitrary model output.
+///
+/// This is intentionally defensive because some models/proxies produce:
+/// - fenced JSON blocks (```json ... ```)
+/// - JSON embedded in surrounding prose
+/// - invalid JSON with literal newlines inside string values
+fn parse_short_key_action_from_content(content: &str) -> Option<ShortKeyAction> {
+    // Fast-path: entire content is a JSON object.
+    if let Some(sk) = parse_short_key_action_candidate(content.trim()) {
+        return Some(sk);
+    }
+
+    let mut candidates: Vec<String> = Vec::new();
+    candidates.extend(extract_json_code_fence_blocks(content));
+    candidates.extend(extract_balanced_json_objects(content));
+
+    // Deduplicate; the model can repeat the same JSON multiple times.
+    let mut seen: HashSet<String> = HashSet::new();
+    for c in candidates {
+        let trimmed = c.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !seen.insert(trimmed.to_string()) {
+            continue;
+        }
+        if let Some(sk) = parse_short_key_action_candidate(trimmed) {
+            return Some(sk);
+        }
+    }
+
+    None
+}
+
+fn parse_short_key_action_candidate(candidate: &str) -> Option<ShortKeyAction> {
+    match serde_json::from_str::<ShortKeyAction>(candidate) {
+        Ok(v) => Some(v),
+        Err(_) => {
+            // Some models output invalid JSON with literal newlines inside string values.
+            // Normalize it into valid JSON and try again.
+            let normalized = escape_unescaped_newlines_in_json_strings(candidate);
+            serde_json::from_str::<ShortKeyAction>(&normalized).ok()
+        }
+    }
+}
+
+/// Extract ```json ... ``` blocks.
+///
+/// Important: we terminate only on a *closing fence line* that is exactly ``` (plus whitespace),
+/// so occurrences of ``` inside JSON string values (e.g. markdown in `f`) won't truncate.
+fn extract_json_code_fence_blocks(content: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let lower = content.to_lowercase();
+    let mut search_from = 0usize;
+
+    // Closing fence must be on its own line.
+    let end_fence_re = Regex::new(r"(?m)^[ \t]*```[ \t]*$").expect("valid regex");
+
+    while let Some(rel_start) = lower[search_from..].find("```json") {
+        let fence_start = search_from + rel_start;
+        let after_tag = fence_start + "```json".len();
+
+        // Fenced content begins after the next newline.
+        let content_start = match content[after_tag..].find('\n') {
+            Some(rel_nl) => after_tag + rel_nl + 1,
+            None => break,
+        };
+
+        let hay = &content[content_start..];
+        if let Some(m) = end_fence_re.find(hay) {
+            let end_fence_start = content_start + m.start();
+            blocks.push(content[content_start..end_fence_start].to_string());
+            search_from = content_start + m.end();
+        } else {
+            break;
+        }
+    }
+
+    blocks
+}
+
+/// Extract top-level `{ ... }` candidates by scanning with brace balancing.
+///
+/// Respects JSON strings and escapes, so braces inside strings don't affect balancing.
+fn extract_balanced_json_objects(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+
+    let mut in_string = false;
+    let mut escape = false;
+    let mut depth: i32 = 0;
+    let mut start: Option<usize> = None;
+
+    for (i, ch) in content.char_indices() {
+        if in_string {
+            if escape {
+                escape = false;
+                continue;
+            }
+            match ch {
+                '\\' => escape = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    start = Some(i);
+                }
+                depth += 1;
+            }
+            '}' => {
+                if depth > 0 {
+                    depth -= 1;
+                    if depth == 0 {
+                        if let Some(s) = start.take() {
+                            out.push(content[s..=i].to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    out
+}
+
+/// Convert invalid JSON containing literal newlines inside string values into valid JSON.
+///
+/// Only escapes `\n`/`\r` when inside a JSON string literal.
+fn escape_unescaped_newlines_in_json_strings(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut escape = false;
+
+    for ch in input.chars() {
+        if in_string {
+            if escape {
+                out.push(ch);
+                escape = false;
+                continue;
+            }
+            match ch {
+                '\\' => {
+                    out.push(ch);
+                    escape = true;
+                }
+                '"' => {
+                    out.push(ch);
+                    in_string = false;
+                }
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                _ => out.push(ch),
+            }
+        } else {
+            out.push(ch);
+            if ch == '"' {
+                in_string = true;
+            }
+        }
+    }
+
+    out
 }
 
 /// The decision made by the agent after a step.
@@ -193,79 +363,69 @@ impl Agent {
 
         // --- Process Decision ---
 
-        // 1. Handle Short-Key JSON Protocol (V2)
-        // Look for JSON blocks anywhere in the content.
-        let json_blocks: Vec<&str> = if content.contains("```json") {
-            content.split("```json")
-                .skip(1)
-                .filter_map(|s| s.split("```").next())
-                .map(|s| s.trim())
-                .collect()
-        } else {
-            // Find all potential { ... } blocks
-            let mut blocks = Vec::new();
-            let mut start_idx = 0;
-            while let Some(s) = content[start_idx..].find('{') {
-                let actual_start = start_idx + s;
-                if let Some(e) = content[actual_start..].rfind('}') {
-                    let actual_end = actual_start + e;
-                    blocks.push(&content[actual_start..=actual_end]);
-                    start_idx = actual_end + 1;
-                } else {
-                    break;
-                }
+        // 1. Handle Short-Key JSON Protocol (Preferred)
+        if let Some(sk_action) = parse_short_key_action_from_content(&content) {
+            crate::info_log!("Parsed Action (Short-Key): {:?}", sk_action);
+
+            let thought = sk_action.thought.clone();
+
+            if let Some(final_answer) = sk_action.final_answer {
+                self.history.push(ChatMessage::assistant(content.clone()));
+                return Ok(AgentDecision::Message(
+                    format!("Thought: {}\nFinal Answer: {}", thought, final_answer),
+                    self.total_usage.clone(),
+                ));
             }
-            blocks
-        };
 
-        for block in json_blocks {
-            if let Ok(sk_action) = serde_json::from_str::<ShortKeyAction>(block) {
-                crate::info_log!("Parsed Action (Short-Key): {:?}", sk_action);
-                
-                let thought = sk_action.thought.clone();
-                
-                if let Some(final_answer) = sk_action.final_answer {
-                    self.history.push(ChatMessage::assistant(content.clone()));
-                    return Ok(AgentDecision::Message(format!("Thought: {}\nFinal Answer: {}", thought, final_answer), self.total_usage.clone()));
-                }
-
-                if let Some(tool_name) = sk_action.action {
-                    let tool_name = tool_name.trim();
-                    let args = sk_action.input.map(|v| {
+            if let Some(tool_name) = sk_action.action {
+                let tool_name = tool_name.trim();
+                let args = sk_action
+                    .input
+                    .map(|v| {
                         if v.is_string() {
                             v.as_str().unwrap().to_string()
                         } else {
                             v.to_string()
                         }
-                    }).unwrap_or_default();
+                    })
+                    .unwrap_or_default();
 
-                    // Repetition Check
-                    if let Some((last_tool, last_args)) = &self.last_tool_call {
-                        if last_tool == tool_name && last_args == &args {
-                            self.repetition_count += 1;
-                            if self.repetition_count >= 3 {
-                                return Ok(AgentDecision::Error(format!("Detected repeated tool call to '{}' with identical arguments. Breaking loop.", tool_name)));
-                            }
-                        } else {
-                            self.repetition_count = 0;
+                // Repetition Check
+                if let Some((last_tool, last_args)) = &self.last_tool_call {
+                    if last_tool == tool_name && last_args == &args {
+                        self.repetition_count += 1;
+                        if self.repetition_count >= 3 {
+                            return Ok(AgentDecision::Error(format!(
+                                "Detected repeated tool call to '{}' with identical arguments. Breaking loop.",
+                                tool_name
+                            )));
                         }
+                    } else {
+                        self.repetition_count = 0;
                     }
-                    self.last_tool_call = Some((tool_name.to_string(), args.clone()));
-
-                    let kind = self.tools.get(tool_name).map(|t| t.kind()).unwrap_or(ToolKind::Internal);
-                    
-                    // Add thought to history if it's substantial
-                    self.history.push(ChatMessage::assistant(content.clone()));
-
-                    let action = AgentDecision::Action {
-                        tool: tool_name.to_string(),
-                        args,
-                        kind,
-                    };
-
-                    self.pending_decision = Some(action);
-                    return Ok(AgentDecision::Message(format!("Thought: {}", thought), self.total_usage.clone()));
                 }
+                self.last_tool_call = Some((tool_name.to_string(), args.clone()));
+
+                let kind = self
+                    .tools
+                    .get(tool_name)
+                    .map(|t| t.kind())
+                    .unwrap_or(ToolKind::Internal);
+
+                // Add full assistant content to history
+                self.history.push(ChatMessage::assistant(content.clone()));
+
+                let action = AgentDecision::Action {
+                    tool: tool_name.to_string(),
+                    args,
+                    kind,
+                };
+
+                self.pending_decision = Some(action);
+                return Ok(AgentDecision::Message(
+                    format!("Thought: {}", thought),
+                    self.total_usage.clone(),
+                ));
             }
         }
 
