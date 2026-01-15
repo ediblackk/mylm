@@ -82,6 +82,7 @@ pub async fn create_agent_for_session(
         tools,
         system_prompt,
         config.agent.max_iterations,
+        config.agent.version,
         Some(store),
         Some(categorizer),
     ))

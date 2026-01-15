@@ -30,10 +30,10 @@ pub struct LlmConfig {
     pub temperature: Option<f32>,
     /// System prompt for the model
     pub system_prompt: Option<String>,
-    /// Cost per 1000 input tokens
-    pub input_price_per_1k: f64,
-    /// Cost per 1000 output tokens
-    pub output_price_per_1k: f64,
+    /// Cost per 1,000,000 input tokens
+    pub input_price_per_1m: f64,
+    /// Cost per 1,000,000 output tokens
+    pub output_price_per_1m: f64,
     /// Maximum context tokens
     pub max_context_tokens: usize,
     /// Condense threshold (0.0 - 1.0)
@@ -61,8 +61,8 @@ impl LlmConfig {
             max_tokens: Some(4096),
             temperature: Some(0.7),
             system_prompt: None,
-            input_price_per_1k: 0.0,
-            output_price_per_1k: 0.0,
+            input_price_per_1m: 0.0,
+            output_price_per_1m: 0.0,
             max_context_tokens: 32768,
             condense_threshold: 0.8,
             memory: crate::config::MemoryConfig::default(),
@@ -71,9 +71,9 @@ impl LlmConfig {
     }
 
     /// Set pricing
-    pub fn with_pricing(mut self, input_1k: f64, output_1k: f64) -> Self {
-        self.input_price_per_1k = input_1k;
-        self.output_price_per_1k = output_1k;
+    pub fn with_pricing(mut self, input_1m: f64, output_1m: f64) -> Self {
+        self.input_price_per_1m = input_1m;
+        self.output_price_per_1m = output_1m;
         self
     }
 

@@ -162,9 +162,36 @@ fn default_true() -> bool {
     true
 }
 
+/// Agent version/loop implementation
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub enum AgentVersion {
+    /// Classic ReAct loop (V1)
+    V1,
+    /// Multi-layered cognitive architecture (V2)
+    V2,
+}
+
+impl Default for AgentVersion {
+    fn default() -> Self {
+        AgentVersion::V1
+    }
+}
+
+impl std::fmt::Display for AgentVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentVersion::V1 => write!(f, "V1 (Classic ReAct)"),
+            AgentVersion::V2 => write!(f, "V2 (Cognitive Submodule)"),
+        }
+    }
+}
+
 /// Agent configuration
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AgentConfig {
+    /// Version of the agent loop to use
+    #[serde(default)]
+    pub version: AgentVersion,
     /// Maximum number of iterations for the agent
     #[serde(default = "default_max_iterations")]
     pub max_iterations: usize,
@@ -176,6 +203,7 @@ pub struct AgentConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
+            version: AgentVersion::default(),
             max_iterations: default_max_iterations(),
             max_driver_loops: default_max_driver_loops(),
         }
@@ -368,8 +396,8 @@ impl Config {
         }
 
         let mut timeout_seconds = 60;
-        let mut input_price_per_1k = 0.0;
-        let mut output_price_per_1k = 0.0;
+        let mut input_price_per_1m = 0.0;
+        let mut output_price_per_1m = 0.0;
         let mut max_context_tokens = 32768;
         let mut condense_threshold = 0.8;
 
@@ -383,14 +411,14 @@ impl Config {
                 .default(timeout_seconds)
                 .interact_text()?;
 
-            input_price_per_1k = Input::with_theme(&theme)
-                .with_prompt("Input price per 1k tokens ($)")
-                .default(input_price_per_1k)
+            input_price_per_1m = Input::with_theme(&theme)
+                .with_prompt("Input price per 1M tokens ($)")
+                .default(input_price_per_1m)
                 .interact_text()?;
 
-            output_price_per_1k = Input::with_theme(&theme)
-                .with_prompt("Output price per 1k tokens ($)")
-                .default(output_price_per_1k)
+            output_price_per_1m = Input::with_theme(&theme)
+                .with_prompt("Output price per 1M tokens ($)")
+                .default(output_price_per_1m)
                 .interact_text()?;
 
             max_context_tokens = Input::with_theme(&theme)
@@ -411,8 +439,8 @@ impl Config {
             model,
             api_key,
             timeout_seconds,
-            input_price_per_1k,
-            output_price_per_1k,
+            input_price_per_1m,
+            output_price_per_1m,
             max_context_tokens,
             condense_threshold,
         };
@@ -443,6 +471,7 @@ impl Config {
                 format!("Auto-approve:  {}", if self.commands.allow_execution { "Enabled" } else { "Disabled" }),
                 format!("Allowed Commands: {}", self.commands.allowed_commands.len()),
                 format!("Blocked Commands: {}", self.commands.blocked_commands.len()),
+                format!("Agent Version:  {}", self.agent.version),
                 format!("Max Iterations: {} (steps per request)", self.agent.max_iterations),
                 format!("Max Driver Loops: {} (session safety limit)", self.agent.max_driver_loops),
                 format!("Context Profile: {}", self.context_profile),
@@ -493,18 +522,39 @@ impl Config {
                     )?;
                 }
                 5 => {
+                    let mut versions = vec![AgentVersion::V1];
+                    if check_v2_binary_exists() {
+                        versions.push(AgentVersion::V2);
+                    }
+                    
+                    if versions.len() > 1 {
+                        let items: Vec<String> = versions.iter().map(|v| v.to_string()).collect();
+                        let current_idx = versions.iter().position(|v| v == &self.agent.version).unwrap_or(0);
+                        
+                        let idx = Select::with_theme(&theme)
+                            .with_prompt("Select Agent Version")
+                            .items(&items)
+                            .default(current_idx)
+                            .interact()?;
+                        self.agent.version = versions[idx];
+                    } else {
+                        println!("ℹ️ Only V1 is available. V2 binary ('mylm-v2') not found.");
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+                6 => {
                     self.agent.max_iterations = Input::with_theme(&theme)
                         .with_prompt("Max steps (thoughts/actions) per single user request")
                         .default(self.agent.max_iterations)
                         .interact_text()?;
                 }
-                6 => {
+                7 => {
                     self.agent.max_driver_loops = Input::with_theme(&theme)
                         .with_prompt("Safety limit: max total exchanges in one session")
                         .default(self.agent.max_driver_loops)
                         .interact_text()?;
                 }
-                7 => {
+                8 => {
                     let profiles = vec![
                         ContextProfile::Minimal,
                         ContextProfile::Balanced,
@@ -518,12 +568,12 @@ impl Config {
                         .interact()?;
                     self.context_profile = profiles[idx];
                 }
-                8 => {
+                9 => {
                     self.memory.auto_record = !self.memory.auto_record;
                     self.memory.auto_context = self.memory.auto_record;
                     self.memory.auto_categorize = self.memory.auto_record;
                 }
-                9 => {
+                10 => {
                     self.memory.auto_categorize = !self.memory.auto_categorize;
                 }
                 _ => break,
@@ -677,6 +727,19 @@ fn get_config_dir() -> Option<PathBuf> {
     None
 }
 
+/// Check if V2 plugin binary exists
+pub fn check_v2_binary_exists() -> bool {
+    let binary_name = if cfg!(windows) { "mylm-v2.exe" } else { "mylm-v2" };
+    
+    let paths = [
+        PathBuf::from(binary_name),
+        PathBuf::from("./").join(binary_name),
+        PathBuf::from("plugins").join(binary_name),
+    ];
+    
+    paths.iter().any(|p| p.exists())
+}
+
 /// Helper to fetch models from various providers
 async fn fetch_models_from_provider(
     provider: &str,
@@ -767,8 +830,8 @@ pub fn create_default_config() -> Config {
                 model: "llama3.2".to_string(),
                 api_key: "none".to_string(),
                 timeout_seconds: 120,
-                input_price_per_1k: 0.0,
-                output_price_per_1k: 0.0,
+                input_price_per_1m: 0.0,
+                output_price_per_1m: 0.0,
                 max_context_tokens: 32768,
                 condense_threshold: 0.8,
             },
@@ -779,8 +842,8 @@ pub fn create_default_config() -> Config {
                 model: "gpt-4o".to_string(),
                 api_key: "".to_string(),
                 timeout_seconds: 60,
-                input_price_per_1k: 0.0025,
-                output_price_per_1k: 0.01,
+                input_price_per_1m: 2.5,
+                output_price_per_1m: 10.0,
                 max_context_tokens: 128000,
                 condense_threshold: 0.8,
             },
@@ -791,8 +854,8 @@ pub fn create_default_config() -> Config {
                 model: "qwen2.5-3b".to_string(),
                 api_key: "none".to_string(),
                 timeout_seconds: 120,
-                input_price_per_1k: 0.0,
-                output_price_per_1k: 0.0,
+                input_price_per_1m: 0.0,
+                output_price_per_1m: 0.0,
                 max_context_tokens: 32768,
                 condense_threshold: 0.8,
             },

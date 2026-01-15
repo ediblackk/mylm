@@ -43,13 +43,13 @@ pub struct EndpointConfig {
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
 
-    /// Cost per 1000 input tokens (in USD)
+    /// Cost per 1,000,000 input tokens (in USD)
     #[serde(default = "default_price")]
-    pub input_price_per_1k: f64,
+    pub input_price_per_1m: f64,
 
-    /// Cost per 1000 output tokens (in USD)
+    /// Cost per 1,000,000 output tokens (in USD)
     #[serde(default = "default_price")]
-    pub output_price_per_1k: f64,
+    pub output_price_per_1m: f64,
 
     /// Maximum tokens for the context window
     #[serde(default = "default_max_context")]
@@ -239,8 +239,8 @@ impl EndpointConfig {
             model: "llama3.2".to_string(),
             api_key: "none".to_string(),
             timeout_seconds: 120,
-            input_price_per_1k: 0.0,
-            output_price_per_1k: 0.0,
+            input_price_per_1m: 0.0,
+            output_price_per_1m: 0.0,
             max_context_tokens: 32768,
             condense_threshold: 0.8,
         }
@@ -256,8 +256,8 @@ impl EndpointConfig {
             model: "gpt-4o".to_string(),
             api_key: String::new(),
             timeout_seconds: 60,
-            input_price_per_1k: 0.0025, // GPT-4o input
-            output_price_per_1k: 0.01,   // GPT-4o output
+            input_price_per_1m: 2.5, // GPT-4o input ($2.5 per 1M)
+            output_price_per_1m: 10.0,  // GPT-4o output ($10 per 1M)
             max_context_tokens: 128000,
             condense_threshold: 0.8,
         }

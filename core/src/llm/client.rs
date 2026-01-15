@@ -128,16 +128,20 @@ impl LlmClient {
 
         match response.status() {
             StatusCode::OK => {
-                let response_body: OpenAiResponse = response
-                    .json()
-                    .await
-                    .context("Failed to parse OpenAI response")?;
+                let text = response.text().await.context("Failed to read OpenAI response text")?;
+                let response_body: OpenAiResponse = match serde_json::from_str(&text) {
+                    Ok(body) => body,
+                    Err(e) => {
+                        crate::error_log!("Failed to parse OpenAI response: {}. Raw body: {}", e, text);
+                        bail!("Failed to parse OpenAI response: {}. See /logs for raw body.", e);
+                    }
+                };
                 
                 let choices = response_body.choices.into_iter().map(|c| Choice {
                     index: c.index,
                     message: ChatMessage {
                         role: super::chat::MessageRole::Assistant,
-                        content: c.message.content,
+                        content: c.message.content.unwrap_or_default(),
                         name: None,
                         tool_call_id: None,
                         tool_calls: c.message.tool_calls.as_ref().map(|tcs| tcs.iter().map(|tc| crate::llm::chat::ToolCall {
@@ -158,10 +162,10 @@ impl LlmClient {
                     created: response_body.created,
                     model: response_body.model,
                     choices,
-                    usage: Some(Usage {
-                        prompt_tokens: response_body.usage.prompt_tokens,
-                        completion_tokens: response_body.usage.completion_tokens,
-                        total_tokens: response_body.usage.total_tokens,
+                    usage: response_body.usage.map(|u| Usage {
+                        prompt_tokens: u.prompt_tokens,
+                        completion_tokens: u.completion_tokens,
+                        total_tokens: u.total_tokens,
                     }),
                 })
             }
@@ -572,19 +576,26 @@ struct OpenAiFunction {
 #[derive(Deserialize)]
 #[allow(dead_code)]
 struct OpenAiResponse {
+    #[serde(default)]
     id: String,
+    #[serde(default)]
     object: String,
+    #[serde(default)]
     created: u64,
+    #[serde(default)]
     model: String,
     choices: Vec<OpenAiChoice>,
-    usage: OpenAiUsage,
+    #[serde(default)]
+    usage: Option<OpenAiUsage>,
 }
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
 struct OpenAiChoice {
+    #[serde(default)]
     index: u32,
     message: OpenAiMessage,
+    #[serde(default)]
     finish_reason: Option<String>,
 }
 
@@ -592,8 +603,9 @@ struct OpenAiChoice {
 #[allow(dead_code)]
 struct OpenAiMessage {
     role: String,
-    content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
     tool_calls: Option<Vec<OpenAiResponseToolCall>>,
 }
 

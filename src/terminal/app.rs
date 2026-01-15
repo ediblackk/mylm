@@ -82,13 +82,18 @@ pub struct App {
     pub show_memory_view: bool,
     pub memory_graph: MemoryGraph,
     pub memory_graph_scroll: usize,
+    pub last_total_chat_lines: Option<usize>,
+    pub show_help_view: bool,
+    pub update_available: bool,
+    pub clipboard: Option<arboard::Clipboard>,
+    pub exit_name_input: String,
 }
 
 impl App {
     pub fn new(pty_manager: PtyManager, agent: Agent, config: mylm_core::config::Config) -> Self {
         let max_ctx = agent.llm_client.config().max_context_tokens;
-        let input_price = agent.llm_client.config().input_price_per_1k;
-        let output_price = agent.llm_client.config().output_price_per_1k;
+        let input_price = agent.llm_client.config().input_price_per_1m;
+        let output_price = agent.llm_client.config().output_price_per_1m;
         
         let mut session_monitor = SessionMonitor::new();
         session_monitor.set_max_context(max_ctx as u32);
@@ -138,6 +143,11 @@ impl App {
             show_memory_view: false,
             memory_graph: MemoryGraph::default(),
             memory_graph_scroll: 0,
+            last_total_chat_lines: None,
+            show_help_view: false,
+            update_available: false,
+            clipboard: arboard::Clipboard::new().ok(),
+            exit_name_input: String::new(),
         }
     }
 
@@ -305,14 +315,27 @@ impl App {
     }
 
     pub fn abort_current_task(&mut self) {
+        mylm_core::info_log!("App: Aborting current task");
         if let Some(task) = self.active_task.take() {
             if !task.is_finished() {
                 task.abort();
                 self.status_message = Some("⛔ Task interrupted by user.".to_string());
                 self.interrupt_flag.store(true, Ordering::SeqCst);
             }
-            self.state = AppState::Idle;
         }
+        
+        if let Some(tx) = self.pending_command_tx.take() {
+            mylm_core::debug_log!("App: Aborting pending terminal command");
+            let _ = tx.send("Error: Command aborted by user".to_string());
+            
+            // Try to recover terminal state if we were capturing
+            if self.capturing_command_output {
+                let _ = self.pty_manager.write_all(&[3, 13]); // Ctrl+C, Enter
+                let _ = self.pty_manager.write_all(b"stty echo\r");
+            }
+        }
+        self.capturing_command_output = false;
+        self.state = AppState::Idle;
     }
 
     fn handle_slash_command(&mut self, input: &str, event_tx: mpsc::UnboundedSender<TuiEvent>) {
@@ -417,12 +440,36 @@ impl App {
                 self.active_task = Some(task);
             }
             "/help" => {
-                self.chat_history.push(ChatMessage::assistant("Available commands:\n/profile <name> - Switch profile\n/config <key> <value> - Update active profile\n/exec <command> - Execute shell command\n/verbose - Toggle verbose mode\n/help - Show this help".to_string()));
+                self.chat_history.push(ChatMessage::assistant(
+                    "Available commands:\n\
+                    /profile <name> - Switch profile\n\
+                    /config <key> <value> - Update active profile\n\
+                    /exec <command> - Execute shell command\n\
+                    /verbose - Toggle verbose mode\n\
+                    /help - Show this help\n\n\
+                    Input Shortcuts:\n\
+                    Ctrl+a / Home - Start of line\n\
+                    Ctrl+e / End - End of line\n\
+                    Ctrl+k - Kill to end\n\
+                    Ctrl+u - Kill to start\n\
+                    Arrows - Navigate lines/history"
+                    .to_string()
+                ));
             }
             "/verbose" => {
                 self.verbose_mode = !self.verbose_mode;
                 let status = if self.verbose_mode { "ON" } else { "OFF" };
                 self.chat_history.push(ChatMessage::assistant(format!("Verbose mode: {}", status)));
+            }
+            "/logs" => {
+                let n = parts.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(20);
+                let logs = mylm_core::agent::logger::get_recent_logs(n);
+                let log_text = if logs.is_empty() {
+                    "No logs found.".to_string()
+                } else {
+                    logs.join("\n")
+                };
+                self.chat_history.push(ChatMessage::assistant(format!("Recent Logs (last {}):\n{}", n, log_text)));
             }
             _ => {
                 self.chat_history.push(ChatMessage::assistant(format!("Unknown command: {}", cmd)));
@@ -475,7 +522,7 @@ impl App {
         }
     }
 
-    pub fn save_session(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save_session(&self, custom_name: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
         let data_dir = dirs::data_dir()
             .ok_or("Could not find data directory")?
             .join("mylm")
@@ -490,9 +537,10 @@ impl App {
             .map(|m| m.content.chars().take(100).collect::<String>())
             .unwrap_or_else(|| "New Session".to_string());
 
+        let now = chrono::Utc::now();
         let session = crate::terminal::session::Session {
-            id: self.session_id.clone(),
-            timestamp: chrono::Utc::now(),
+            id: custom_name.clone().unwrap_or_else(|| self.session_id.clone()),
+            timestamp: now,
             history: self.chat_history.clone(),
             metadata: crate::terminal::session::SessionMetadata {
                 last_message_preview: preview,
@@ -509,7 +557,16 @@ impl App {
         let content = serde_json::to_string_pretty(&session)?;
         
         // Save unique file
-        let filename = format!("session_{}.json", self.session_id);
+        let filename = match custom_name {
+            Some(name) => {
+                let safe_name = name.chars()
+                    .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+                    .collect::<String>();
+                format!("session_{}_{}.json", safe_name, now.format("%Y%m%d_%H%M%S"))
+            },
+            None => format!("session_{}.json", now.format("%Y%m%d_%H%M%S")),
+        };
+        
         let path = data_dir.join(filename);
         std::fs::write(&path, &content)?;
 
@@ -571,16 +628,28 @@ impl App {
     }
 
     pub fn copy_text_to_clipboard(&mut self, text: String) {
-        match arboard::Clipboard::new() {
-            Ok(mut clipboard) => {
+        let clipboard_res = if let Some(cb) = &mut self.clipboard {
+            Ok(cb)
+        } else {
+            match arboard::Clipboard::new() {
+                Ok(cb) => {
+                    self.clipboard = Some(cb);
+                    Ok(self.clipboard.as_mut().unwrap())
+                }
+                Err(e) => Err(e),
+            }
+        };
+
+        match clipboard_res {
+            Ok(clipboard) => {
                 if let Err(e) = clipboard.set_text(text) {
-                    self.status_message = Some(format!("Clipboard error: {}", e));
+                    self.status_message = Some(format!("❌ Clipboard error: {}", e));
                 } else {
-                    self.status_message = Some("Copied to clipboard".to_string());
+                    self.status_message = Some("📋 Copied to clipboard".to_string());
                 }
             },
             Err(e) => {
-                 self.status_message = Some(format!("Clipboard init error: {}", e));
+                 self.status_message = Some(format!("❌ Clipboard error: {}", e));
             }
         }
     }
@@ -591,7 +660,7 @@ impl App {
             // We'll just copy the content directly as that's usually what is desired.
             self.copy_text_to_clipboard(msg.content.clone());
         } else {
-            self.status_message = Some("No AI response to copy".to_string());
+            self.status_message = Some("⚠️ No AI response to copy".to_string());
         }
     }
 
@@ -645,7 +714,6 @@ async fn run_agent_loop(
     mut last_observation: Option<String>,
 ) {
     let mut loop_iteration = 0;
-    let mut consecutive_thoughts = 0;
     let mut retry_count = 0;
     let max_retries = 3;
 
@@ -703,40 +771,19 @@ async fn run_agent_loop(
             Ok(AgentDecision::Message(msg, usage)) => {
                 let has_pending = agent_lock.has_pending_decision();
                 if has_pending {
-                    consecutive_thoughts = 0;
                     retry_count = 0;
                     let _ = event_tx.send(TuiEvent::AgentResponse(msg, usage));
                     drop(agent_lock);
                     continue;
                 }
 
-                if msg.contains("Final Answer:") {
-                    let _ = event_tx.send(TuiEvent::AgentResponseFinal(msg, usage));
-                    break;
-                }
-                
-                // If it looks like a question to the user, we should stop and wait for input.
-                if msg.trim().ends_with('?') || msg.contains("Please") || msg.contains("Would you") {
-                    let _ = event_tx.send(TuiEvent::AgentResponseFinal(msg, usage));
-                    break;
-                }
-
-                consecutive_thoughts += 1;
-                if consecutive_thoughts >= 3 {
-                    let _ = event_tx.send(TuiEvent::AgentResponse(msg, usage));
-                    let _ = event_tx.send(TuiEvent::AgentResponseFinal("⚠️ Agent is talking without taking action. Stopping to prevent loop. Please try again with a more specific command.".to_string(), TokenUsage::default()));
-                    let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Idle));
-                    break;
-                }
-
-                // Otherwise, treat as a Thought and nudge to continue if not finished.
-                let _ = event_tx.send(TuiEvent::AgentResponse(msg, usage));
-                last_observation = Some("Observation: No Action or Final Answer detected. You MUST follow the ReAct format (Thought, Action, Action Input). If you have reached a conclusion, provide a 'Final Answer:'. Do not just talk; interact with the system using tools if needed.".to_string());
-                drop(agent_lock);
-                continue;
+                // If the model produced a message and no tool action is pending,
+                // we treat it as a terminal conversational response.
+                // This prevents "nudge" loops when the model answers without an explicit 'Final Answer:' tag.
+                let _ = event_tx.send(TuiEvent::AgentResponseFinal(msg, usage));
+                break;
             }
             Ok(AgentDecision::Action { tool, args, kind }) => {
-                consecutive_thoughts = 0;
                 retry_count = 0;
                 let _ = event_tx.send(TuiEvent::StatusUpdate(format!("Tool: '{}'", tool)));
                 let _ = event_tx.send(TuiEvent::ActivityUpdate {
@@ -793,6 +840,7 @@ async fn run_agent_loop(
                             }
                         }
                         Err(_) => {
+                            mylm_core::error_log!("run_agent_loop: Terminal command execution failed (channel closed) for cmd: {}", cmd);
                             last_observation = Some("Error: Terminal command execution failed (channel closed)".to_string());
                         }
                     }
@@ -885,12 +933,14 @@ async fn run_agent_loop(
                 }
             }
             Ok(AgentDecision::Error(e)) => {
-                let _ = event_tx.send(TuiEvent::AgentResponseFinal(format!("Error: {}", e), TokenUsage::default()));
+                mylm_core::error_log!("Agent Decision Error: {}", e);
+                let _ = event_tx.send(TuiEvent::AgentResponseFinal(format!("❌ Agent Error: {}", e), TokenUsage::default()));
                 let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Error(e)));
                 break;
             }
             Err(e) => {
-                let _ = event_tx.send(TuiEvent::AgentResponseFinal(format!("Error: {}", e), TokenUsage::default()));
+                mylm_core::error_log!("Agent Loop Error: {}", e);
+                let _ = event_tx.send(TuiEvent::AgentResponseFinal(format!("❌ System Error: {}", e), TokenUsage::default()));
                 let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Error(e.to_string())));
                 break;
             }

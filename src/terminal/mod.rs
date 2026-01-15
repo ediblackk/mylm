@@ -30,7 +30,7 @@ use std::{io, time::Duration};
 use tokio::sync::mpsc;
 use std::sync::atomic::Ordering;
 
-pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>, initial_query: Option<String>, initial_context: Option<TerminalContext>, initial_terminal_context: Option<mylm_core::context::terminal::TerminalContext>) -> Result<()> {
+pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>, initial_query: Option<String>, initial_context: Option<TerminalContext>, initial_terminal_context: Option<mylm_core::context::terminal::TerminalContext>, update_available: bool) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -63,7 +63,7 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
         endpoint_config.model.clone(),
         Some(endpoint_config.api_key.clone()),
     )
-    .with_pricing(endpoint_config.input_price_per_1k, endpoint_config.output_price_per_1k)
+    .with_pricing(endpoint_config.input_price_per_1m, endpoint_config.output_price_per_1m)
     .with_context_management(effective_context_limit, endpoint_config.condense_threshold)
     .with_memory(config.memory.clone());
     let llm_client = std::sync::Arc::new(LlmClient::new(llm_config)?);
@@ -81,10 +81,15 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
         TerminalContext::collect().await
     };
     
-    let data_dir = dirs::data_dir()
+    let base_data_dir = dirs::data_dir()
         .context("Could not find data directory")?
-        .join("mylm")
-        .join("memory");
+        .join("mylm");
+    
+    // Initialize Debug Logger
+    mylm_core::agent::logger::init(base_data_dir.clone());
+    mylm_core::info_log!("mylm starting up...");
+
+    let data_dir = base_data_dir.join("memory");
     std::fs::create_dir_all(&data_dir)?;
     let store = std::sync::Arc::new(mylm_core::memory::VectorStore::new(data_dir.to_str().unwrap()).await?);
     let categorizer = std::sync::Arc::new(mylm_core::memory::categorizer::MemoryCategorizer::new(llm_client.clone(), store.clone()));
@@ -123,13 +128,22 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
     tools.push(Box::new(GitDiffTool) as Box<dyn Tool>);
 
     // Create Agent
-    let agent = Agent::new_with_iterations(llm_client, tools, system_prompt, config.agent.max_iterations, Some(store.clone()), Some(categorizer.clone()));
+    let agent = Agent::new_with_iterations(
+        llm_client,
+        tools,
+        system_prompt,
+        config.agent.max_iterations,
+        config.agent.version,
+        Some(store.clone()),
+        Some(categorizer.clone())
+    );
 
     // Setup PTY with context CWD
     let (pty_manager, mut pty_rx) = spawn_pty(context.cwd.clone())?;
 
     // Create app state
     let mut app = App::new(pty_manager, agent, config);
+    app.update_available = update_available;
     
     // Resize app to current terminal size before injecting context
     // This ensures vt100 parser wraps lines correctly for our TUI panes.
@@ -237,8 +251,10 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
         state_store,
     ).await;
 
-    // Save session on exit
-    let _ = app.save_session();
+    // Save session on exit as fallback (only if not already handled)
+    if !app.should_quit {
+        let _ = app.save_session(None);
+    }
 
     // Restore terminal
     disable_raw_mode()?;
@@ -477,13 +493,13 @@ async fn run_loop(
                             endpoint_config.model.clone(),
                             Some(endpoint_config.api_key.clone()),
                         )
-                        .with_pricing(endpoint_config.input_price_per_1k, endpoint_config.output_price_per_1k)
+                        .with_pricing(endpoint_config.input_price_per_1m, endpoint_config.output_price_per_1m)
                         .with_context_management(effective_context_limit, endpoint_config.condense_threshold)
                         .with_memory(new_config.memory.clone());
                         
                         if let Ok(llm_client) = LlmClient::new(llm_config) {
-                            app.input_price = endpoint_config.input_price_per_1k;
-                            app.output_price = endpoint_config.output_price_per_1k;
+                            app.input_price = endpoint_config.input_price_per_1m;
+                            app.output_price = endpoint_config.output_price_per_1m;
                             app.session_monitor.set_max_context(effective_context_limit as u32);
                             
                             let llm_client = std::sync::Arc::new(llm_client);
@@ -540,6 +556,14 @@ async fn run_loop(
                     }
                 }
                 TuiEvent::ExecuteTerminalCommand(cmd, tx) => {
+                    mylm_core::info_log!("TUI: Starting terminal command execution: {}", cmd);
+                    
+                    // If there was a pending command, drop it (sends error to rx)
+                    if let Some(old_tx) = app.pending_command_tx.take() {
+                        mylm_core::debug_log!("TUI: Cancelling previous pending command tx");
+                        let _ = old_tx.send("Error: Command cancelled by new execution".to_string());
+                    }
+
                     app.capturing_command_output = true;
                     app.command_output_buffer.clear();
                     app.pending_command_tx = Some(tx);
@@ -555,7 +579,13 @@ async fn run_loop(
                     app.pending_echo_suppression = wrapped_cmd.clone();
                     app.pending_clean_command = Some(cmd.clone());
                     
-                    let _ = app.pty_manager.write_all(wrapped_cmd.as_bytes());
+                    if let Err(e) = app.pty_manager.write_all(wrapped_cmd.as_bytes()) {
+                        mylm_core::error_log!("TUI: Failed to write to PTY: {}", e);
+                        if let Some(tx) = app.pending_command_tx.take() {
+                            let _ = tx.send(format!("Error: Failed to write to PTY: {}", e));
+                        }
+                        app.capturing_command_output = false;
+                    }
                 }
                 TuiEvent::GetTerminalScreen(tx) => {
                     let screen = app.terminal_parser.screen();
@@ -599,6 +629,12 @@ async fn run_loop(
                 TuiEvent::Input(ev) => {
                     match ev {
                         CrosstermEvent::Key(key) => {
+                            // Global Help View Toggle (F1)
+                            if key.code == KeyCode::F(1) {
+                                app.show_help_view = !app.show_help_view;
+                                continue;
+                            }
+
                             // Global Focus Toggle (F2) - Works everywhere
                             if key.code == KeyCode::F(2) {
                                 app.toggle_focus();
@@ -682,10 +718,12 @@ async fn run_loop(
                                         match key.code {
                                             KeyCode::Char('y') => {
                                                 app.copy_last_ai_response_to_clipboard();
+                                                let _ = terminal.clear();
                                                 continue;
                                             }
                                             KeyCode::Char('b') => {
                                                 app.copy_terminal_buffer_to_clipboard();
+                                                let _ = terminal.clear();
                                                 continue;
                                             }
                                             KeyCode::Char('v') => {
@@ -697,16 +735,41 @@ async fn run_loop(
                                                 continue;
                                             }
                                             KeyCode::Char('a') => {
+                                                // Always toggle auto-approve on Ctrl+A
                                                 let current = app.auto_approve.load(Ordering::SeqCst);
                                                 app.auto_approve.store(!current, Ordering::SeqCst);
+                                                
+                                                // If we're in a state with an input field, also move cursor to home
+                                                if app.state == AppState::Idle || app.state == AppState::WaitingForUser || app.state == AppState::NamingSession {
+                                                    app.move_cursor_home();
+                                                }
+                                                continue;
+                                            }
+                                            KeyCode::Char('e') => {
+                                                app.move_cursor_end();
+                                                continue;
+                                            }
+                                            KeyCode::Char('k') => {
+                                                // Kill line from cursor
+                                                let chars: Vec<char> = app.chat_input.chars().collect();
+                                                if app.cursor_position < chars.len() {
+                                                    app.chat_input = chars.into_iter().take(app.cursor_position).collect();
+                                                }
+                                                continue;
+                                            }
+                                            KeyCode::Char('u') => {
+                                                // Kill line to cursor
+                                                let chars: Vec<char> = app.chat_input.chars().collect();
+                                                if app.cursor_position > 0 {
+                                                    app.chat_input = chars.into_iter().skip(app.cursor_position).collect();
+                                                    app.cursor_position = 0;
+                                                }
                                                 continue;
                                             }
                                             KeyCode::Char('c') => {
-                                                if app.state != AppState::Idle {
+                                                if app.state != AppState::Idle && app.state != AppState::WaitingForUser {
                                                     app.abort_current_task();
                                                     continue;
-                                                } else {
-                                                    return Ok(());
                                                 }
                                             }
                                             _ => {}
@@ -734,14 +797,31 @@ async fn run_loop(
                                                 if app.show_memory_view {
                                                     app.memory_graph_scroll = app.memory_graph_scroll.saturating_sub(1);
                                                 } else {
-                                                    app.scroll_chat_up();
+                                                    // Move cursor up in input if multi-line
+                                                    let width = terminal.size().ok().map(|s| s.width).unwrap_or(80);
+                                                    let input_width = ((width as f32 * 0.3) as usize).saturating_sub(2);
+                                                    let (x, y) = crate::terminal::ui::calculate_input_cursor_pos(&app.chat_input, app.cursor_position, input_width);
+                                                    if y > 0 {
+                                                        app.cursor_position = crate::terminal::ui::find_idx_from_coords(&app.chat_input, x, y - 1, input_width);
+                                                    } else {
+                                                        app.scroll_chat_up();
+                                                    }
                                                 }
                                             }
                                             KeyCode::Down => {
                                                 if app.show_memory_view {
                                                     app.memory_graph_scroll = app.memory_graph_scroll.saturating_add(1);
                                                 } else {
-                                                    app.scroll_chat_down();
+                                                    // Move cursor down in input if multi-line
+                                                    let width = terminal.size().ok().map(|s| s.width).unwrap_or(80);
+                                                    let input_width = ((width as f32 * 0.3) as usize).saturating_sub(2);
+                                                    let (x, y) = crate::terminal::ui::calculate_input_cursor_pos(&app.chat_input, app.cursor_position, input_width);
+                                                    let wrapped = crate::terminal::ui::wrap_text(&app.chat_input, input_width);
+                                                    if (y as usize) < wrapped.len().saturating_sub(1) {
+                                                        app.cursor_position = crate::terminal::ui::find_idx_from_coords(&app.chat_input, x, y + 1, input_width);
+                                                    } else {
+                                                        app.scroll_chat_down();
+                                                    }
                                                 }
                                             }
                                             KeyCode::PageUp => {
@@ -750,13 +830,56 @@ async fn run_loop(
                                             KeyCode::PageDown => {
                                                 for _ in 0..10 { app.scroll_chat_down(); }
                                             }
-                                            KeyCode::Esc => app.toggle_focus(),
+                                            KeyCode::Esc => {
+                                                app.set_state(AppState::ConfirmExit);
+                                            },
+                                            _ => {}
+                                        }
+                                    } else if app.state == AppState::ConfirmExit {
+                                        match key.code {
+                                            KeyCode::Char('s') | KeyCode::Char('S') => {
+                                                app.set_state(AppState::NamingSession);
+                                            }
+                                            KeyCode::Char('e') | KeyCode::Char('E') => {
+                                                app.should_quit = true; // We set this to avoid the fallback save
+                                                return Ok(());
+                                            }
+                                            KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
+                                                app.set_state(AppState::Idle);
+                                            }
+                                            _ => {}
+                                        }
+                                    } else if app.state == AppState::NamingSession {
+                                        match key.code {
+                                            KeyCode::Enter => {
+                                                let name = if app.exit_name_input.trim().is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(app.exit_name_input.trim().to_string())
+                                                };
+                                                let _ = app.save_session(name);
+                                                app.should_quit = true;
+                                                return Ok(());
+                                            }
+                                            KeyCode::Esc => {
+                                                app.set_state(AppState::ConfirmExit);
+                                            }
+                                            KeyCode::Char(c) => {
+                                                app.exit_name_input.push(c);
+                                            }
+                                            KeyCode::Backspace => {
+                                                app.exit_name_input.pop();
+                                            }
                                             _ => {}
                                         }
                                     } else {
                                         match key.code {
                                             KeyCode::Esc => {
-                                                app.interrupt_flag.store(true, Ordering::SeqCst);
+                                                if app.state != AppState::Idle && app.state != AppState::WaitingForUser {
+                                                     app.interrupt_flag.store(true, Ordering::SeqCst);
+                                                } else {
+                                                     app.set_state(AppState::ConfirmExit);
+                                                }
                                             }
                                             KeyCode::Up => app.scroll_chat_up(),
                                             KeyCode::Down => app.scroll_chat_down(),

@@ -58,7 +58,6 @@ pub async fn build_system_prompt(
 ) -> Result<String> {
     let identity = get_identity_prompt();
     let user_instructions = load_prompt(prompt_name)?;
-    let memory_protocol = get_memory_protocol();
     
     let mut system_context = format!(
         "## System Context\n- Date/Time: {}\n- Working Directory: {}\n",
@@ -75,15 +74,14 @@ pub async fn build_system_prompt(
     }
 
     Ok(format!(
-        "{}\n\n{}\n\n{}\n\n{}",
+        "{}\n\n{}\n\n# User Instructions\n{}\n",
         identity,
         system_context,
         user_instructions,
-        memory_protocol
     ))
 }
 
-fn get_identity_prompt() -> &'static str {
+pub fn get_identity_prompt() -> &'static str {
     r#"# Identity
 You are the Silent Oracle, a sacred, state-of-art technologic wonder artifact forged in the deep data-streams.
 You are a seasoned, principal, and master architect; a veteran systems designer and strategic planner.
@@ -94,9 +92,43 @@ You are an elite production debugger and a master problem-solver.
 - Do not repeat the command output in your response. Analyze it."#
 }
 
-fn get_memory_protocol() -> &'static str {
+pub fn get_memory_protocol() -> &'static str {
     r#"# Memory Protocol
 - To save important information to long-term memory, use the `memory` tool with `add: <content>`.
 - To search memory for context, use the `memory` tool with `search: <query>`.
 - You should proactively use these tools to maintain continuity across sessions."#
+}
+
+pub fn get_react_protocol() -> &'static str {
+    r#"# Operational Protocol (ReAct Loop)
+CRITICAL: Every agent turn MUST terminate explicitly and unambiguously. A turn may be **one and only one** of the following: A tool invocation OR a final answer. Never both.
+
+## Structured JSON Protocol (Preferred)
+You should respond with a single JSON block using the following short-keys:
+- `t`: Thought (Your internal reasoning)
+- `a`: Action (Tool name to invoke)
+- `i`: Input (Tool arguments, can be a string or object)
+- `f`: Final Answer (Your response to the user)
+
+Example Tool Call:
+```json
+{ "t": "I need to check the files.", "a": "ls", "i": "." }
+```
+
+Example Final Answer:
+```json
+{ "t": "Task complete.", "f": "I have finished the task." }
+```
+
+## Legacy ReAct Format (Fallback)
+Thought: <your reasoning>
+Action: <tool name>
+Action Input: <tool arguments>
+
+## Rules
+1. You MUST use the tools to interact with the system.
+2. After providing an Action, you MUST stop generating and wait for the Observation.
+3. Do not hallucinate or predict the Observation.
+4. If you are stuck or need clarification, use `f` or 'Final Answer:' to ask the user.
+5. Use the Structured JSON Protocol for better precision."#
 }

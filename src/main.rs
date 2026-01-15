@@ -14,6 +14,7 @@ use mylm_core::context::TerminalContext;
 use mylm_core::llm::{LlmClient, LlmConfig};
 use mylm_core::output::OutputFormatter;
 use crate::terminal::app::App;
+use std::process::Command;
 
 mod cli;
 mod terminal;
@@ -29,7 +30,8 @@ async fn main() -> Result<()> {
 
     // Task 1: Splash Screen Animation
     // Show splash screen only if we're entering Hub (no command) or TUI
-    if cli.command.is_none() && cli.query.is_empty() {
+    // But NOT if we are just checking version
+    if cli.command.is_none() && cli.query.is_empty() && !cli.version {
         show_splash_screen().await?;
     }
 
@@ -144,13 +146,15 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
         }
 
         Some(Commands::Interactive) => {
-            terminal::run_tui(None, None, None, None).await?;
+            let update_available = check_for_updates_fast();
+            terminal::run_tui(None, None, None, None, update_available).await?;
         }
 
         Some(Commands::Pop) => {
             if crate::cli::hub::is_tmux_available() {
                 let context = TerminalContext::collect().await;
-                terminal::run_tui(None, None, Some(context), Some(initial_context.terminal)).await?;
+                let update_available = check_for_updates_fast();
+                terminal::run_tui(None, None, Some(context), Some(initial_context.terminal), update_available).await?;
             } else {
                 println!("\n❌ {} is required for the 'Pop Terminal' feature.", Style::new().bold().apply_to("tmux"));
                 println!("   This feature uses tmux to capture your current terminal session history and provide seamless context.");
@@ -262,7 +266,8 @@ async fn handle_hub(config: &Config, formatter: &OutputFormatter, initial_contex
         match choice {
             HubChoice::PopTerminal => {
                 let context = mylm_core::context::TerminalContext::collect().await;
-                terminal::run_tui(None, None, Some(context), Some(initial_context.terminal)).await?;
+                let update_available = check_for_updates_fast();
+                terminal::run_tui(None, None, Some(context), Some(initial_context.terminal), update_available).await?;
                 break;
             }
             HubChoice::PopTerminalMissing => {
@@ -281,7 +286,8 @@ async fn handle_hub(config: &Config, formatter: &OutputFormatter, initial_contex
             HubChoice::ResumeSession => {
                 match App::load_session(None) {
                     Ok(session) => {
-                        terminal::run_tui(Some(session), None, None, None).await?;
+                        let update_available = check_for_updates_fast();
+                        terminal::run_tui(Some(session), None, None, None, update_available).await?;
                         break;
                     }
                     Err(e) => {
@@ -290,7 +296,8 @@ async fn handle_hub(config: &Config, formatter: &OutputFormatter, initial_contex
                 }
             }
             HubChoice::StartTui => {
-                terminal::run_tui(None, None, None, None).await?;
+                let update_available = check_for_updates_fast();
+                terminal::run_tui(None, None, None, None, update_available).await?;
                 break;
             }
             HubChoice::QuickQuery => {
@@ -320,7 +327,8 @@ async fn handle_hub(config: &Config, formatter: &OutputFormatter, initial_contex
                     let id = &choice[..idx];
                     match App::load_session(Some(id)) {
                         Ok(session) => {
-                            terminal::run_tui(Some(session), None, None, None).await?;
+                            let update_available = check_for_updates_fast();
+                            terminal::run_tui(Some(session), None, None, None, update_available).await?;
                             break;
                         }
                         Err(e) => println!("❌ Failed to load session: {}", e),
@@ -385,7 +393,8 @@ async fn handle_session_command(cmd: &SessionCommand, _config: &Config) -> Resul
         SessionCommand::Resume { id } => {
             match App::load_session(Some(id)) {
                 Ok(session) => {
-                    terminal::run_tui(Some(session), None, None, None).await?;
+                    let update_available = check_for_updates_fast();
+                    terminal::run_tui(Some(session), None, None, None, update_available).await?;
                 }
                 Err(e) => println!("❌ Failed to load session: {}", e),
             }
@@ -608,7 +617,15 @@ async fn handle_one_shot(
     ];
 
     let categorizer = Arc::new(mylm_core::memory::categorizer::MemoryCategorizer::new(client.clone(), store.clone()));
-    let mut agent = mylm_core::agent::Agent::new_with_iterations(client, tools, system_prompt, config.agent.max_iterations, Some(store), Some(categorizer));
+    let mut agent = mylm_core::agent::Agent::new_with_iterations(
+        client,
+        tools,
+        system_prompt,
+        config.agent.max_iterations,
+        config.agent.version,
+        Some(store),
+        Some(categorizer)
+    );
     
     let messages = vec![
         mylm_core::llm::chat::ChatMessage::user(query.to_string()),
@@ -639,9 +656,41 @@ async fn handle_one_shot(
     Ok(())
 }
 
+/// Fast check for updates by comparing local HEAD with origin/main
+/// This is intended to be called during splash screen or before TUI start
+fn check_for_updates_fast() -> bool {
+    // Check if we are in a git repo
+    if !std::path::Path::new(".git").exists() {
+        return false;
+    }
+
+    // Try to fetch in background with a timeout
+    // In a real scenario, we might want to do this more robustly
+    // For now, we assume origin/main exists
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD", "origin/main"])
+        .output();
+
+    if let Ok(out) = output {
+        if out.status.success() {
+            let hashes = String::from_utf8_lossy(&out.stdout);
+            let lines: Vec<&str> = hashes.lines().collect();
+            if lines.len() >= 2 {
+                return lines[0] != lines[1];
+            }
+        }
+    }
+    false
+}
+
 /// Show a brief loading animation
 async fn show_splash_screen() -> Result<()> {
     use std::io::{Write, stdout};
+
+    // Start git fetch in background while we show the animation
+    let fetch_handle = std::thread::spawn(|| {
+        let _ = Command::new("git").arg("fetch").arg("--quiet").output();
+    });
     use tokio::time::{sleep, Duration};
 
     let blue = Style::new().blue().bold();
@@ -669,6 +718,11 @@ async fn show_splash_screen() -> Result<()> {
         i += 1;
     }
     println!("\r{} [====================] ====", blue.apply_to("==== LOADING MYLM HUB"));
+    
+    // Wait for fetch to complete (it should be fast, but we don't want to block too long if it hangs)
+    // Actually, thread::spawn doesn't have a timeout easily, but git fetch --quiet usually finishes in < 1s
+    let _ = fetch_handle.join();
+    
     Ok(())
 }
 

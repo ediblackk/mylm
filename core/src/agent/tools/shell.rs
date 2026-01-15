@@ -50,13 +50,27 @@ impl Tool for ShellTool {
     }
 
     async fn call(&self, args: &str) -> Result<String> {
+        crate::info_log!("ShellTool::call execution started: {}", args);
         // 1. Safety Check (performed by executor)
-        self.executor.check_safety(args)?;
+        if let Err(e) = self.executor.check_safety(args) {
+            crate::error_log!("Safety check failed for command: {}. Error: {}", args, e);
+            return Err(e);
+        }
 
         // 2. Read Terminal Screen Context
         let (screen_tx, screen_rx) = oneshot::channel::<String>();
-        let _ = self.event_tx.send(TuiEvent::GetTerminalScreen(screen_tx));
-        let mut screen_content = screen_rx.await.unwrap_or_default();
+        if let Err(e) = self.event_tx.send(TuiEvent::GetTerminalScreen(screen_tx)) {
+            crate::error_log!("Failed to send GetTerminalScreen event: {}", e);
+            return Err(anyhow::anyhow!("Internal error: Failed to communicate with TUI"));
+        }
+        
+        let mut screen_content = match screen_rx.await {
+            Ok(content) => content,
+            Err(e) => {
+                crate::error_log!("Failed to receive terminal screen: {}", e);
+                String::new()
+            }
+        };
         
         // Hard limit at ~50k tokens (heuristic: 1 token ~= 4 chars) -> 200,000 chars
         let char_limit = 200_000;
@@ -66,10 +80,24 @@ impl Tool for ShellTool {
         
         // 3. Request execution via TUI Event
         let (tx, rx) = oneshot::channel::<String>();
-        let _ = self.event_tx.send(TuiEvent::ExecuteTerminalCommand(args.to_string(), tx));
+        if let Err(e) = self.event_tx.send(TuiEvent::ExecuteTerminalCommand(args.to_string(), tx)) {
+            crate::error_log!("Failed to send ExecuteTerminalCommand event: {}", e);
+            return Err(anyhow::anyhow!("Internal error: Failed to communicate with TUI"));
+        }
         
         // 4. Await result from PTY capture
-        let output = rx.await.map_err(|_| anyhow::anyhow!("Failed to receive command output from TUI"))?;
+        crate::debug_log!("Awaiting output from TUI for command: {}", args);
+        let output = match rx.await {
+            Ok(out) => {
+                crate::info_log!("Received output for command: {} ({} bytes)", args, out.len());
+                out
+            }
+            Err(e) => {
+                let err_msg = format!("Failed to receive command output from TUI: {}", e);
+                crate::error_log!("{}", err_msg);
+                return Err(anyhow::anyhow!(err_msg));
+            }
+        };
 
         // 5. Auto-record to memory if enabled
         if let Some(store) = &self.memory_store {

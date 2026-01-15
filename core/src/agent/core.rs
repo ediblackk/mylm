@@ -4,10 +4,23 @@ use crate::agent::tool::{Tool, ToolKind};
 use crate::memory::{MemoryCategorizer};
 use crate::terminal::app::TuiEvent;
 use std::error::Error as StdError;
+use serde::{Deserialize, Serialize};
 use serde_json;
 use std::sync::Arc;
 use std::collections::HashMap;
 use regex::Regex;
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ShortKeyAction {
+    #[serde(rename = "t")]
+    pub thought: String,
+    #[serde(rename = "a")]
+    pub action: Option<String>,
+    #[serde(rename = "i")]
+    pub input: Option<serde_json::Value>,
+    #[serde(rename = "f")]
+    pub final_answer: Option<String>,
+}
 
 /// The decision made by the agent after a step.
 #[derive(Debug, Clone)]
@@ -35,6 +48,7 @@ pub struct Agent {
     pub memory_store: Option<Arc<crate::memory::store::VectorStore>>,
     pub categorizer: Option<Arc<MemoryCategorizer>>,
     pub session_id: String,
+    pub version: crate::config::AgentVersion,
     
     // State maintained between steps
     pub history: Vec<ChatMessage>,
@@ -45,6 +59,7 @@ pub struct Agent {
     // Safety tracking
     last_tool_call: Option<(String, String)>,
     repetition_count: usize,
+    pending_tool_call_id: Option<String>,
 }
 
 impl Agent {
@@ -53,6 +68,7 @@ impl Agent {
         tools: Vec<Box<dyn Tool>>,
         system_prompt_prefix: String,
         max_iterations: usize,
+        version: crate::config::AgentVersion,
         memory_store: Option<Arc<crate::memory::store::VectorStore>>,
         categorizer: Option<Arc<MemoryCategorizer>>,
     ) -> Self {
@@ -77,6 +93,8 @@ impl Agent {
             pending_decision: None,
             last_tool_call: None,
             repetition_count: 0,
+            pending_tool_call_id: None,
+            version,
         }
     }
 
@@ -93,6 +111,7 @@ impl Agent {
         self.pending_decision = None;
         self.last_tool_call = None;
         self.repetition_count = 0;
+        self.pending_tool_call_id = None;
 
         // Ensure system prompt is present
         if self.history.is_empty() || self.history[0].role != MessageRole::System {
@@ -102,6 +121,14 @@ impl Agent {
 
     /// Perform a single step in the agentic loop.
     pub async fn step(&mut self, observation: Option<String>) -> Result<AgentDecision, Box<dyn StdError + Send + Sync>> {
+        // 0. Version Switch
+        if self.version == crate::config::AgentVersion::V2 {
+            return Ok(AgentDecision::Message(
+                "V2 Agent Loop is active (Placeholder). To use full V2 capabilities, ensure 'mylm-v2' is installed correctly.".to_string(),
+                self.total_usage.clone()
+            ));
+        }
+
         // 1. Hard Iteration Limit Check
         if self.iteration_count >= self.max_iterations {
             return Ok(AgentDecision::Error(format!("Maximum iteration limit ({}) reached. Task aborted to prevent infinite loop.", self.max_iterations)));
@@ -113,13 +140,12 @@ impl Agent {
         }
 
         if let Some(obs) = observation {
-            // If the last message was an assistant message with tool calls, we should use tool role
-            // Otherwise use user role for "Observation: ..."
-            let is_tool_call_response = self.history.last().map(|m| m.tool_calls.is_some()).unwrap_or(false);
-            
-            if is_tool_call_response {
-                self.history.push(ChatMessage::user(format!("Observation: {}", obs)));
+            if let Some(tool_id) = self.pending_tool_call_id.take() {
+                // Respond to the specific tool call
+                let tool_name = self.last_tool_call.as_ref().map(|(n, _)| n.clone()).unwrap_or_else(|| "unknown".to_string());
+                self.history.push(ChatMessage::tool(tool_id, tool_name, obs));
             } else {
+                // Legacy ReAct observation
                 self.history.push(ChatMessage::user(format!("Observation: {}", obs)));
             }
         }
@@ -152,6 +178,8 @@ impl Agent {
         let response = self.llm_client.chat(&request).await?;
         let content = response.content();
 
+        crate::debug_log!("LLM Response: {}", content);
+
         if let Some(usage) = &response.usage {
             self.total_usage.prompt_tokens += usage.prompt_tokens;
             self.total_usage.completion_tokens += usage.completion_tokens;
@@ -162,11 +190,92 @@ impl Agent {
 
         // --- Process Decision ---
 
-        // 1. Handle Tool Calls (Modern API)
+        // 1. Handle Short-Key JSON Protocol (V2)
+        // Look for JSON blocks anywhere in the content.
+        let json_blocks: Vec<&str> = if content.contains("```json") {
+            content.split("```json")
+                .skip(1)
+                .filter_map(|s| s.split("```").next())
+                .map(|s| s.trim())
+                .collect()
+        } else {
+            // Find all potential { ... } blocks
+            let mut blocks = Vec::new();
+            let mut start_idx = 0;
+            while let Some(s) = content[start_idx..].find('{') {
+                let actual_start = start_idx + s;
+                if let Some(e) = content[actual_start..].rfind('}') {
+                    let actual_end = actual_start + e;
+                    blocks.push(&content[actual_start..=actual_end]);
+                    start_idx = actual_end + 1;
+                } else {
+                    break;
+                }
+            }
+            blocks
+        };
+
+        for block in json_blocks {
+            if let Ok(sk_action) = serde_json::from_str::<ShortKeyAction>(block) {
+                crate::info_log!("Parsed Action (Short-Key): {:?}", sk_action);
+                
+                let thought = sk_action.thought.clone();
+                
+                if let Some(final_answer) = sk_action.final_answer {
+                    self.history.push(ChatMessage::assistant(content.clone()));
+                    return Ok(AgentDecision::Message(format!("Thought: {}\nFinal Answer: {}", thought, final_answer), self.total_usage.clone()));
+                }
+
+                if let Some(tool_name) = sk_action.action {
+                    let tool_name = tool_name.trim();
+                    let args = sk_action.input.map(|v| {
+                        if v.is_string() {
+                            v.as_str().unwrap().to_string()
+                        } else {
+                            v.to_string()
+                        }
+                    }).unwrap_or_default();
+
+                    // Repetition Check
+                    if let Some((last_tool, last_args)) = &self.last_tool_call {
+                        if last_tool == tool_name && last_args == &args {
+                            self.repetition_count += 1;
+                            if self.repetition_count >= 3 {
+                                return Ok(AgentDecision::Error(format!("Detected repeated tool call to '{}' with identical arguments. Breaking loop.", tool_name)));
+                            }
+                        } else {
+                            self.repetition_count = 0;
+                        }
+                    }
+                    self.last_tool_call = Some((tool_name.to_string(), args.clone()));
+
+                    let kind = self.tools.get(tool_name).map(|t| t.kind()).unwrap_or(ToolKind::Internal);
+                    
+                    // Add thought to history if it's substantial
+                    self.history.push(ChatMessage::assistant(content.clone()));
+
+                    let action = AgentDecision::Action {
+                        tool: tool_name.to_string(),
+                        args,
+                        kind,
+                    };
+
+                    self.pending_decision = Some(action);
+                    return Ok(AgentDecision::Message(format!("Thought: {}", thought), self.total_usage.clone()));
+                }
+            }
+        }
+
+        // 2. Handle Tool Calls (Modern API)
         if let Some(tool_calls) = response.choices[0].message.tool_calls.as_ref() {
             if let Some(tool_call) = tool_calls.first() {
                 let tool_name = tool_call.function.name.trim();
                 let args = &tool_call.function.arguments;
+                
+                // Store the ID for the next step
+                self.pending_tool_call_id = Some(tool_call.id.clone());
+
+                crate::info_log!("Parsed Action (Tool Call): {} with args: {}", tool_name, args);
                 
                 // Repetition Check
                 if let Some((last_tool, last_args)) = &self.last_tool_call {
@@ -200,10 +309,11 @@ impl Agent {
             }
         }
 
-        // 2. Handle ReAct format (Regex)
+        // 3. Handle ReAct format (Regex)
         // Improved ReAct parsing (handles multi-line Action Input)
         let action_re = Regex::new(r"(?m)^Action:\s*(.*)")?;
-        let action_input_re = Regex::new(r"(?ms)^Action Input:\s*(.*)$")?;
+        // Fix: Use non-greedy match and stop at next potential block
+        let action_input_re = Regex::new(r"(?ms)^Action Input:\s*(.*?)(?:\nThought:|\nObservation:|\nFinal Answer:|\z)")?;
 
         let action_match = action_re.captures(&content);
         let action_input_match = action_input_re.captures(&content);
@@ -220,6 +330,7 @@ impl Agent {
             });
 
             if let (Some(tool_name), Some(args)) = (tool_name, args) {
+            crate::info_log!("Parsed Action (ReAct): {} with args: {}", tool_name, args);
             // Repetition Check
             if let Some((last_tool, last_args)) = &self.last_tool_call {
                 if *last_tool == tool_name && *last_args == args {
@@ -266,11 +377,12 @@ impl Agent {
                 } else if action_input_re.captures(&content).is_none() {
                     error_msg.push_str(" Missing 'Action Input:' tag.");
                 }
+                crate::error_log!("Malformed action detected: {}", error_msg);
                 return Ok(AgentDecision::MalformedAction(error_msg));
             }
         }
 
-        // 3. Final Answer or just a message
+        // 4. Final Answer or just a message
         self.history.push(ChatMessage::assistant(content.clone()));
         Ok(AgentDecision::Message(content, self.total_usage.clone()))
     }
@@ -333,23 +445,34 @@ impl Agent {
                         continue;
                     }
 
-                    // For "Autonomous" mode, we look for "Final Answer:" to know when to stop.
-                    // If it's just a message without Final Answer, and we're in the middle of a task,
-                    // we might want to continue. But for now, we follow the ReAct pattern.
-                    if msg.contains("Final Answer:") {
+                    // For "Autonomous" mode, we look for "Final Answer:" or JSON equivalent to know when to stop.
+                    if msg.contains("Final Answer:") || msg.contains("\"f\":") || msg.contains("\"final_answer\":") {
                         let _ = event_tx.send(TuiEvent::StatusUpdate("".to_string()));
                         return Ok((msg, usage));
                     }
                     
                     // If we get a message without "Final Answer:" and we're in an autonomous loop,
-                    // we should nudge the agent to continue if it hasn't reached a conclusion.
-                    // However, if it looks like a question to the user, we should stop.
-                    if msg.trim().ends_with('?') || msg.contains("Please") || msg.contains("Would you") {
+                    // we should stop if it looks like a direct response to the user or a request for info.
+                    // Common indicators that the model is talking to the user:
+                    if msg.trim().ends_with('?')
+                        || msg.contains("Please")
+                        || msg.contains("Would you")
+                        || msg.contains("Acknowledged")
+                        || msg.contains("I've memorized")
+                        || msg.contains("Absolutely")
+                    {
                         let _ = event_tx.send(TuiEvent::StatusUpdate("".to_string()));
                         return Ok((msg, usage));
                     }
 
-                    // Nudge to continue
+                    // If it's a non-empty message and no tool was called, and it's not a tiny nudge,
+                    // we assume it's a response to the user.
+                    if msg.len() > 30 {
+                        let _ = event_tx.send(TuiEvent::StatusUpdate("".to_string()));
+                        return Ok((msg, usage));
+                    }
+
+                    // Nudge to continue only if it's very short or we suspect it's stuck/narrating
                     last_observation = Some("Please continue your task or provide a Final Answer if you are done.".to_string());
                     continue;
                 }
@@ -549,6 +672,8 @@ impl Agent {
 
     /// Generate the system prompt with available tools and ReAct instructions.
     fn generate_system_prompt(&self) -> String {
+        use crate::config::prompt::{get_memory_protocol, get_react_protocol};
+
         let mut tools_desc = String::new();
         for tool in self.tools.values() {
             tools_desc.push_str(&format!("- {}: {}\n  Usage: {}\n", tool.name(), tool.description(), tool.usage()));
@@ -556,29 +681,15 @@ impl Agent {
 
         format!(
             "{}\n\n\
-            # Operational Protocol (ReAct)\n\
-            You have access to the following tools:\n\n\
-            {}\n\
-            CRITICAL: Every agent turn MUST terminate explicitly and unambiguously. \
-            A turn may be **one and only one** of the following: A tool invocation OR a final answer. Never both.\n\n\
-            ## Tool Invocation Format\n\
-            Thought: <your reasoning>\n\
-            Action: <tool name from [{}]>\n\
-            Action Input: <tool arguments>\n\n\
-            ## Final Answer Format\n\
-            Thought: <your reasoning>\n\
-            Final Answer: <your final response to the user>\n\n\
-            ## Rules\n\
-            1. You MUST use the tools to interact with the system.\n\
-            2. After providing an Action and Action Input, you MUST stop generating and wait for the Observation.\n\
-            3. Do not hallucinate or predict the Observation.\n\
-            4. ALWAYS prefix your thoughts with 'Thought:'.\n\
-            5. If you are stuck or need clarification, use 'Final Answer:' to ask the user.\n\
-            6. Do not include any text after 'Action Input:' or 'Final Answer:'.\n\n\
+            # Available Tools\n\
+            {}\n\n\
+            {}\n\n\
+            {}\n\n\
             Begin!",
             self.system_prompt_prefix,
             tools_desc,
-            self.tools.keys().cloned().collect::<Vec<_>>().join(", ")
+            get_memory_protocol(),
+            get_react_protocol()
         )
     }
 

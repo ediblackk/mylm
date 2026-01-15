@@ -79,7 +79,7 @@ impl SessionMonitor {
     }
 
     /// Add usage from a single LLM interaction
-    pub fn add_usage(&mut self, usage: &TokenUsage, input_price_1k: f64, output_price_1k: f64) {
+    pub fn add_usage(&mut self, usage: &TokenUsage, input_price_1m: f64, output_price_1m: f64) {
         self.stats.input_tokens += usage.prompt_tokens;
         self.stats.output_tokens += usage.completion_tokens;
         self.stats.total_tokens += usage.total_tokens;
@@ -87,9 +87,9 @@ impl SessionMonitor {
         // Active context is what the LLM just processed (prompt + completion)
         self.stats.active_context_tokens = usage.total_tokens;
 
-        // Cost per token = price_per_1k / 1000
-        let input_cost = usage.prompt_tokens as f64 * (input_price_1k / 1000.0);
-        let output_cost = usage.completion_tokens as f64 * (output_price_1k / 1000.0);
+        // Cost per token = price_per_1m / 1,000,000
+        let input_cost = usage.prompt_tokens as f64 * (input_price_1m / 1_000_000.0);
+        let output_cost = usage.completion_tokens as f64 * (output_price_1m / 1_000_000.0);
         self.stats.cost += input_cost + output_cost;
     }
 

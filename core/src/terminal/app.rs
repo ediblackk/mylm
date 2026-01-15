@@ -11,6 +11,8 @@ pub enum AppState {
     ExecutingTool(String), // Tool name
     WaitingForUser,        // Auto-approve off
     Error(String),
+    ConfirmExit,           // Esc -> Confirmation dialog
+    NamingSession,         // S -> Name the session
 }
 
 pub enum TuiEvent {
