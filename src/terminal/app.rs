@@ -403,6 +403,7 @@ impl App {
                 let agent = self.agent.clone();
                 let event_tx_clone = event_tx.clone();
                 let interrupt_flag = self.interrupt_flag.clone();
+                let cmd_config = self.config.commands.clone();
                 interrupt_flag.store(false, Ordering::SeqCst);
 
                 let auto_approve = self.auto_approve.clone();
@@ -410,7 +411,9 @@ impl App {
                 let task = tokio::spawn(async move {
                     // Manual execution via /exec
                     // Safety check
-                    let executor = CommandExecutor::new(CommandAllowlist::new(), SafetyChecker::new());
+                    let mut allowlist = CommandAllowlist::new();
+                    allowlist.apply_config(&cmd_config);
+                    let executor = CommandExecutor::new(allowlist, SafetyChecker::new());
                     let last_obs = if let Err(e) = executor.check_safety(&command) {
                         let err_msg = format!("Error: Safety Check Failed: {}", e);
                         // Log failure to terminal

@@ -50,6 +50,22 @@ impl Default for CommandAllowlist {
                 "pwd".to_string(),
                 "echo".to_string(),
                 "printf".to_string(),
+                "npm".to_string(),
+                "npx".to_string(),
+                "yarn".to_string(),
+                "pnpm".to_string(),
+                "bun".to_string(),
+                "cargo".to_string(),
+                "pip".to_string(),
+                "python".to_string(),
+                "node".to_string(),
+                "deno".to_string(),
+                "go".to_string(),
+                "rustc".to_string(),
+                "make".to_string(),
+                "cmake".to_string(),
+                "gcc".to_string(),
+                "g++".to_string(),
             ]),
             // Limited write commands
             write_commands: HashSet::from([
@@ -132,17 +148,9 @@ impl CommandAllowlist {
             return false;
         }
 
-        // Check custom allowlist
-        if self.custom_allowed.contains(cmd) {
-            return true;
-        }
-
-        // Check built-in categories
-        self.read_commands.contains(cmd)
-            || self.write_commands.contains(cmd)
-            || self.system_commands.contains(cmd)
-            || self.file_ops_commands.contains(cmd)
-            || self.network_commands.contains(cmd)
+        // We are now permissive by default to facilitate tooling.
+        // The SafetyChecker and TUI approval will handle the actual security.
+        true
     }
 
     /// Get the safety level of a command

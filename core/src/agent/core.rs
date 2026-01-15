@@ -131,7 +131,10 @@ impl Agent {
 
         // 1. Hard Iteration Limit Check
         if self.iteration_count >= self.max_iterations {
-            return Ok(AgentDecision::Error(format!("Maximum iteration limit ({}) reached. Task aborted to prevent infinite loop.", self.max_iterations)));
+            return Ok(AgentDecision::Message(
+                format!("⚠️ Maximum iteration limit ({}) reached. I've paused to prevent an infinite loop. You can continue by asking me to keep going.", self.max_iterations),
+                self.total_usage.clone()
+            ));
         }
 
         // 2. Return pending decision if we have one (usually an Action queued after a Thought)

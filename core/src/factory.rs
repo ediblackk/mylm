@@ -41,7 +41,8 @@ pub async fn create_agent_for_session(
     let state_store = Arc::new(std::sync::RwLock::new(StateStore::new()?));
 
     // Executor
-    let allowlist = CommandAllowlist::new();
+    let mut allowlist = CommandAllowlist::new();
+    allowlist.apply_config(&config.commands);
     let safety_checker = SafetyChecker::new();
     let executor = Arc::new(CommandExecutor::new(allowlist, safety_checker));
 
