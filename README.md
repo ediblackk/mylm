@@ -1,10 +1,11 @@
 # mylm — Terminal AI, done right
-
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Terminal AI](https://img.shields.io/badge/Terminal-AI-blue.svg)](#)
 
 **mylm (My Language Model)** is a high-performance **Terminal AI Assistant** built for developers who actually spend their day in the CLI. 
+
+![mylm Dashboard](assets/hero.png)
 
 It’s not a fancy chatbot wrapper or a toy script. `mylm` is an **agentic terminal companion** that understands your system, reasons through tasks, and bridges natural language with actual shell execution.
 
