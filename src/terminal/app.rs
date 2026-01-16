@@ -193,10 +193,34 @@ impl App {
     }
 
     pub fn enter_char(&mut self, new_char: char) {
-        let mut chars: Vec<char> = self.chat_input.chars().collect();
-        chars.insert(self.cursor_position, new_char);
-        self.chat_input = chars.into_iter().collect();
-        self.move_cursor_right();
+        if new_char == '\r' { return; }
+        
+        if self.cursor_position >= self.chat_input.chars().count() {
+            self.chat_input.push(new_char);
+        } else {
+            let byte_idx = self.chat_input.char_indices().nth(self.cursor_position).map(|(i, _)| i).unwrap_or(self.chat_input.len());
+            self.chat_input.insert(byte_idx, new_char);
+        }
+        self.cursor_position += 1;
+    }
+
+    pub fn enter_string(&mut self, text: &str) {
+        let clean_text = text.replace('\r', "");
+        if clean_text.is_empty() { return; }
+
+        // Large paste warning
+        if clean_text.len() > 10_000 {
+            self.status_message = Some("⚠️ Large paste detected. Consider using /read or asking AI to read the file for efficiency.".to_string());
+        }
+
+        if self.cursor_position >= self.chat_input.chars().count() {
+            self.chat_input.push_str(&clean_text);
+        } else {
+            let byte_idx = self.chat_input.char_indices().nth(self.cursor_position).map(|(i, _)| i).unwrap_or(self.chat_input.len());
+            self.chat_input.insert_str(byte_idx, &clean_text);
+        }
+        
+        self.cursor_position += clean_text.chars().count();
     }
 
     pub fn delete_char(&mut self) {

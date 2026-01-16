@@ -521,25 +521,54 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
         
         // Hide Context Packs (Terminal Snapshot, etc.)
         let delimiter = "\n\n## Terminal Snapshot";
-        let (display_content, has_hidden_context) = if let Some(idx) = m.content.find(delimiter) {
+        let (raw_display_content, has_hidden_context) = if let Some(idx) = m.content.find(delimiter) {
             (&m.content[..idx], true)
         } else {
             (m.content.as_str(), false)
         };
 
-        let raw_lines: Vec<&str> = display_content.split('\n').collect();
+        // Try to parse entire content as JSON first (handles multi-line JSON)
+        let processed_content = if let Ok(val) = serde_json::from_str::<serde_json::Value>(raw_display_content.trim()) {
+            let mut parts = Vec::new();
+            
+            if let Some(t) = val.get("t").and_then(|v| v.as_str()) {
+                if !t.is_empty() {
+                    parts.push(format!("Thought: {}", t));
+                }
+            }
+            
+            if let Some(a) = val.get("a").and_then(|v| v.as_str()) {
+                let i = val.get("i").map(|v| v.to_string()).unwrap_or_default();
+                parts.push(format!("Action: {} ({})", a, i));
+            }
+            
+            if let Some(f) = val.get("f").and_then(|v| v.as_str()) {
+                parts.push(f.to_string());
+            }
+
+            if parts.is_empty() {
+                raw_display_content.to_string()
+            } else {
+                parts.join("\n")
+            }
+        } else {
+            raw_display_content.to_string()
+        };
+
+        let raw_lines: Vec<&str> = processed_content.split('\n').collect();
         
-        for line in raw_lines {
+        for raw_line in raw_lines {
+            let line = raw_line.replace('\r', "");
             let trimmed = line.trim();
             if trimmed.is_empty() {
-                lines_to_render.push((line.to_string(), Style::default()));
+                lines_to_render.push((line, Style::default()));
                 continue;
             }
 
             let is_thought = trimmed.starts_with("Thought:") || trimmed.starts_with("**Thought:**");
             if is_thought {
                 if app.show_thoughts && app.verbose_mode {
-                    lines_to_render.push((line.to_string(), Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)));
+                    lines_to_render.push((line, Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)));
                 }
                 continue;
             }
@@ -575,7 +604,7 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_action = trimmed.starts_with("Action:") || trimmed.starts_with("**Action:**");
             if is_action {
                 // Always show actions to provide feedback on what the agent is doing
-                lines_to_render.push((line.to_string(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+                lines_to_render.push((line, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
                 continue;
             }
 
@@ -584,7 +613,7 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
                 if !app.verbose_mode {
                     continue;
                 }
-                lines_to_render.push((line.to_string(), Style::default().fg(Color::DarkGray)));
+                lines_to_render.push((line, Style::default().fg(Color::DarkGray)));
                 continue;
             }
 
@@ -600,7 +629,7 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
                 continue;
             }
 
-            lines_to_render.push((line.to_string(), Style::default()));
+            lines_to_render.push((line, Style::default()));
         }
 
         if has_hidden_context {
@@ -749,7 +778,13 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
 
         let end_line = (start_line + max_visible_lines).min(total_input_lines);
         let visible_lines = &wrapped_input[start_line..end_line];
-        let display_content = visible_lines.join("\n");
+        
+        // Ensure we always have at least one line to avoid Paragraph panic or weirdness
+        let display_content = if visible_lines.is_empty() {
+            String::new()
+        } else {
+            visible_lines.join("\n")
+        };
 
         let input_paragraph = Paragraph::new(display_content)
             .block(input_block);
@@ -769,55 +804,17 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
 pub fn calculate_input_cursor_pos(text: &str, cursor_idx: usize, width: usize) -> (u16, u16) {
     if width == 0 { return (0, 0); }
     
-    let mut current_idx = 0;
-    let mut row = 0;
-    let mut current_line_len = 0;
-
-    if cursor_idx == 0 { return (0, 0); }
-
-    for (p_idx, paragraph) in text.split('\n').enumerate() {
-        if p_idx > 0 {
-            if current_idx == cursor_idx {
-                return (0, row as u16);
-            }
-            row += 1;
-            current_line_len = 0;
-            current_idx += 1;
-        }
-
-        let words: Vec<&str> = paragraph.split(' ').collect();
-        for (i, word) in words.iter().enumerate() {
-            let word_len = word.chars().count();
-
-            // Space before word
-            if i > 0 {
-                if current_line_len + 1 + word_len > width {
-                    if current_idx == cursor_idx { return (0, row as u16); }
-                    row += 1;
-                    current_line_len = 0;
-                } else {
-                    if current_idx == cursor_idx { return (current_line_len as u16, row as u16); }
-                    current_line_len += 1;
-                }
-                current_idx += 1;
-            }
-            
-            // Word chars
-            for _wc in word.chars() {
-                if current_idx == cursor_idx {
-                    return (current_line_len as u16, row as u16);
-                }
-                if current_line_len >= width {
-                    row += 1;
-                    current_line_len = 0;
-                }
-                current_line_len += 1;
-                current_idx += 1;
-            }
-        }
+    let prefix: String = text.chars().take(cursor_idx).collect();
+    let wrapped = wrap_text(&prefix, width);
+    
+    if wrapped.is_empty() {
+        return (0, 0);
     }
     
-    (current_line_len as u16, row as u16)
+    let row = wrapped.len().saturating_sub(1);
+    let col = wrapped.last().map(|l| l.chars().count()).unwrap_or(0);
+    
+    (col as u16, row as u16)
 }
 
 pub fn find_idx_from_coords(text: &str, target_x: u16, target_y: u16, width: usize) -> usize {
@@ -843,49 +840,65 @@ pub fn find_idx_from_coords(text: &str, target_x: u16, target_y: u16, width: usi
 pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let width = if width == 0 { 1 } else { width };
     let mut lines = Vec::new();
-    for paragraph in text.split('\n') {
+    
+    // split('\n') returns at least one element even for empty string
+    let paragraphs: Vec<&str> = text.split('\n').collect();
+    
+    for paragraph in paragraphs.iter() {
         if paragraph.is_empty() {
             lines.push(String::new());
             continue;
         }
-        
+
         let mut current_line = String::new();
-        for word in paragraph.split(' ') {
-            if word.is_empty() && !current_line.is_empty() {
-                if current_line.len() + 1 <= width {
+        let mut current_width = 0;
+
+        let mut chars = paragraph.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == ' ' {
+                if current_width < width {
                     current_line.push(' ');
+                    current_width += 1;
                 } else {
                     lines.push(current_line);
                     current_line = String::new();
+                    current_width = 0;
                 }
-                continue;
-            }
-
-            if current_line.is_empty() {
-                let mut w = word;
-                while w.chars().count() > width {
-                    let split_idx = w.char_indices().nth(width).map(|(i, _)| i).unwrap_or(w.len());
-                    lines.push(w[..split_idx].to_string());
-                    w = &w[split_idx..];
-                }
-                current_line = w.to_string();
-            } else if current_line.len() + 1 + word.len() <= width {
-                current_line.push(' ');
-                current_line.push_str(word);
             } else {
-                lines.push(current_line);
-                let mut w = word;
-                while w.chars().count() > width {
-                    let split_idx = w.char_indices().nth(width).map(|(i, _)| i).unwrap_or(w.len());
-                    lines.push(w[..split_idx].to_string());
-                    w = &w[split_idx..];
+                let mut word = String::from(c);
+                while let Some(&nc) = chars.peek() {
+                    if nc == ' ' { break; }
+                    word.push(chars.next().unwrap());
                 }
-                current_line = w.to_string();
+                
+                let word_len = word.chars().count();
+                if current_width + word_len <= width {
+                    current_line.push_str(&word);
+                    current_width += word_len;
+                } else {
+                    if !current_line.is_empty() {
+                        lines.push(current_line);
+                        current_line = String::new();
+                        current_width = 0;
+                    }
+                    
+                    let mut remaining = word;
+                    while !remaining.is_empty() {
+                        let r_len = remaining.chars().count();
+                        if r_len <= width {
+                            current_line = remaining;
+                            current_width = r_len;
+                            remaining = String::new();
+                        } else {
+                            let split_idx = remaining.char_indices().nth(width).map(|(i, _)| i).unwrap_or(remaining.len());
+                            lines.push(remaining[..split_idx].to_string());
+                            remaining = remaining[split_idx..].to_string();
+                        }
+                    }
+                }
             }
         }
-        if !current_line.is_empty() {
-            lines.push(current_line);
-        }
+        lines.push(current_line);
     }
     lines
 }

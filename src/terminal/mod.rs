@@ -908,9 +908,7 @@ async fn run_loop(
                         CrosstermEvent::Paste(text) => {
                             match app.focus {
                                 Focus::Chat => {
-                                    for c in text.chars() {
-                                        app.enter_char(c);
-                                    }
+                                    app.enter_string(&text);
                                 }
                                 Focus::Terminal => {
                                     app.handle_terminal_input(text.as_bytes());
