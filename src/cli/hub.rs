@@ -44,6 +44,7 @@ pub enum SettingsMenuChoice {
     SwitchActiveProfile,
     ManageProfiles,
     ManageEndpoints,
+    ToggleTmuxAutostart,
     Back,
 }
 
@@ -53,7 +54,8 @@ impl std::fmt::Display for SettingsMenuChoice {
             SettingsMenuChoice::SwitchActiveProfile => write!(f, "👤 [1] Switch Active Profile"),
             SettingsMenuChoice::ManageProfiles => write!(f, "📂 [2] Manage Profiles"),
             SettingsMenuChoice::ManageEndpoints => write!(f, "🔌 [3] Manage Endpoints"),
-            SettingsMenuChoice::Back => write!(f, "⬅️  [4] Back"),
+            SettingsMenuChoice::ToggleTmuxAutostart => write!(f, "🔄 [4] Toggle Tmux Autostart"),
+            SettingsMenuChoice::Back => write!(f, "⬅️  [5] Back"),
         }
     }
 }
@@ -184,6 +186,7 @@ pub fn show_settings_dashboard(config: &Config) -> Result<SettingsMenuChoice> {
         SettingsMenuChoice::SwitchActiveProfile,
         SettingsMenuChoice::ManageProfiles,
         SettingsMenuChoice::ManageEndpoints,
+        SettingsMenuChoice::ToggleTmuxAutostart,
         SettingsMenuChoice::Back,
     ];
 

@@ -463,6 +463,12 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                 }
             }
 
+            crate::cli::hub::SettingsMenuChoice::ToggleTmuxAutostart => {
+                if let Err(e) = toggle_tmux_autostart().context("Failed to toggle tmux autostart") {
+                    println!("❌ Error: {}", e);
+                }
+            }
+
             crate::cli::hub::SettingsMenuChoice::Back => break,
         }
     }
@@ -691,7 +697,7 @@ async fn show_splash_screen() -> Result<()> {
     Ok(())
 }
 
-fn toggle_tmux_autostart() -> Result<()> {
+pub fn toggle_tmux_autostart() -> Result<()> {
     let home = dirs::home_dir().context("Could not find home directory")?;
     let shells = vec![".bashrc", ".zshrc"];
     let snippet_start = "# --- mylm tmux auto-start ---";
