@@ -3,6 +3,7 @@ use console::Style;
 use dialoguer::{Confirm, Password};
 use inquire::{Select as InquireSelect, Text};
 use mylm_core::config::Config;
+use serde_json::Value;
 
 /// Main hub choice enum
 #[derive(Debug, PartialEq)]
@@ -417,15 +418,20 @@ pub async fn handle_create_endpoint(config: &mut Config) -> Result<bool> {
     }
 
     // Get provider
-    let provider = select_provider()?;
+    let (provider_id, provider_display) = select_provider()?;
 
     // Get base URL
-    let base_url = Text::new("Base URL:")
-        .with_initial_value(&get_default_url(&provider))
-        .prompt()?;
+    // Skip URL prompt for known providers where URL is fixed
+    let base_url = if ["OpenAI", "Google (Gemini)", "OpenRouter"].contains(&provider_display.as_str()) {
+        get_default_url(&provider_display)
+    } else {
+        Text::new("Base URL:")
+            .with_initial_value(&get_default_url(&provider_display))
+            .prompt()?
+    };
 
     // Get API key
-    let api_key = if provider != "Ollama" {
+    let api_key = if provider_display != "Ollama" {
         Password::new()
             .with_prompt("API Key")
             .interact()?
@@ -434,12 +440,26 @@ pub async fn handle_create_endpoint(config: &mut Config) -> Result<bool> {
     };
 
     // Get model
-    let model = Text::new("Model name:").prompt()?;
+    let method = InquireSelect::new("Model Selection Method:", vec!["Fetch from API", "Enter Manually"]).prompt()?;
+    
+    let model = if method == "Fetch from API" {
+        match fetch_models(&base_url, &api_key).await {
+            Ok(models) => {
+                InquireSelect::new("Select Model:", models).prompt()?
+            }
+            Err(e) => {
+                println!("⚠️  Failed to fetch models: {}. Falling back to manual entry.", e);
+                Text::new("Model name:").prompt()?
+            }
+        }
+    } else {
+        Text::new("Model name:").prompt()?
+    };
 
     // Create endpoint
     config.endpoints.push(mylm_core::config::endpoints::EndpointConfig {
         name,
-        provider,
+        provider: provider_id,
         base_url,
         model,
         api_key,
@@ -472,14 +492,23 @@ pub async fn handle_edit_endpoint(config: &mut Config) -> Result<bool> {
 
     match edit_selection {
         "Provider" => {
-            let new_provider = select_provider()?;
+            let (new_provider_id, new_provider_display) = select_provider()?;
             if let Some(e) = config.endpoints.iter_mut().find(|ep| ep.name == endpoint_name) {
-                e.provider = new_provider;
+                e.provider = new_provider_id;
+                
+                // Auto-update Base URL if switching to a known provider
+                if ["OpenAI", "Google (Gemini)", "OpenRouter"].contains(&new_provider_display.as_str()) {
+                     e.base_url = get_default_url(&new_provider_display);
+                     println!("ℹ️  Base URL automatically updated to {}", e.base_url);
+                }
             }
             println!("✅ Provider updated!");
         }
         "Base URL" => {
-            let new_url = Text::new("Base URL:").prompt()?;
+            let current_url = config.endpoints.iter().find(|e| e.name == endpoint_name).map(|e| e.base_url.clone()).unwrap_or_default();
+            let new_url = Text::new("Base URL:")
+                .with_initial_value(&current_url)
+                .prompt()?;
             if let Some(e) = config.endpoints.iter_mut().find(|ep| ep.name == endpoint_name) {
                 e.base_url = new_url;
             }
@@ -499,7 +528,22 @@ pub async fn handle_edit_endpoint(config: &mut Config) -> Result<bool> {
             println!("✅ API Key updated!");
         }
         "Model" => {
-            let new_model = Text::new("Model name:").prompt()?;
+            let method = InquireSelect::new("Model Selection Method:", vec!["Fetch from API", "Enter Manually"]).prompt()?;
+            
+            let new_model = if method == "Fetch from API" {
+                // We need the endpoint's current config to fetch
+                let endpoint = config.endpoints.iter().find(|e| e.name == endpoint_name).unwrap();
+                match fetch_models(&endpoint.base_url, &endpoint.api_key).await {
+                    Ok(models) => InquireSelect::new("Select Model:", models).prompt()?,
+                    Err(e) => {
+                        println!("⚠️  Failed to fetch models: {}. Falling back to manual entry.", e);
+                        Text::new("Model name:").prompt()?
+                    }
+                }
+            } else {
+                Text::new("Model name:").prompt()?
+            };
+            
             if let Some(e) = config.endpoints.iter_mut().find(|ep| ep.name == endpoint_name) {
                 e.model = new_model;
             }
@@ -581,28 +625,85 @@ fn select_or_enter_model(_config: &Config, _endpoint_name: &str) -> Result<Optio
 }
 
 /// Select LLM provider
-fn select_provider() -> Result<String> {
+fn select_provider() -> Result<(String, String)> {
     let providers = vec!["OpenAI", "Google (Gemini)", "Ollama", "OpenRouter", "Custom"];
     let selection = InquireSelect::new("Select provider:", providers).prompt()?;
 
     match selection {
-        "OpenAI" => Ok("openai".to_string()),
-        "Google (Gemini)" => Ok("google".to_string()),
-        "Ollama" => Ok("openai".to_string()), // Ollama uses OpenAI-compatible API
-        "OpenRouter" => Ok("openrouter".to_string()),
-        _ => Ok("openai".to_string()),
+        "OpenAI" => Ok(("openai".to_string(), "OpenAI".to_string())),
+        "Google (Gemini)" => Ok(("google".to_string(), "Google (Gemini)".to_string())),
+        "Ollama" => Ok(("openai".to_string(), "Ollama".to_string())), // Ollama uses OpenAI-compatible API
+        "OpenRouter" => Ok(("openrouter".to_string(), "OpenRouter".to_string())),
+        _ => Ok(("openai".to_string(), "Custom".to_string())),
     }
 }
 
 /// Get default URL for a provider
-fn get_default_url(provider: &str) -> String {
-    match provider {
+fn get_default_url(provider_display_name: &str) -> String {
+    match provider_display_name {
         "OpenAI" => "https://api.openai.com/v1".to_string(),
         "Google (Gemini)" => "https://generativelanguage.googleapis.com/v1".to_string(),
         "Ollama" => "http://localhost:11434/v1".to_string(),
         "OpenRouter" => "https://openrouter.ai/api/v1".to_string(),
         _ => "".to_string(),
     }
+}
+
+/// Fetch models from the API
+async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<String>> {
+    println!("🔄 Fetching models from {}...", base_url);
+    let client = reqwest::Client::new();
+    
+    // Construct URL - handle trailing slashes and ensure /models is attached correctly
+    let url = if base_url.ends_with('/') {
+        format!("{}models", base_url)
+    } else {
+        format!("{}/models", base_url)
+    };
+
+    let mut request = client.get(&url);
+
+    if !api_key.is_empty() && api_key != "none" {
+        request = request.header("Authorization", format!("Bearer {}", api_key));
+    }
+    
+    // Add User-Agent as some APIs require it
+    request = request.header("User-Agent", "mylm-cli/0.1.0");
+
+    let response = request.send().await?;
+    
+    if !response.status().is_success() {
+        return Err(anyhow::anyhow!("API request failed with status: {}", response.status()));
+    }
+
+    let body: Value = response.json().await?;
+    
+    let mut models = Vec::new();
+    if let Some(data) = body.get("data").and_then(|v| v.as_array()) {
+        for model in data {
+            if let Some(id) = model.get("id").and_then(|v| v.as_str()) {
+                models.push(id.to_string());
+            }
+        }
+    }
+    
+    if models.is_empty() {
+        // Fallback: Check if top level has "models" key (some proxies)
+        if let Some(data) = body.get("models").and_then(|v| v.as_array()) {
+             for model in data {
+                if let Some(id) = model.get("id").and_then(|v| v.as_str()) {
+                    models.push(id.to_string());
+                }
+            }
+        }
+    }
+
+    if models.is_empty() {
+        return Err(anyhow::anyhow!("No models found in response"));
+    }
+    
+    models.sort();
+    Ok(models)
 }
 
 // ============================================================================
