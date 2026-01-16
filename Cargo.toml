@@ -3,7 +3,14 @@ name = "mylm"
 version = "0.1.0"
 edition = "2021"
 description = "A globally available, high-performance terminal AI assistant"
-authors = ["Your Name <you@example.com>"]
+authors = ["Edward <ediblackk@users.noreply.github.com>"]
+repository = "https://github.com/ediblackk/mylm"
+homepage = "https://github.com/ediblackk/mylm"
+documentation = "https://github.com/ediblackk/mylm"
+keywords = ["terminal", "ai", "llm", "productivity", "tool"]
+categories = ["command-line-utilities", "development-tools"]
+license = "MIT"
+readme = "README.md"
 
 [workspace]
 members = ["core"]

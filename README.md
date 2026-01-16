@@ -71,20 +71,59 @@ chmod +x install.sh
 
 ---
 
-## Usage
+## Usage / Quickstart
 
-*   **`ai`**: Opens the Hub (Pop, Resume, Interactive, Config).
-*   **`ai pop`**: The "contextual" entry point.
-*   **`ai "how do I fix my git history?"`**: Direct query.
-*   **`ai interactive`**: Fresh start.
+### 1. The Hub (`ai`)
+Running `ai` with no arguments opens the central Hub. From here you can:
+*   Start a new interactive session.
+*   Resume a past conversation (memory is persistent!).
+*   Configure your LLM provider and keys.
+
+### 2. Contextual Pop (`ai pop`)
+This is the most powerful way to use `mylm`.
+1.  You run a command and it fails (e.g., a complex `cargo build` error).
+2.  Type `ai pop`.
+3.  `mylm` captures the last screen of output, your current directory state, and environment.
+4.  Ask: "Fix this error."
+5.  It already knows the error because it "saw" your terminal.
+
+### 3. Quick Query (`ai "query"`)
+For simple questions where you don't need a full session:
+```bash
+ai "how do I tar a directory excluding .git?"
+```
+
+### 4. Interactive Mode (`ai interactive`)
+Starts a fresh session focused on the current directory but without capturing the previous command output.
 
 ## Configuration
 Settings are in `~/.config/mylm/mylm.yaml`. You can edit prompts, switch models, and manage API keys directly in the UI.
+
+## Troubleshooting
+
+### "Command not found" after install
+Ensure `~/.local/bin` is in your `PATH`.
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+Add this line to your `~/.bashrc` or `~/.zshrc` to make it permanent.
+
+### "Error initializing backend"
+This often happens if the API key is missing or invalid. Run `ai` and select **Configuration** to verify your keys.
+
+### Visual Glitches
+`mylm` uses advanced terminal manipulation. If you see rendering issues:
+*   Ensure you are using a modern terminal emulator (Alacritty, iTerm2, Kitty, Windows Terminal).
+*   Try resizing the window to force a redraw.
 
 ## Roadmap
 *   **V2 Cognitive Engine**: Transitioning to a multi-layered worker architecture.
 *   Background task queues.
 *   Master-agent orchestration.
+
+## Contributing
+
+We love contributions! Please see our [CONTRIBUTING.md](CONTRIBUTING.md) for details on how to get started, code style, and PR guidelines.
 
 ---
 
