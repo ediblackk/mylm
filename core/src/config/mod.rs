@@ -311,6 +311,13 @@ impl Config {
             }
         }
         
+        // Try to use the default endpoint
+        if !self.default_endpoint.is_empty() {
+            if let Some(endpoint) = self.endpoints.iter().find(|e| e.name == self.default_endpoint) {
+                return Ok(endpoint);
+            }
+        }
+
         // Fallback: if we have only one endpoint, just return it (convenience for single-endpoint setups)
         if self.endpoints.len() == 1 {
             return Ok(&self.endpoints[0]);

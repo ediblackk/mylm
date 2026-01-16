@@ -42,21 +42,45 @@ impl std::fmt::Display for HubChoice {
 /// Settings dashboard main menu choices
 #[derive(Debug, PartialEq)]
 pub enum SettingsMenuChoice {
-    SwitchActiveProfile,
     ManageProfiles,
-    ManageEndpoints,
+    EndpointSetup,
     ToggleTmuxAutostart,
+    WebSearch,
+    GeneralSettings,
     Back,
+}
+
+/// Web search configuration submenu choices
+#[derive(Debug, PartialEq)]
+pub enum WebSearchMenuChoice {
+    ToggleEnabled,
+    SetProvider,
+    SetApiKey,
+    SetModel,
+    Back,
+}
+
+impl std::fmt::Display for WebSearchMenuChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WebSearchMenuChoice::ToggleEnabled => write!(f, "✅ Toggle Enabled"),
+            WebSearchMenuChoice::SetProvider => write!(f, "🧭 Set Provider"),
+            WebSearchMenuChoice::SetApiKey => write!(f, "🔑 Set API Key"),
+            WebSearchMenuChoice::SetModel => write!(f, "🧠 Set Model (Kimi only)"),
+            WebSearchMenuChoice::Back => write!(f, "⬅️  Back"),
+        }
+    }
 }
 
 impl std::fmt::Display for SettingsMenuChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SettingsMenuChoice::SwitchActiveProfile => write!(f, "👤 [1] Switch Active Profile"),
-            SettingsMenuChoice::ManageProfiles => write!(f, "📂 [2] Manage Profiles"),
-            SettingsMenuChoice::ManageEndpoints => write!(f, "🔌 [3] Manage Endpoints"),
-            SettingsMenuChoice::ToggleTmuxAutostart => write!(f, "🔄 [4] Toggle Tmux Autostart"),
-            SettingsMenuChoice::Back => write!(f, "⬅️  [5] Back"),
+            SettingsMenuChoice::ManageProfiles => write!(f, "📂 [1] Manage Profiles"),
+            SettingsMenuChoice::EndpointSetup => write!(f, "🔌 [2] Endpoint Setup"),
+            SettingsMenuChoice::ToggleTmuxAutostart => write!(f, "🔄 [3] Toggle Tmux Autostart"),
+            SettingsMenuChoice::WebSearch => write!(f, "🌐 [4] Web Search"),
+            SettingsMenuChoice::GeneralSettings => write!(f, "⚙️  [5] General Settings (Context, Memory, etc.)"),
+            SettingsMenuChoice::Back => write!(f, "⬅️  [6] Back"),
         }
     }
 }
@@ -64,6 +88,7 @@ impl std::fmt::Display for SettingsMenuChoice {
 /// Profile management submenu choices
 #[derive(Debug, PartialEq)]
 pub enum ProfileMenuChoice {
+    SelectProfile,
     CreateProfile,
     EditProfile,
     DeleteProfile,
@@ -73,10 +98,11 @@ pub enum ProfileMenuChoice {
 impl std::fmt::Display for ProfileMenuChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProfileMenuChoice::CreateProfile => write!(f, "➕ [1] Create New Profile"),
-            ProfileMenuChoice::EditProfile => write!(f, "✏️  [2] Edit Profile (Model/Prompt)"),
-            ProfileMenuChoice::DeleteProfile => write!(f, "🗑️  [3] Delete Profile"),
-            ProfileMenuChoice::Back => write!(f, "⬅️  [4] Back"),
+            ProfileMenuChoice::SelectProfile => write!(f, "👤 [1] Select Profile"),
+            ProfileMenuChoice::CreateProfile => write!(f, "➕ [2] Create New Profile"),
+            ProfileMenuChoice::EditProfile => write!(f, "✏️  [3] Edit Profile (Endpoint/Model/Prompt)"),
+            ProfileMenuChoice::DeleteProfile => write!(f, "🗑️  [4] Delete Profile"),
+            ProfileMenuChoice::Back => write!(f, "⬅️  [5] Back"),
         }
     }
 }
@@ -84,6 +110,8 @@ impl std::fmt::Display for ProfileMenuChoice {
 /// Endpoint management submenu choices
 #[derive(Debug, PartialEq)]
 pub enum EndpointMenuChoice {
+    SetActiveProfileEndpoint,
+    SetDefaultEndpoint,
     CreateEndpoint,
     EditEndpoint,
     DeleteEndpoint,
@@ -93,10 +121,12 @@ pub enum EndpointMenuChoice {
 impl std::fmt::Display for EndpointMenuChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EndpointMenuChoice::CreateEndpoint => write!(f, "➕ [1] Create New Endpoint"),
-            EndpointMenuChoice::EditEndpoint => write!(f, "✏️  [2] Edit Endpoint (Provider/Key/URL)"),
-            EndpointMenuChoice::DeleteEndpoint => write!(f, "🗑️  [3] Delete Endpoint"),
-            EndpointMenuChoice::Back => write!(f, "⬅️  [4] Back"),
+            EndpointMenuChoice::SetActiveProfileEndpoint => write!(f, "🎯 [1] Set Active Profile Endpoint"),
+            EndpointMenuChoice::SetDefaultEndpoint => write!(f, "🌍 [2] Set Global Default Endpoint (Fallback)"),
+            EndpointMenuChoice::CreateEndpoint => write!(f, "➕ [3] Create New Endpoint"),
+            EndpointMenuChoice::EditEndpoint => write!(f, "✏️  [4] Edit Endpoint (Provider/Key/URL)"),
+            EndpointMenuChoice::DeleteEndpoint => write!(f, "🗑️  [5] Delete Endpoint"),
+            EndpointMenuChoice::Back => write!(f, "⬅️  [6] Back"),
         }
     }
 }
@@ -174,6 +204,13 @@ pub fn show_profile_select(profiles: Vec<String>) -> Result<Option<String>> {
     }
 }
 
+fn inquire_default_index(options: &[String], current: Option<&str>) -> usize {
+    let Some(cur) = current else {
+        return 0;
+    };
+    options.iter().position(|x| x == cur).unwrap_or(0)
+}
+
 // ============================================================================
 // SETTINGS DASHBOARD - Main Configuration Menu
 // ============================================================================
@@ -184,10 +221,11 @@ pub fn show_settings_dashboard(config: &Config) -> Result<SettingsMenuChoice> {
     display_current_config(config);
 
     let options = vec![
-        SettingsMenuChoice::SwitchActiveProfile,
         SettingsMenuChoice::ManageProfiles,
-        SettingsMenuChoice::ManageEndpoints,
+        SettingsMenuChoice::EndpointSetup,
         SettingsMenuChoice::ToggleTmuxAutostart,
+        SettingsMenuChoice::WebSearch,
+        SettingsMenuChoice::GeneralSettings,
         SettingsMenuChoice::Back,
     ];
 
@@ -202,20 +240,79 @@ pub fn show_settings_dashboard(config: &Config) -> Result<SettingsMenuChoice> {
     }
 }
 
+pub fn show_web_search_menu(config: &Config) -> Result<WebSearchMenuChoice> {
+    let enabled = if config.web_search.enabled { "On" } else { "Off" };
+    let provider = if config.web_search.provider.trim().is_empty() {
+        "(unset)"
+    } else {
+        config.web_search.provider.as_str()
+    };
+    let key_status = if config.web_search.api_key.trim().is_empty() {
+        "Not set"
+    } else {
+        "Set"
+    };
+    let model = if config.web_search.model.trim().is_empty() {
+        "(unset)"
+    } else {
+        config.web_search.model.as_str()
+    };
+
+    println!("\n🌐 Web Search Settings");
+    println!("  Enabled:   {}", enabled);
+    println!("  Provider:  {}", provider);
+    println!("  API Key:   {}", key_status);
+    println!("  Model:     {}", model);
+    println!();
+
+    let options = vec![
+        WebSearchMenuChoice::ToggleEnabled,
+        WebSearchMenuChoice::SetProvider,
+        WebSearchMenuChoice::SetApiKey,
+        WebSearchMenuChoice::SetModel,
+        WebSearchMenuChoice::Back,
+    ];
+
+    let ans: Result<WebSearchMenuChoice, _> = InquireSelect::new("Web Search", options).prompt();
+    match ans {
+        Ok(choice) => Ok(choice),
+        Err(_) => Ok(WebSearchMenuChoice::Back),
+    }
+}
+
 /// Display current configuration summary
 fn display_current_config(config: &Config) {
     let profile = config.get_active_profile();
     let profile_name = &config.active_profile;
 
+    // Effective endpoint = profile-linked endpoint (if set), otherwise global default (fallback).
+    // Note: Config::get_endpoint(None) has additional fallback behavior (single endpoint convenience);
+    // for the UI, we label the intent explicitly.
+    let (effective_endpoint_name, effective_source_label) = if let Some(p) = profile {
+        if !p.endpoint.is_empty() {
+            (p.endpoint.clone(), "profile-linked")
+        } else if !config.default_endpoint.is_empty() {
+            (config.default_endpoint.clone(), "global default")
+        } else {
+            ("(none)".to_string(), "unconfigured")
+        }
+    } else if !config.default_endpoint.is_empty() {
+        (config.default_endpoint.clone(), "global default")
+    } else {
+        ("(none)".to_string(), "unconfigured")
+    };
+
     println!("\n📊 Current Configuration");
     println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
 
     if let Some(p) = profile {
-        // Get the linked endpoint
-        let endpoint_info = config.get_endpoint(Some(&p.endpoint)).ok();
+        // Get the linked endpoint - if profile has no endpoint, fallback to default
+        let endpoint_info = config.get_endpoint(if p.endpoint.is_empty() { None } else { Some(&p.endpoint) }).ok();
 
         println!("  Profile: {}", Style::new().green().bold().apply_to(&profile_name));
-        println!("  ├─ Linked Endpoint: {}", p.endpoint);
+        println!("  ├─ Active Profile Endpoint: {}", if p.endpoint.is_empty() { "(uses global default)" } else { &p.endpoint });
+        println!("  ├─ Global Default Endpoint: {}", if config.default_endpoint.is_empty() { "(none)" } else { &config.default_endpoint });
+        println!("  ├─ Effective Endpoint: {} ({})", effective_endpoint_name, effective_source_label);
 
         if let Some(e) = endpoint_info {
             println!("  │   ├─ Provider: {}", e.provider);
@@ -235,6 +332,8 @@ fn display_current_config(config: &Config) {
         println!("  └─ Prompt: {}", p.prompt);
     } else {
         println!("  ⚠️  No profile selected!");
+        println!("  ├─ Global Default Endpoint: {}", if config.default_endpoint.is_empty() { "(none)" } else { &config.default_endpoint });
+        println!("  └─ Effective Endpoint: {} ({})", effective_endpoint_name, effective_source_label);
     }
 
     println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
@@ -248,6 +347,7 @@ fn display_current_config(config: &Config) {
 /// Show profile management submenu
 pub fn show_profiles_menu(_config: &Config) -> Result<ProfileMenuChoice> {
     let options = vec![
+        ProfileMenuChoice::SelectProfile,
         ProfileMenuChoice::CreateProfile,
         ProfileMenuChoice::EditProfile,
         ProfileMenuChoice::DeleteProfile,
@@ -332,7 +432,7 @@ pub async fn handle_create_profile(config: &mut Config) -> Result<bool> {
     Ok(true)
 }
 
-/// Handle profile editing (Model/Prompt only - NOT Provider/Key)
+/// Handle profile editing (Endpoint/Model/Prompt)
 pub fn handle_edit_profile(config: &mut Config) -> Result<bool> {
     let profiles: Vec<String> = config.profiles.iter().map(|p| p.name.clone()).collect();
     if profiles.is_empty() {
@@ -343,10 +443,18 @@ pub fn handle_edit_profile(config: &mut Config) -> Result<bool> {
     let profile_name = InquireSelect::new("Select profile to edit:", profiles).prompt()?;
 
     // Edit options for profile
-    let edit_options = vec!["Model Override", "Prompt", "Back"];
+    let edit_options = vec!["Endpoint", "Model Override", "Prompt", "Back"];
     let edit_selection = InquireSelect::new("What to edit:", edit_options).prompt()?;
 
     match edit_selection {
+        "Endpoint" => {
+            let new_endpoint = select_endpoint(config)?;
+
+            if let Some(p) = config.profiles.iter_mut().find(|p| p.name == profile_name) {
+                p.endpoint = new_endpoint.unwrap_or_default();
+            }
+            println!("✅ Endpoint updated!");
+        }
         "Model Override" => {
             let profile = config.profiles.iter().find(|p| p.name == profile_name).unwrap();
             let new_model = select_or_enter_model(config, &profile.endpoint)?;
@@ -409,6 +517,8 @@ pub fn handle_delete_profile(config: &mut Config) -> Result<bool> {
 /// Show endpoint management submenu
 pub fn show_endpoints_menu(_config: &Config) -> Result<EndpointMenuChoice> {
     let options = vec![
+        EndpointMenuChoice::SetActiveProfileEndpoint,
+        EndpointMenuChoice::SetDefaultEndpoint,
         EndpointMenuChoice::CreateEndpoint,
         EndpointMenuChoice::EditEndpoint,
         EndpointMenuChoice::DeleteEndpoint,
@@ -480,7 +590,7 @@ pub async fn handle_create_endpoint(config: &mut Config) -> Result<bool> {
 
     // Create endpoint
     config.endpoints.push(mylm_core::config::endpoints::EndpointConfig {
-        name,
+        name: name.clone(),
         provider: provider_id,
         base_url,
         model,
@@ -491,6 +601,11 @@ pub async fn handle_create_endpoint(config: &mut Config) -> Result<bool> {
         max_context_tokens: 32768,
         condense_threshold: 0.8,
     });
+
+    // If this is the first endpoint or no default is set, make it the default
+    if config.default_endpoint.is_empty() {
+        config.default_endpoint = name.clone();
+    }
 
     println!("✅ Endpoint created successfully!");
     config.save_to_default_location()?;
@@ -621,7 +736,7 @@ pub fn handle_delete_endpoint(config: &mut Config) -> Result<bool> {
 // ============================================================================
 
 /// Select an endpoint from available endpoints
-fn select_endpoint(config: &Config) -> Result<Option<String>> {
+pub fn select_endpoint(config: &Config) -> Result<Option<String>> {
     let mut endpoints: Vec<String> = config.endpoints.iter().map(|e| e.name.clone()).collect();
 
     if endpoints.is_empty() {
@@ -631,7 +746,23 @@ fn select_endpoint(config: &Config) -> Result<Option<String>> {
     // Add option to skip linking
     endpoints.push("(Skip / Link Later)".to_string());
 
-    let endpoint = InquireSelect::new("Select endpoint:", endpoints).prompt()?;
+    // Preselect effective endpoint if possible: active profile endpoint, else global default.
+    let current = config
+        .get_active_profile()
+        .map(|p| p.endpoint.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            if config.default_endpoint.is_empty() {
+                None
+            } else {
+                Some(config.default_endpoint.as_str())
+            }
+        });
+
+    let default_idx = inquire_default_index(&endpoints, current);
+    let endpoint = InquireSelect::new("Select endpoint:", endpoints)
+        .with_starting_cursor(default_idx)
+        .prompt()?;
     
     if endpoint == "(Skip / Link Later)" {
         Ok(None)
@@ -773,7 +904,7 @@ async fn print_banner(config: &Config) {
 
     let llm_info = match (profile, endpoint) {
         (Some(_), Some(e)) => format!("{} ({} / {})", e.name, e.provider, e.model),
-        (Some(p), None) => format!("Profile: {} (Missing Endpoint: '{}')", p.name, p.endpoint),
+        (Some(p), None) => format!("Profile: {} (Missing Endpoint: '{}')", p.name, if p.endpoint.is_empty() { "Default" } else { &p.endpoint }),
         _ => "Not Configured".to_string(),
     };
 

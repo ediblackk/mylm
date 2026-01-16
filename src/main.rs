@@ -447,24 +447,62 @@ async fn handle_session_command(cmd: &SessionCommand, _config: &Config) -> Resul
 
 /// Handle the unified settings dashboard - Menu System
 async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
+    // Normalize basic invariants on entry so the menu behaves predictably.
+    // (No destructive changes; we only auto-fix obvious broken pointers.)
+    if !config.profiles.is_empty() {
+        let active_missing = config.active_profile.trim().is_empty()
+            || !config.profiles.iter().any(|p| p.name == config.active_profile);
+        if active_missing {
+            config.active_profile = config.profiles[0].name.clone();
+            config.save_to_default_location()?;
+        }
+    }
+    if !config.endpoints.is_empty() {
+        let default_missing = config.default_endpoint.trim().is_empty()
+            || !config.endpoints.iter().any(|e| e.name == config.default_endpoint);
+        if default_missing {
+            config.default_endpoint = config.endpoints[0].name.clone();
+            config.save_to_default_location()?;
+        }
+    }
+
+    // Repair active profile endpoint link if it points to a missing endpoint.
+    if let Some(active) = config.get_active_profile().map(|p| p.name.clone()) {
+        let mut needs_repair = false;
+        if let Some(p) = config.profiles.iter().find(|p| p.name == active) {
+            let current_endpoint = p.endpoint.clone();
+            if !current_endpoint.trim().is_empty()
+                && !config.endpoints.iter().any(|e| e.name == current_endpoint)
+            {
+                needs_repair = true;
+            }
+        }
+        if needs_repair {
+            // Clear to fallback rather than forcing a choice here.
+            if let Some(p) = config.profiles.iter_mut().find(|p| p.name == active) {
+                p.endpoint.clear();
+            }
+            config.save_to_default_location()?;
+        }
+    }
+
     loop {
         let choice = crate::cli::hub::show_settings_dashboard(config)?;
 
         match choice {
-            crate::cli::hub::SettingsMenuChoice::SwitchActiveProfile => {
-                let profiles: Vec<String> = config.profiles.iter().map(|p| p.name.clone()).collect();
-                if let Some(ans) = crate::cli::hub::show_profile_select(profiles)? {
-                    config.active_profile = ans;
-                    config.save_to_default_location()?;
-                    println!("✅ Active profile set to: {}", config.active_profile);
-                }
-            }
-
             crate::cli::hub::SettingsMenuChoice::ManageProfiles => {
                 loop {
                     let action = crate::cli::hub::show_profiles_menu(config)?;
 
                     match action {
+                        crate::cli::hub::ProfileMenuChoice::SelectProfile => {
+                            let profiles: Vec<String> = config.profiles.iter().map(|p| p.name.clone()).collect();
+                            if let Some(ans) = crate::cli::hub::show_profile_select(profiles)? {
+                                config.active_profile = ans;
+                                config.save_to_default_location()?;
+                                println!("✅ Active profile set to: {}", config.active_profile);
+                            }
+                        }
                         crate::cli::hub::ProfileMenuChoice::CreateProfile => {
                             crate::cli::hub::handle_create_profile(config).await?;
                         }
@@ -479,11 +517,48 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                 }
             }
 
-            crate::cli::hub::SettingsMenuChoice::ManageEndpoints => {
+            crate::cli::hub::SettingsMenuChoice::EndpointSetup => {
                 loop {
                     let action = crate::cli::hub::show_endpoints_menu(config)?;
 
                     match action {
+                        crate::cli::hub::EndpointMenuChoice::SetActiveProfileEndpoint => {
+                            let active_profile_name = config.active_profile.clone();
+                            if active_profile_name.trim().is_empty() {
+                                println!("⚠️  No active profile selected. Select a profile first.");
+                                continue;
+                            }
+
+                            let selection = crate::cli::hub::select_endpoint(config)?;
+                            // Apply mutation first, then save after the mutable borrow ends.
+                            let mut new_endpoint_value: Option<String> = None;
+                            let mut updated = false;
+                            if let Some(p) = config.profiles.iter_mut().find(|p| p.name == active_profile_name) {
+                                // None means: clear profile endpoint => fallback to global default
+                                p.endpoint = selection.unwrap_or_default();
+                                new_endpoint_value = Some(p.endpoint.clone());
+                                updated = true;
+                            }
+
+                            if !updated {
+                                println!("⚠️  Active profile not found. Please re-select a profile.");
+                                continue;
+                            }
+
+                            config.save_to_default_location()?;
+                            if new_endpoint_value.as_deref().unwrap_or("").is_empty() {
+                                println!("✅ Active profile endpoint cleared (now using global default endpoint fallback).");
+                            } else {
+                                println!("✅ Active profile endpoint set to: {}", new_endpoint_value.unwrap());
+                            }
+                        }
+                        crate::cli::hub::EndpointMenuChoice::SetDefaultEndpoint => {
+                            if let Some(endpoint) = crate::cli::hub::select_endpoint(config)? {
+                                config.default_endpoint = endpoint;
+                                config.save_to_default_location()?;
+                                println!("✅ Global default endpoint (fallback) set to: {}", config.default_endpoint);
+                            }
+                        }
                         crate::cli::hub::EndpointMenuChoice::CreateEndpoint => {
                             crate::cli::hub::handle_create_endpoint(config).await?;
                         }
@@ -502,6 +577,94 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                 if let Err(e) = toggle_tmux_autostart().context("Failed to toggle tmux autostart") {
                     println!("❌ Error: {}", e);
                 }
+            }
+
+            crate::cli::hub::SettingsMenuChoice::WebSearch => {
+                loop {
+                    let action = crate::cli::hub::show_web_search_menu(config)?;
+
+                    match action {
+                        crate::cli::hub::WebSearchMenuChoice::ToggleEnabled => {
+                            config.web_search.enabled = !config.web_search.enabled;
+                            config.save_to_default_location()?;
+                        }
+                        crate::cli::hub::WebSearchMenuChoice::SetProvider => {
+                            let providers: Vec<String> = vec![
+                                "Disabled".to_string(),
+                                "Kimi (Moonshot AI)".to_string(),
+                                "SerpAPI (Google/Bing/etc.)".to_string(),
+                            ];
+                            let current = config.web_search.provider.as_str();
+                            let default_idx = match current {
+                                "kimi" => 1,
+                                "serpapi" => 2,
+                                _ => 0,
+                            };
+                            let choice = inquire::Select::new("Select web search provider:", providers)
+                                .with_starting_cursor(default_idx)
+                                .prompt()?;
+
+                            match choice.as_str() {
+                                "Kimi (Moonshot AI)" => {
+                                    config.web_search.enabled = true;
+                                    config.web_search.provider = "kimi".to_string();
+                                    if config.web_search.model.trim().is_empty() {
+                                        config.web_search.model = "kimi-k2-turbo-preview".to_string();
+                                    }
+                                }
+                                "SerpAPI (Google/Bing/etc.)" => {
+                                    config.web_search.enabled = true;
+                                    config.web_search.provider = "serpapi".to_string();
+                                    // SerpAPI has no model
+                                    config.web_search.model.clear();
+                                }
+                                _ => {
+                                    config.web_search.enabled = false;
+                                    config.web_search.provider.clear();
+                                    config.web_search.model.clear();
+                                }
+                            }
+
+                            config.save_to_default_location()?;
+                        }
+                        crate::cli::hub::WebSearchMenuChoice::SetApiKey => {
+                            let key = dialoguer::Password::new()
+                                .with_prompt("Web Search API Key")
+                                .allow_empty_password(true)
+                                .interact()?;
+                            if !key.trim().is_empty() {
+                                config.web_search.api_key = key;
+                                config.save_to_default_location()?;
+                            }
+                        }
+                        crate::cli::hub::WebSearchMenuChoice::SetModel => {
+                            if config.web_search.provider != "kimi" {
+                                println!("ℹ️  Model is only used for Kimi web search. Select Kimi as provider first.");
+                                continue;
+                            }
+                            let current = if config.web_search.model.trim().is_empty() {
+                                "kimi-k2-turbo-preview".to_string()
+                            } else {
+                                config.web_search.model.clone()
+                            };
+                            let model = inquire::Text::new("Kimi model name:")
+                                .with_initial_value(&current)
+                                .prompt()?;
+                            if !model.trim().is_empty() {
+                                config.web_search.model = model;
+                                config.save_to_default_location()?;
+                            }
+                        }
+                        crate::cli::hub::WebSearchMenuChoice::Back => break,
+                    }
+                }
+            }
+
+            crate::cli::hub::SettingsMenuChoice::GeneralSettings => {
+                if let Err(e) = config.edit_general() {
+                     println!("❌ Error editing general settings: {}", e);
+                }
+                config.save_to_default_location()?;
             }
 
             crate::cli::hub::SettingsMenuChoice::Back => break,
