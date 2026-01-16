@@ -266,7 +266,7 @@ pub fn show_profiles_menu(_config: &Config) -> Result<ProfileMenuChoice> {
 }
 
 /// Handle profile creation wizard
-pub fn handle_create_profile(config: &mut Config) -> Result<bool> {
+pub async fn handle_create_profile(config: &mut Config) -> Result<bool> {
     // Get profile name
     let name = Text::new("Profile name:").prompt()?;
     if name.trim().is_empty() {
@@ -281,15 +281,37 @@ pub fn handle_create_profile(config: &mut Config) -> Result<bool> {
     }
 
     // Select endpoint
-    let endpoint = select_endpoint(config)?;
-    if endpoint.is_none() {
-        println!("⚠️  Must select an endpoint to create a profile.");
-        return Ok(false);
-    }
-    let endpoint = endpoint.unwrap();
+    let endpoint = if config.endpoints.is_empty() {
+        if Confirm::new()
+            .with_prompt("No endpoints defined. Create one now?")
+            .default(true)
+            .interact()?
+        {
+            // Inline endpoint creation
+            // We need to release the mutable borrow to call handle_create_endpoint
+            // BUT handle_create_endpoint takes &mut Config.
+            // Since we are inside a function taking &mut Config, we can call it.
+            // However, we need to handle the return value and then re-check endpoints.
+            handle_create_endpoint(config).await?;
+            // Now try selecting again
+            select_endpoint(config)?
+        } else {
+             println!("⚠️  Creating profile without an endpoint. You must link one later.");
+             None
+        }
+    } else {
+        select_endpoint(config)?
+    };
+
+    let endpoint_name = endpoint.unwrap_or_default();
 
     // Get model override (optional)
-    let model = select_or_enter_model(config, &endpoint)?;
+    // If we have no endpoint, we can't fetch models, so manual entry only or skip
+    let model = if !endpoint_name.is_empty() {
+        select_or_enter_model(config, &endpoint_name)?
+    } else {
+        None
+    };
 
     // Get prompt
     let prompt = Text::new("Prompt name (without .md extension):")
@@ -299,7 +321,7 @@ pub fn handle_create_profile(config: &mut Config) -> Result<bool> {
     // Create and add profile
     config.profiles.push(mylm_core::config::Profile {
         name,
-        endpoint,
+        endpoint: endpoint_name,
         prompt,
         model,
     });
@@ -600,15 +622,22 @@ pub fn handle_delete_endpoint(config: &mut Config) -> Result<bool> {
 
 /// Select an endpoint from available endpoints
 fn select_endpoint(config: &Config) -> Result<Option<String>> {
-    let endpoints: Vec<String> = config.endpoints.iter().map(|e| e.name.clone()).collect();
+    let mut endpoints: Vec<String> = config.endpoints.iter().map(|e| e.name.clone()).collect();
 
     if endpoints.is_empty() {
-        println!("⚠️  No endpoints configured. Create an endpoint first.");
         return Ok(None);
     }
+    
+    // Add option to skip linking
+    endpoints.push("(Skip / Link Later)".to_string());
 
     let endpoint = InquireSelect::new("Select endpoint:", endpoints).prompt()?;
-    Ok(Some(endpoint))
+    
+    if endpoint == "(Skip / Link Later)" {
+        Ok(None)
+    } else {
+        Ok(Some(endpoint))
+    }
 }
 
 /// Select or enter a model for the given endpoint
@@ -732,11 +761,19 @@ async fn print_banner(config: &Config) {
 
     // Compact Provider/Context Info
     let profile = config.get_active_profile();
+    // Use the safe fallback we added to get_endpoint or just try get_endpoint(None)
+    // We already made get_endpoint return Result.
     let endpoint = config.get_endpoint(None).ok();
 
-    let profile_name = &config.active_profile;
+    let profile_name = if config.active_profile.is_empty() {
+        "None"
+    } else {
+        &config.active_profile
+    };
+
     let llm_info = match (profile, endpoint) {
         (Some(_), Some(e)) => format!("{} ({} / {})", e.name, e.provider, e.model),
+        (Some(p), None) => format!("Profile: {} (Missing Endpoint: '{}')", p.name, p.endpoint),
         _ => "Not Configured".to_string(),
     };
 

@@ -55,6 +55,34 @@ async fn main() -> Result<()> {
     // Load configuration
     let mut config = Config::load().context("Failed to load configuration")?;
 
+    // Onboarding: Check for fresh install
+    if config.endpoints.is_empty() && config.profiles.is_empty() && !cli.version {
+        println!("\n👋 Welcome to mylm! It looks like this is a fresh install.");
+        println!("🚀 Let's get you set up.");
+        
+        // Launch onboarding wizard (simplified version: create endpoint -> create profile)
+        if dialoguer::Confirm::new()
+            .with_prompt("Would you like to configure an LLM endpoint now?")
+            .default(true)
+            .interact()?
+        {
+             crate::cli::hub::handle_create_endpoint(&mut config).await?;
+             
+             if !config.endpoints.is_empty() {
+                 println!("\n✨ Endpoint created! Now let's create a profile to use it.");
+                 if dialoguer::Confirm::new()
+                    .with_prompt("Create a profile now?")
+                    .default(true)
+                    .interact()?
+                 {
+                     crate::cli::hub::handle_create_profile(&mut config).await?;
+                 }
+             }
+        } else {
+             println!("⚠️  mylm requires at least one endpoint to function.");
+        }
+    }
+
     // Handle different commands
     match &cli.command {
         Some(Commands::Query {
@@ -80,7 +108,14 @@ async fn main() -> Result<()> {
             dry_run: _,
         }) => {
             let ctx = TerminalContext::collect().await;
-            let endpoint_config = config.get_endpoint(cli.endpoint.as_deref())?;
+            let endpoint_config = match config.get_endpoint(cli.endpoint.as_deref()) {
+                Ok(ep) => ep,
+                Err(_) => {
+                    println!("❌ No active endpoint configured.");
+                    println!("   Run 'mylm' to open the configuration hub and set up an endpoint.");
+                    return Ok(());
+                }
+            };
 
             let llm_config = LlmConfig::new(
                 endpoint_config.provider.parse().map_err(|e| anyhow::anyhow!("{}", e))?,
@@ -131,11 +166,11 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
             if *warmup {
                 mylm_core::memory::VectorStore::warmup().await?;
             } else {
-                if config.endpoints.is_empty() {
-                    println!("🤖 Welcome to mylm! Let's get you set up.");
-                }
                 handle_settings_dashboard(&mut config).await?;
-                mylm_core::memory::VectorStore::warmup().await?;
+                // Only warm up if we have endpoints
+                if !config.endpoints.is_empty() {
+                    mylm_core::memory::VectorStore::warmup().await?;
+                }
             }
         }
 
@@ -431,7 +466,7 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
 
                     match action {
                         crate::cli::hub::ProfileMenuChoice::CreateProfile => {
-                            crate::cli::hub::handle_create_profile(config)?;
+                            crate::cli::hub::handle_create_profile(config).await?;
                         }
                         crate::cli::hub::ProfileMenuChoice::EditProfile => {
                             crate::cli::hub::handle_edit_profile(config)?;
@@ -489,7 +524,14 @@ async fn handle_one_shot(
     let ctx = TerminalContext::collect().await;
 
     // Determine which endpoint to use
-    let endpoint_config = config.get_endpoint(cli.endpoint.as_deref())?;
+    let endpoint_config = match config.get_endpoint(cli.endpoint.as_deref()) {
+        Ok(ep) => ep,
+        Err(_) => {
+            println!("❌ No active endpoint configured.");
+            println!("   Run 'mylm' to open the configuration hub and set up an endpoint.");
+            return Ok(());
+        }
+    };
 
     // Get effective model (profile override or endpoint default)
     let effective_model = if let Some(profile) = config.get_active_profile() {

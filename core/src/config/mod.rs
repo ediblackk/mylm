@@ -39,7 +39,7 @@ pub struct Profile {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     /// Name of the currently active profile
-    #[serde(default = "default_profile_name")]
+    #[serde(default)]
     pub active_profile: String,
 
     /// List of available profiles
@@ -47,10 +47,11 @@ pub struct Config {
     pub profiles: Vec<Profile>,
 
     /// Default endpoint to use when none specified
-    #[serde(default = "default_endpoint")]
+    #[serde(default)]
     pub default_endpoint: String,
 
     /// List of configured LLM endpoints
+    #[serde(default)]
     pub endpoints: Vec<endpoints::EndpointConfig>,
 
     /// Command allowlist settings
@@ -120,9 +121,6 @@ fn default_verbose_mode() -> bool {
     false
 }
 
-fn default_profile_name() -> String {
-    "default".to_string()
-}
 
 /// Web search configuration
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -241,22 +239,13 @@ pub struct CommandConfig {
     pub blocked_commands: Vec<String>,
 }
 
-/// Get the default endpoint name
-fn default_endpoint() -> String {
-    "default".to_string()
-}
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            active_profile: default_profile_name(),
-            profiles: vec![Profile {
-                name: default_profile_name(),
-                endpoint: default_endpoint(),
-                prompt: "default".to_string(),
-                model: None,
-            }],
-            default_endpoint: default_endpoint(),
+            active_profile: String::new(),
+            profiles: Vec::new(),
+            default_endpoint: String::new(),
             endpoints: Vec::new(),
             commands: CommandConfig::default(),
             web_search: WebSearchConfig::default(),
@@ -304,16 +293,30 @@ impl Config {
 
     /// Get endpoint configuration by name
     pub fn get_endpoint(&self, name: Option<&str>) -> Result<&endpoints::EndpointConfig> {
-        let name = name.unwrap_or_else(|| {
-            self.get_active_profile()
-                .map(|p| p.endpoint.as_str())
-                .unwrap_or(&self.default_endpoint)
-        });
+        // If a specific name is requested, try to find it
+        if let Some(n) = name {
+            return self.endpoints
+                .iter()
+                .find(|e| e.name == n)
+                .with_context(|| format!("Endpoint '{}' not found", n));
+        }
 
-        self.endpoints
-            .iter()
-            .find(|e| e.name == name)
-            .with_context(|| format!("Endpoint '{}' not found in configuration", name))
+        // Otherwise, try to find the endpoint for the active profile
+        if let Some(profile) = self.get_active_profile() {
+            if !profile.endpoint.is_empty() {
+                 return self.endpoints
+                    .iter()
+                    .find(|e| e.name == profile.endpoint)
+                    .with_context(|| format!("Endpoint '{}' (from active profile) not found", profile.endpoint));
+            }
+        }
+        
+        // Fallback: if we have only one endpoint, just return it (convenience for single-endpoint setups)
+        if self.endpoints.len() == 1 {
+            return Ok(&self.endpoints[0]);
+        }
+
+        anyhow::bail!("No endpoint selected or configured. Please set an active profile or endpoint.")
     }
 
     /// Get the default endpoint
@@ -356,8 +359,10 @@ impl Config {
         }).context("Could not determine configuration save path")?;
 
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create config directory: {:?}", parent))?;
+            if !parent.exists() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("Failed to create config directory: {:?}", parent))?;
+            }
         }
         
         self.save(path)
@@ -1065,75 +1070,8 @@ async fn fetch_models_from_provider(
     Ok(models)
 }
 
-/// Create default configuration with Ollama as default endpoint
+/// Create default configuration (Empty)
 #[allow(dead_code)]
 pub fn create_default_config() -> Config {
-    Config {
-        active_profile: "ollama".to_string(),
-        profiles: vec![
-            Profile {
-                name: "ollama".to_string(),
-                endpoint: "ollama".to_string(),
-                prompt: "default".to_string(),
-                model: None,
-            },
-            Profile {
-                name: "openai".to_string(),
-                endpoint: "openai".to_string(),
-                prompt: "default".to_string(),
-                model: None,
-            },
-        ],
-        default_endpoint: "ollama".to_string(),
-        endpoints: vec![
-            endpoints::EndpointConfig {
-                name: "ollama".to_string(),
-                provider: "openai".to_string(),
-                base_url: "http://localhost:11434/v1".to_string(),
-                model: "llama3.2".to_string(),
-                api_key: "none".to_string(),
-                timeout_seconds: 120,
-                input_price_per_1m: 0.0,
-                output_price_per_1m: 0.0,
-                max_context_tokens: 32768,
-                condense_threshold: 0.8,
-            },
-            endpoints::EndpointConfig {
-                name: "openai".to_string(),
-                provider: "openai".to_string(),
-                base_url: "https://api.openai.com/v1".to_string(),
-                model: "gpt-4o".to_string(),
-                api_key: "".to_string(),
-                timeout_seconds: 60,
-                input_price_per_1m: 2.5,
-                output_price_per_1m: 10.0,
-                max_context_tokens: 128000,
-                condense_threshold: 0.8,
-            },
-            endpoints::EndpointConfig {
-                name: "lm-studio".to_string(),
-                provider: "openai".to_string(),
-                base_url: "http://localhost:1234/v1".to_string(),
-                model: "qwen2.5-3b".to_string(),
-                api_key: "none".to_string(),
-                timeout_seconds: 120,
-                input_price_per_1m: 0.0,
-                output_price_per_1m: 0.0,
-                max_context_tokens: 32768,
-                condense_threshold: 0.8,
-            },
-        ],
-        commands: CommandConfig {
-            allow_execution: false,
-            allowlist_paths: vec![],
-            allowed_commands: vec![],
-            blocked_commands: vec![],
-        },
-        web_search: WebSearchConfig::default(),
-        memory: MemoryConfig::default(),
-        agent: AgentConfig::default(),
-        context_limit: None,
-        verbose_mode: false,
-        context_profile: ContextProfile::default(),
-    }
+    Config::default()
 }
