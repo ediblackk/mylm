@@ -33,7 +33,7 @@ jobs:
             bin_name: mylm.exe
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
@@ -70,7 +70,7 @@ jobs:
           7z a ../../../mylm-${{ matrix.platform.target }}.zip ${{ matrix.platform.bin_name }}
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: mylm-${{ matrix.platform.target }}
           path: mylm-${{ matrix.platform.target }}.*
@@ -82,19 +82,21 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Download artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mylm-*
+          merge-multiple: true
+          path: release_assets
 
-      - name: Display structure of downloaded files
-        run: ls -R
+      - name: List assets
+        run: ls -R release_assets
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
-          files: |
-            */mylm-*.tar.gz
-            */mylm-*.zip
+          files: release_assets/*
           generate_release_notes: true
           draft: true
