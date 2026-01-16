@@ -300,10 +300,31 @@ impl Agent {
         }
 
         // 1. Hard Iteration Limit Check
+        //
+        // IMPORTANT:
+        // `pending_decision` may still be set (e.g., Short-Key protocol returns a Thought first,
+        // queues an Action as pending, then the driver immediately calls `step()` again).
+        // If we hit the iteration limit while a pending action exists, returning a `Message`
+        // WITHOUT clearing `pending_decision` causes callers that auto-continue on
+        // `has_pending_decision()` to re-enter `step()` and spam the same limit message.
         if self.iteration_count >= self.max_iterations {
+            crate::info_log!(
+                "Agent step halted: iteration limit reached (iteration_count={}, max_iterations={}, had_pending_decision={})",
+                self.iteration_count,
+                self.max_iterations,
+                self.pending_decision.is_some()
+            );
+
+            // Clear any queued tool action so driver loops don't interpret this as "keep going".
+            self.pending_decision = None;
+            self.pending_tool_call_id = None;
+
             return Ok(AgentDecision::Message(
-                format!("⚠️ Maximum iteration limit ({}) reached. I've paused to prevent an infinite loop. You can continue by asking me to keep going.", self.max_iterations),
-                self.total_usage.clone()
+                format!(
+                    "⚠️ Maximum iteration limit ({}) reached. I've paused to prevent an infinite loop. You can continue by asking me to keep going.",
+                    self.max_iterations
+                ),
+                self.total_usage.clone(),
             ));
         }
 
@@ -659,18 +680,30 @@ impl Agent {
                     retry_count = 0; // Reset on successful action
                     let _ = event_tx.send(TuiEvent::StatusUpdate(format!("Tool: '{}'", tool)));
 
-                    if tool == "execute_command" && !auto_approve {
-                        let cmd = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&args) {
-                            v.get("command").and_then(|c| c.as_str())
-                             .or_else(|| v.get("args").and_then(|c| c.as_str()))
-                             .unwrap_or(&args).to_string()
+                    // Approval gating (AUTO-APPROVE OFF)
+                    //
+                    // Requirement: every tool call must be approved when auto-approve is OFF.
+                    // Headless callers may not provide an approval channel; in that case, we MUST halt
+                    // before executing the tool.
+                    if !auto_approve {
+                        // Provide a human-readable suggestion of what would run.
+                        let suggestion = if tool == "execute_command" {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&args) {
+                                v.get("command").and_then(|c| c.as_str())
+                                    .or_else(|| v.get("args").and_then(|c| c.as_str()))
+                                    .unwrap_or(&args)
+                                    .to_string()
+                            } else {
+                                args.clone()
+                            }
                         } else {
-                            args.clone()
+                            // For non-shell tools, show tool+args (keeps UI event semantics stable).
+                            format!("{} {}", tool, args)
                         };
-                        let _ = event_tx.send(TuiEvent::SuggestCommand(cmd));
+                        let _ = event_tx.send(TuiEvent::SuggestCommand(suggestion));
 
                         if let Some(rx) = &mut approval_rx {
-                            // Wait for approval
+                            // Wait for approval (one tool execution == one approval)
                             let _ = event_tx.send(TuiEvent::StatusUpdate("Waiting for approval...".to_string()));
                             match rx.recv().await {
                                 Some(true) => {
@@ -679,21 +712,28 @@ impl Agent {
                                 }
                                 Some(false) => {
                                     let _ = event_tx.send(TuiEvent::StatusUpdate("Denied.".to_string()));
-                                    last_observation = Some("Error: User denied the execution of this command.".to_string());
+                                    last_observation = Some(format!(
+                                        "Error: User denied the execution of tool '{}'.",
+                                        tool
+                                    ));
                                     continue;
                                 }
                                 None => {
-                                    return Ok(("Error: Approval channel closed.".to_string(), self.total_usage.clone()));
+                                    return Ok((
+                                        "Error: Approval channel closed.".to_string(),
+                                        self.total_usage.clone(),
+                                    ));
                                 }
                             }
                         } else {
-                            // Legacy behavior: return to caller to handle approval
-                            let last_msg = self.history.last().map(|m| m.content.clone()).unwrap_or_default();
-                            let mut truncated = last_msg;
-                            if let Some(pos) = truncated.find("Observation:") {
-                                truncated.truncate(pos);
-                            }
-                            return Ok((truncated.trim().to_string(), self.total_usage.clone()));
+                            // Legacy/headless behavior: halt and return control to the caller.
+                            return Ok((
+                                format!(
+                                    "Approval required to run tool '{}' but no approval channel is available (AUTO-APPROVE is OFF).",
+                                    tool
+                                ),
+                                self.total_usage.clone(),
+                            ));
                         }
                     }
 
