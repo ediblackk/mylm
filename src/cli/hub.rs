@@ -376,13 +376,19 @@ pub fn show_profile_wizard(config: &Config) -> Result<Option<(String, String, Op
     }
     
     // Get endpoint selection
-    let endpoints: Vec<String> = config.endpoints.iter().map(|e| e.name.clone()).collect();
+    let mut endpoints: Vec<String> = config.endpoints.iter().map(|e| e.name.clone()).collect();
     if endpoints.is_empty() {
-        println!("⚠️  No endpoints configured. Please create an endpoint first.");
-        return Ok(None);
+        println!("⚠️  No connections configured. Using 'default' connection.");
+        endpoints.push("default".to_string());
     }
     
-    let endpoint = inquire::Select::new("Select endpoint:", endpoints).prompt()?;
+    let endpoint = if endpoints.len() == 1 {
+        let e = endpoints[0].clone();
+        println!("Using connection: {}", e);
+        e
+    } else {
+        inquire::Select::new("Select connection:", endpoints).prompt()?
+    };
     
     // Get model (optional)
     let model_choice = inquire::Select::new("Select model:", vec!["Use endpoint default", "Choose specific model"]).prompt()?;

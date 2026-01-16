@@ -482,19 +482,37 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
             }
             crate::cli::hub::SettingsChoice::EditProvider => {
                 let endpoint_name = config.get_active_profile().map(|p| p.endpoint.clone()).unwrap_or_default();
-                config.edit_endpoint_provider(&endpoint_name).await?;
+                if config.endpoints.iter().any(|e| e.name == endpoint_name) {
+                    config.edit_endpoint_provider(&endpoint_name).await?;
+                } else {
+                    config.edit_endpoint_details(&endpoint_name).await?;
+                }
             }
             crate::cli::hub::SettingsChoice::EditApiUrl => {
                 let endpoint_name = config.get_active_profile().map(|p| p.endpoint.clone()).unwrap_or_default();
-                config.edit_endpoint_base_url(&endpoint_name)?;
+                if config.endpoints.iter().any(|e| e.name == endpoint_name) {
+                    config.edit_endpoint_base_url(&endpoint_name)?;
+                } else {
+                    config.edit_endpoint_details(&endpoint_name).await?;
+                }
             }
             crate::cli::hub::SettingsChoice::EditApiKey => {
                 let endpoint_name = config.get_active_profile().map(|p| p.endpoint.clone()).unwrap_or_default();
-                config.edit_endpoint_api_key(&endpoint_name)?;
+                if config.endpoints.iter().any(|e| e.name == endpoint_name) {
+                    config.edit_endpoint_api_key(&endpoint_name)?;
+                } else {
+                    config.edit_endpoint_details(&endpoint_name).await?;
+                }
             }
             crate::cli::hub::SettingsChoice::EditModel => {
                 let profile_name = config.active_profile.clone();
-                config.edit_profile_model(&profile_name).await?;
+                let endpoint_name = config.get_active_profile().map(|p| p.endpoint.clone()).unwrap_or_default();
+                if config.endpoints.iter().any(|e| e.name == endpoint_name) {
+                    config.edit_profile_model(&profile_name).await?;
+                } else {
+                    println!("⚠️  Connection '{}' not found. Please configure it first.", endpoint_name);
+                    config.edit_endpoint_details(&endpoint_name).await?;
+                }
             }
             crate::cli::hub::SettingsChoice::EditPrompt => {
                 let profile = config.get_active_profile()
