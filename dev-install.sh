@@ -83,20 +83,46 @@ check_busy() {
     fi
 }
 
-# Install binary
-check_busy /usr/local/bin/mylm
-sudo cp target/debug/mylm /usr/local/bin/mylm
-sudo chmod +x /usr/local/bin/mylm
+# Determine installation target
+# 1. Prefer existing installation in PATH
+TARGET_BIN=$(type -P mylm || echo "/usr/local/bin/mylm")
 
-# Also update /usr/local/bin/ai if it exists to maintain compatibility with existing aliases
-if [ -f "/usr/local/bin/ai" ]; then
-    check_busy /usr/local/bin/ai
-    sudo cp target/debug/mylm /usr/local/bin/ai
-    sudo chmod +x /usr/local/bin/ai
+# 2. Filter out the build artifact itself if it happens to be in PATH
+if [[ "$TARGET_BIN" == *"target/debug/mylm"* ]]; then
+    TARGET_BIN="/usr/local/bin/mylm"
+fi
+
+echo "🎯 Installing to: $TARGET_BIN"
+
+# Check permissions
+TARGET_DIR=$(dirname "$TARGET_BIN")
+SUDO_CMD=""
+if [ ! -w "$TARGET_DIR" ] || ( [ -f "$TARGET_BIN" ] && [ ! -w "$TARGET_BIN" ] ); then
+    echo "🔒 Elevated permissions required for $TARGET_DIR"
+    SUDO_CMD="sudo"
+fi
+
+# Ensure directory exists
+if [ ! -d "$TARGET_DIR" ]; then
+    $SUDO_CMD mkdir -p "$TARGET_DIR"
+fi
+
+# Install binary
+check_busy "$TARGET_BIN"
+$SUDO_CMD cp target/debug/mylm "$TARGET_BIN"
+$SUDO_CMD chmod +x "$TARGET_BIN"
+
+# Also update 'ai' if it exists in the same directory (legacy/symlink support)
+AI_BIN="${TARGET_DIR}/ai"
+if [ -f "$AI_BIN" ]; then
+    echo "🔄 Updating legacy alias binary at $AI_BIN..."
+    check_busy "$AI_BIN"
+    $SUDO_CMD cp target/debug/mylm "$AI_BIN"
+    $SUDO_CMD chmod +x "$AI_BIN"
 fi
 
 # Verify installation
-INSTALLED_VERSION=$(/usr/local/bin/mylm --version)
+INSTALLED_VERSION=$("$TARGET_BIN" --version)
 
 if [ "$BUILT_VERSION" == "$INSTALLED_VERSION" ]; then
     echo "✅ Dev binary installed successfully!"
@@ -166,7 +192,7 @@ if [ "$BUILT_VERSION" == "$INSTALLED_VERSION" ]; then
         if ! grep -q "alias ai=" "$shell_rc"; then
             read -p "Set 'ai' alias in $shell_rc? [y/N]: " set_alias
             if [[ "$set_alias" =~ ^[Yy]$ ]]; then
-                echo "alias ai='/usr/local/bin/mylm'" >> "$shell_rc"
+                echo "alias ai='$TARGET_BIN'" >> "$shell_rc"
                 echo "✅ Alias 'ai' added to $shell_rc."
                 echo "💡 Please restart your shell or run 'source $shell_rc' to apply changes."
             fi
