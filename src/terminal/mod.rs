@@ -551,9 +551,7 @@ async fn run_loop(
                         }
                     }
                     
-                    if let Some(path) = mylm_core::config::find_config_file() {
-                        let _ = new_config.save(path);
-                    }
+                    let _ = new_config.save_to_default_location();
                 }
                 TuiEvent::ExecuteTerminalCommand(cmd, tx) => {
                     mylm_core::info_log!("TUI: Starting terminal command execution: {}", cmd);

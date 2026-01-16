@@ -338,7 +338,7 @@ impl Config {
     }
 
     /// Save configuration to file
-    #[allow(dead_code)]
+    /// Save configuration to a specific file path
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
         let content = serde_yaml::to_string(self)
             .with_context(|| "Failed to serialize configuration")?;
@@ -347,6 +347,20 @@ impl Config {
             .with_context(|| format!("Failed to write config file: {:?}", path.as_ref()))?;
 
         Ok(())
+    }
+
+    /// Save configuration to the default system location
+    pub fn save_to_default_location(&self) -> Result<()> {
+        let path = find_config_file().or_else(|| {
+            get_config_dir().map(|d| d.join(CONFIG_FILE_NAME))
+        }).context("Could not determine configuration save path")?;
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create config directory: {:?}", parent))?;
+        }
+        
+        self.save(path)
     }
 
     /// Interactive setup wizard
@@ -938,7 +952,7 @@ fn edit_string_list(theme: &ColorfulTheme, title: &str, list: &mut Vec<String>) 
     Ok(())
 }
 
-/// Find the configuration file in standard locations
+/// Find the configuration file in standard locations (only if it exists)
 pub fn find_config_file() -> Option<PathBuf> {
     // Check current directory first
     if let Ok(cwd) = std::env::current_dir() {
@@ -948,26 +962,27 @@ pub fn find_config_file() -> Option<PathBuf> {
         }
     }
 
-    // Check config directory
-    get_config_dir().map(|dir| dir.join(CONFIG_FILE_NAME))
-}
-
-/// Get the configuration directory
-fn get_config_dir() -> Option<PathBuf> {
-    // Try XDG config dir first
-    if let Some(dir) = config_dir() {
-        let path = dir.join(CONFIG_DIR_NAME);
+    // Check config directory for existing file
+    if let Some(dir) = get_config_dir() {
+        let path = dir.join(CONFIG_FILE_NAME);
         if path.exists() {
             return Some(path);
         }
     }
 
-    // Fall back to home directory
+    None
+}
+
+/// Get the configuration directory path
+pub fn get_config_dir() -> Option<PathBuf> {
+    // Try standard config dir first
+    if let Some(dir) = config_dir() {
+        return Some(dir.join(CONFIG_DIR_NAME));
+    }
+
+    // Fall back to manual home-based config path
     if let Some(home) = home_dir() {
-        let path = home.join(".config").join(CONFIG_DIR_NAME);
-        if path.exists() {
-            return Some(path);
-        }
+        return Some(home.join(".config").join(CONFIG_DIR_NAME));
     }
 
     None

@@ -3,6 +3,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Terminal AI](https://img.shields.io/badge/Terminal-AI-blue.svg)](#)
 
+![mylm Ad](assets/Top.png)
+
 **mylm (My Language Model)** is a high-performance **Terminal AI Assistant** built for developers who actually spend their day in the CLI. 
 
 ![mylm Dashboard](assets/hero.png)
@@ -69,6 +71,7 @@ chmod +x install.sh
 *   **No Sudo Required**: The installer is designed to be **strictly no-sudo**. It installs everything into your home directory (`~/.local/bin`).
 *   **Rust Environment**: If the installer installs Rust for you via `rustup`, you **must** restart your terminal or run `source $HOME/.cargo/env` before you can use `cargo` or the `ai` command in new sessions.
 *   **System Dependencies**: Since the script doesn't use `sudo`, it cannot install system libraries for you. If any are missing, it will provide you with the exact command to run for your specific distribution.
+*   **Configuration Note**: Profile configuration wizard fails during installation, simply save and exit (or move on) and configure your providers post-installation via the central hub (`ai`).
 
 ---
 

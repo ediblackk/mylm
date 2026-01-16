@@ -205,10 +205,8 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
                     let ans = inquire::Select::new("Select Active Profile", profiles).prompt()?;
                     let mut new_config = config.clone();
                     new_config.active_profile = ans;
-                    if let Some(path) = mylm_core::config::find_config_file() {
-                        new_config.save(path)?;
-                        println!("Active profile set to {}", new_config.active_profile);
-                    }
+                    new_config.save_to_default_location()?;
+                    println!("Active profile set to {}", new_config.active_profile);
                 }
                 Some(ConfigCommand::New) => {
                     let mut mut_config = config.clone();
@@ -573,15 +571,8 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                 }
             }
             crate::cli::hub::SettingsChoice::Save => {
-                if let Some(path) = mylm_core::config::find_config_file().or_else(|| {
-                    dirs::config_dir().map(|d| d.join("mylm").join("mylm.yaml"))
-                }) {
-                    if let Some(parent) = path.parent() {
-                        std::fs::create_dir_all(parent)?;
-                    }
-                    config.save(path)?;
-                    println!("✅ Configuration saved successfully.");
-                }
+                config.save_to_default_location()?;
+                println!("✅ Configuration saved successfully.");
                 break;
             }
             crate::cli::hub::SettingsChoice::Back => break,

@@ -533,6 +533,8 @@ run_setup() {
     local mandatory=$1
     echo ""
     echo "⚙️  Running Configuration Setup..."
+    echo "💡 Note: If the configuration fails here, simply move on (save and exit)."
+    echo "   You can always configure your providers later from the central hub by running 'ai'."
     
     if [ "$mandatory" == "true" ]; then
         "$BINARY_DEST" setup
