@@ -6,9 +6,19 @@ echo "🚀 Quick dev install..."
 # Ensure cargo bin is in PATH (sccache lives there)
 export PATH="$HOME/.cargo/bin:$PATH"
 
-# Check for dependencies
+# Detect OS
+OS_TYPE=$(uname -s)
+
+# Define required dependencies based on OS
+REQUIRED_DEPS="tmux sccache protoc"
+if [ "$OS_TYPE" = "Linux" ]; then
+    # mold is primarily for Linux
+    REQUIRED_DEPS="$REQUIRED_DEPS mold"
+fi
+
+# Check for missing dependencies
 MISSING_DEPS=()
-for dep in tmux mold sccache protoc; do
+for dep in $REQUIRED_DEPS; do
     if ! command -v "$dep" &> /dev/null; then
         MISSING_DEPS+=("$dep")
     fi
@@ -17,10 +27,25 @@ done
 if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
     echo "⚠️  Missing required dev dependencies: ${MISSING_DEPS[*]}"
     echo "   Note: mold and sccache are required by .cargo/config.toml for high-performance builds."
-    read -p "Attempt to install them now? (Requires sudo for some) [Y/n]: " install_deps
+    read -p "Attempt to install them now? [Y/n]: " install_deps
     if [[ ! "$install_deps" =~ ^[Nn]$ ]]; then
-        # Check OS
-        if [ -f /etc/os-release ]; then
+        if [ "$OS_TYPE" = "Darwin" ]; then
+            if command -v brew &> /dev/null; then
+                echo "🍎 Detected macOS. Installing dependencies via Homebrew..."
+                for dep in "${MISSING_DEPS[@]}"; do
+                    PKG_NAME="$dep"
+                    # Map binary names to package names if needed
+                    if [ "$dep" = "protoc" ]; then PKG_NAME="protobuf"; fi
+                    
+                    # Skip sccache here if we want to install via cargo, or just use brew
+                    # Brew sccache is fine.
+                    echo "📦 Installing $PKG_NAME..."
+                    brew install "$PKG_NAME"
+                done
+            else
+                echo "❌ Homebrew not found. Please install dependencies manually: ${MISSING_DEPS[*]}"
+            fi
+        elif [ -f /etc/os-release ]; then
             . /etc/os-release
             case $ID in
                 ubuntu|debian|pop|mint)
@@ -35,17 +60,15 @@ if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
             esac
         fi
         
-        # Install/verify sccache via cargo
+        # Double check sccache if it wasn't installed by system package manager
         echo "🔍 Checking sccache..."
-        if command -v sccache &> /dev/null; then
+        if ! command -v sccache &> /dev/null; then
+            echo "🚀 sccache not found in system packages, installing via cargo..."
+            cargo install sccache
+            export PATH="$HOME/.cargo/bin:$PATH"
+        else
             CURRENT_SCCACHE=$(which sccache 2>/dev/null || echo "not-found")
             echo "ℹ️  sccache found at: $CURRENT_SCCACHE"
-            echo "   Version: $(sccache --version 2>/dev/null || echo 'unknown')"
-        else
-            echo "🚀 sccache not found, installing via cargo..."
-            cargo install sccache
-            # Refresh PATH to ensure sccache is available
-            export PATH="$HOME/.cargo/bin:$PATH"
         fi
     else
         echo "⚠️  Continuing without dependencies. Build will likely fail."
