@@ -10,6 +10,7 @@ CONFIG_FILE="$CONFIG_DIR/mylm.yaml"
 # Install into user-space by default.
 PREFIX="${MYLM_PREFIX:-$HOME/.local}"
 BINARY_DEST="$PREFIX/bin/mylm"
+BUILD_PROFILE="release"
 
 # --- Utility Functions ---
 
@@ -233,10 +234,37 @@ check_and_install_dependencies() {
 
 build_binary() {
     local force_rebuild=$1
-    local profile=${2:-"release"}  # Default release, dar poate fi schimbat
+    local initial_profile=$2
     
-    if [ "$force_rebuild" != "true" ] && [ -f "./target/$profile/mylm" ]; then
-        echo "✨ Found an existing $profile binary at ./target/$profile/mylm."
+    # 1. Smart detection of existing binary profile
+    if [ -z "$initial_profile" ]; then
+        if [ -f "target/release/mylm" ] && [ -f "target/debug/mylm" ]; then
+            if [ "target/release/mylm" -nt "target/debug/mylm" ]; then
+                initial_profile="release"
+            else
+                initial_profile="debug"
+            fi
+        elif [ -f "target/release/mylm" ]; then
+            initial_profile="release"
+        elif [ -f "target/debug/mylm" ]; then
+            initial_profile="debug"
+        fi
+    fi
+
+    # 2. If still no profile and it's a fresh install or forced, ask the user
+    if [ -z "$initial_profile" ]; then
+        read -p "Use optimized release build (20 min) or fast dev build (7 min)? [r/D]: " build_type
+        if [[ "$build_type" =~ ^[Rr]$ ]]; then
+            BUILD_PROFILE="release"
+        else
+            BUILD_PROFILE="debug"
+        fi
+    else
+        BUILD_PROFILE="$initial_profile"
+    fi
+
+    if [ "$force_rebuild" != "true" ] && [ -f "./target/$BUILD_PROFILE/mylm" ]; then
+        echo "✨ Found an existing $BUILD_PROFILE binary at ./target/$BUILD_PROFILE/mylm."
         read -p "Would you like to rebuild it to ensure it's the latest version? [y/N]: " rebuild
         if [[ ! "$rebuild" =~ ^[Yy]$ ]]; then
             echo "⏭️  Skipping build, using existing binary."
@@ -244,19 +272,9 @@ build_binary() {
         fi
     fi
 
-    echo "🚀 Building mylm in $profile mode..."
+    echo "🚀 Building mylm in $BUILD_PROFILE mode..."
     
-    # Întreabă utilizatorul ce profil vrea
-    if [ "$profile" == "release" ]; then
-        read -p "Use optimized release build (20 min) or fast dev build (7 min)? [r/D]: " build_type
-        if [[ "$build_type" =~ ^[Rr]$ ]]; then
-            profile="release"
-        else
-            profile="debug"
-        fi
-    fi
-    
-    if [ "$profile" == "release" ]; then
+    if [ "$BUILD_PROFILE" == "release" ]; then
         if command -v sccache &> /dev/null; then
             RUSTC_WRAPPER=sccache cargo build --release
         else
@@ -272,8 +290,30 @@ build_binary() {
 }
 
 install_binary() {
-    local profile=${1:-"release"}
-    echo "📦 Installing/Updating binary to $BINARY_DEST..."
+    local profile=$1
+    
+    # Final safety detection for the cp command
+    if [ -z "$profile" ] || [ ! -f "target/$profile/mylm" ]; then
+        if [ -f "target/release/mylm" ] && [ -f "target/debug/mylm" ]; then
+            if [ "target/release/mylm" -nt "target/debug/mylm" ]; then
+                profile="release"
+            else
+                profile="debug"
+            fi
+        elif [ -f "target/release/mylm" ]; then
+            profile="release"
+        elif [ -f "target/debug/mylm" ]; then
+            profile="debug"
+        fi
+    fi
+
+    if [ -z "$profile" ] || [ ! -f "target/$profile/mylm" ]; then
+        echo "❌ Error: Could not find binary in target/release or target/debug."
+        echo "   Please ensure the build completed successfully."
+        exit 1
+    fi
+
+    echo "📦 Installing binary from target/$profile/mylm to $BINARY_DEST..."
     mkdir -p "$(dirname "$BINARY_DEST")"
     
     check_busy "$BINARY_DEST"
@@ -518,7 +558,7 @@ full_installation() {
     fi
     
     build_binary "true"
-    install_binary
+    install_binary "$BUILD_PROFILE"
     ensure_path_has_prefix_bin
     setup_shell_alias "true"
     setup_tmux_autostart
@@ -549,7 +589,7 @@ update_existing() {
     check_and_install_dependencies
 
     build_binary "false"
-    install_binary
+    install_binary "$BUILD_PROFILE"
     ensure_path_has_prefix_bin
     
     echo ""

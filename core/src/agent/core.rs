@@ -431,18 +431,34 @@ impl Agent {
 
         // 2. Handle Tool Calls (Modern API)
         if let Some(tool_calls) = response.choices[0].message.tool_calls.as_ref() {
-            if let Some(tool_call) = tool_calls.first() {
-                let tool_name = tool_call.function.name.trim();
-                let args = &tool_call.function.arguments;
+            if !tool_calls.is_empty() {
+                let mut message = response.choices[0].message.clone();
+
+                if tool_calls.len() > 1 {
+                    crate::info_log!("Parallel tool calls detected. Truncating to 1 for V1 sequential enforcement.");
+                    if let Some(tc) = message.tool_calls.as_mut() {
+                        tc.truncate(1);
+                    }
+                }
+
+                // Safely extract the first (and now only) tool call details
+                let (tool_name, args, tool_id) = {
+                    let tool_call = &message.tool_calls.as_ref().expect("tool_calls should be present")[0];
+                    (
+                        tool_call.function.name.trim().to_string(),
+                        tool_call.function.arguments.to_string(),
+                        tool_call.id.clone()
+                    )
+                };
                 
                 // Store the ID for the next step
-                self.pending_tool_call_id = Some(tool_call.id.clone());
+                self.pending_tool_call_id = Some(tool_id);
 
                 crate::info_log!("Parsed Action (Tool Call): {} with args: {}", tool_name, args);
                 
                 // Repetition Check
                 if let Some((last_tool, last_args)) = &self.last_tool_call {
-                    if last_tool == tool_name && last_args == args {
+                    if last_tool == &tool_name && last_args == &args {
                         self.repetition_count += 1;
                         if self.repetition_count >= 3 {
                             return Ok(AgentDecision::Error(format!("Detected repeated tool call to '{}' with identical arguments. Breaking loop.", tool_name)));
@@ -451,14 +467,14 @@ impl Agent {
                         self.repetition_count = 0;
                     }
                 }
-                self.last_tool_call = Some((tool_name.to_string(), args.to_string()));
+                self.last_tool_call = Some((tool_name.clone(), args.clone()));
 
-                let kind = self.tools.get(tool_name).map(|t| t.kind()).unwrap_or(ToolKind::Internal);
-                self.history.push(response.choices[0].message.clone());
+                let kind = self.tools.get(&tool_name).map(|t| t.kind()).unwrap_or(ToolKind::Internal);
+                self.history.push(message);
 
                 let action = AgentDecision::Action {
-                    tool: tool_name.to_string(),
-                    args: args.to_string(),
+                    tool: tool_name,
+                    args,
                     kind,
                 };
 
