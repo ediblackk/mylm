@@ -54,8 +54,9 @@ Includes a local vector database (LanceDB) to store project notes, past decision
 ### Prerequisites
 *   **Rust** (if you don't have it, the installer will help).
 *   **tmux** (highly recommended for the `pop` feature).
+*   **System dependencies**: Libraries like `OpenSSL`, `libxcb`, `clang`, and `protobuf`.
 
-### Build from source
+### Build from source (No-Sudo)
 ```bash
 git clone https://github.com/ediblackk/mylm.git
 cd mylm
@@ -63,7 +64,10 @@ chmod +x install.sh
 ./install.sh
 ```
 
-The installer builds the binary locally and sets up the `ai` alias. We distribute as source-only because a tool with this much power over your shell should be transparent.
+**Note on Installation:**
+*   **No Sudo Required**: The installer is designed to be **strictly no-sudo**. It installs everything into your home directory (`~/.local/bin`).
+*   **Rust Environment**: If the installer installs Rust for you via `rustup`, you **must** restart your terminal or run `source $HOME/.cargo/env` before you can use `cargo` or the `ai` command in new sessions.
+*   **System Dependencies**: Since the script doesn't use `sudo`, it cannot install system libraries for you. If any are missing, it will provide you with the exact command to run for your specific distribution.
 
 ---
 

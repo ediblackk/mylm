@@ -30,6 +30,9 @@ pub struct Profile {
     pub endpoint: String,
     /// Name of the prompt file to use (without .md extension)
     pub prompt: String,
+    /// Optional model override for this profile (None = use endpoint default)
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Main configuration structure
@@ -251,6 +254,7 @@ impl Default for Config {
                 name: default_profile_name(),
                 endpoint: default_endpoint(),
                 prompt: "default".to_string(),
+                model: None,
             }],
             default_endpoint: default_endpoint(),
             endpoints: Vec::new(),
@@ -323,6 +327,16 @@ impl Config {
         self.profiles.iter().find(|p| p.name == self.active_profile)
     }
 
+    /// Get the effective model for a profile (profile override or endpoint default)
+    pub fn get_effective_model(&self, profile: &Profile) -> Result<String> {
+        if let Some(model) = &profile.model {
+            return Ok(model.clone());
+        }
+        
+        let endpoint = self.get_endpoint(Some(&profile.endpoint))?;
+        Ok(endpoint.model.clone())
+    }
+
     /// Save configuration to file
     #[allow(dead_code)]
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
@@ -336,14 +350,31 @@ impl Config {
     }
 
     /// Interactive setup wizard
-    /// Edit the LLM endpoint configuration
+    /// Edit the LLM endpoint configuration with optional pre-fill from existing endpoint
     pub async fn edit_endpoint_details(&mut self, endpoint_name: &str) -> Result<()> {
+        self.edit_endpoint_with_prefill(endpoint_name, None).await
+    }
+
+    /// Edit endpoint with optional pre-fill from existing endpoint
+    pub async fn edit_endpoint_with_prefill(&mut self, endpoint_name: &str, existing: Option<&endpoints::EndpointConfig>) -> Result<()> {
         let theme = ColorfulTheme::default();
         let providers = vec!["OpenAI", "Google (Gemini)", "Ollama", "OpenRouter", "Custom"];
+        
+        // Determine provider selection (pre-select from existing if available)
+        let provider_idx = if let Some(existing_endpoint) = existing {
+            match existing_endpoint.provider.as_str() {
+                "google" => 1,
+                "openrouter" => 3,
+                _ => 0, // Default to OpenAI for unknown/custom
+            }
+        } else {
+            0
+        };
+
         let selection = Select::with_theme(&theme)
             .with_prompt("Select your LLM provider")
             .items(&providers)
-            .default(0)
+            .default(provider_idx)
             .interact()?;
 
         let provider_name = providers[selection];
@@ -355,13 +386,47 @@ impl Config {
             _ => ("openai".to_string(), String::new(), String::new()),
         };
 
-        let api_key = if provider_name != "Ollama" {
-            Password::with_theme(&theme)
-                .with_prompt(format!("API Key for {}", provider_name))
-                .interact()?
+        // Pre-fill from existing endpoint if available
+        if let Some(existing_endpoint) = existing {
+            base_url = existing_endpoint.base_url.clone();
+            model = existing_endpoint.model.clone();
+        }
+
+        let mut api_key = if provider_name != "Ollama" {
+            // For editing, ask if user wants to change API key
+            if existing.is_some() {
+                let change_key = Confirm::with_theme(&theme)
+                    .with_prompt("Change API key? (Leave empty to keep existing)")
+                    .default(false)
+                    .interact()?;
+                
+                if change_key {
+                    Password::with_theme(&theme)
+                        .with_prompt(format!("API Key for {} (leave empty to cancel)", provider_name))
+                        .interact()?
+                } else {
+                    // Keep existing API key
+                    if let Some(existing_endpoint) = existing {
+                        existing_endpoint.api_key.clone()
+                    } else {
+                        String::new()
+                    }
+                }
+            } else {
+                Password::with_theme(&theme)
+                    .with_prompt(format!("API Key for {}", provider_name))
+                    .interact()?
+            }
         } else {
             "none".to_string()
         };
+
+        // If user left API key empty when editing, keep the existing one
+        if provider_name != "Ollama" && api_key.is_empty() && existing.is_some() {
+            if let Some(existing_endpoint) = existing {
+                api_key = existing_endpoint.api_key.clone();
+            }
+        }
 
         let mut fetched_models = Vec::new();
         if provider_name != "Custom" {
@@ -450,6 +515,187 @@ impl Config {
             *e = endpoint;
         } else {
             self.endpoints.push(endpoint);
+        }
+
+        Ok(())
+    }
+
+    /// Edit only the provider for an endpoint
+    pub async fn edit_endpoint_provider(&mut self, endpoint_name: &str) -> Result<()> {
+        let theme = ColorfulTheme::default();
+        let providers = vec!["OpenAI", "Google (Gemini)", "Ollama", "OpenRouter", "Custom"];
+        
+        let current_idx = if let Ok(e) = self.get_endpoint(Some(endpoint_name)) {
+             match e.provider.as_str() {
+                "google" => 1,
+                "openrouter" => 3,
+                _ => 0,
+            }
+        } else {
+            0
+        };
+
+        let selection = Select::with_theme(&theme)
+            .with_prompt("Select Provider")
+            .items(&providers)
+            .default(current_idx)
+            .interact()?;
+            
+        let provider_name = providers[selection];
+        let (provider_id, default_url) = match provider_name {
+            "OpenAI" => ("openai".to_string(), "https://api.openai.com/v1".to_string()),
+            "Google (Gemini)" => ("google".to_string(), "https://generativelanguage.googleapis.com".to_string()),
+            "Ollama" => ("openai".to_string(), "http://localhost:11434/v1".to_string()),
+            "OpenRouter" => ("openai".to_string(), "https://openrouter.ai/api/v1".to_string()),
+            _ => ("openai".to_string(), String::new()),
+        };
+
+        if let Some(e) = self.endpoints.iter_mut().find(|e| e.name == endpoint_name) {
+            e.provider = provider_id;
+            // Optionally update base URL if it looks like a default one, or ask user?
+            // To be safe/simple, we offer to update it if it's different.
+            if e.base_url != default_url && !default_url.is_empty() {
+                if Confirm::with_theme(&theme)
+                    .with_prompt(format!("Update Base URL to default for {} ({})?", provider_name, default_url))
+                    .default(true)
+                    .interact()?
+                {
+                    e.base_url = default_url;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Edit only the Base URL for an endpoint
+    pub fn edit_endpoint_base_url(&mut self, endpoint_name: &str) -> Result<()> {
+        let theme = ColorfulTheme::default();
+        let current_url = if let Ok(e) = self.get_endpoint(Some(endpoint_name)) {
+            e.base_url.clone()
+        } else {
+            String::new()
+        };
+
+        let new_url: String = Input::with_theme(&theme)
+            .with_prompt("API Base URL")
+            .with_initial_text(&current_url)
+            .interact_text()?;
+
+        if let Some(e) = self.endpoints.iter_mut().find(|e| e.name == endpoint_name) {
+            e.base_url = new_url;
+        }
+        Ok(())
+    }
+
+    /// Edit only the API Key for an endpoint
+    pub fn edit_endpoint_api_key(&mut self, endpoint_name: &str) -> Result<()> {
+        let theme = ColorfulTheme::default();
+        let current_key = if let Ok(e) = self.get_endpoint(Some(endpoint_name)) {
+            e.api_key.clone()
+        } else {
+            String::new()
+        };
+        
+        // Show current status
+        if current_key == "none" || current_key.is_empty() {
+            println!("Current Key: Not Set");
+        } else {
+            println!("Current Key: ******** (Set)");
+        }
+
+        let new_key = Password::with_theme(&theme)
+            .with_prompt("New API Key (leave empty to keep existing)")
+            .allow_empty_password(true)
+            .interact()?;
+
+        if !new_key.is_empty() {
+            if let Some(e) = self.endpoints.iter_mut().find(|e| e.name == endpoint_name) {
+                e.api_key = new_key;
+            }
+        }
+        Ok(())
+    }
+
+    /// Edit the Model for the active profile (Profile override)
+    pub async fn edit_profile_model(&mut self, profile_name: &str) -> Result<()> {
+        let theme = ColorfulTheme::default();
+        
+        // Need to find which endpoint is linked to this profile to fetch models
+        let endpoint_name = if let Some(p) = self.profiles.iter().find(|p| p.name == profile_name) {
+            p.endpoint.clone()
+        } else {
+            return Ok(());
+        };
+
+        let (provider, base_url, api_key) = if let Ok(e) = self.get_endpoint(Some(&endpoint_name)) {
+            (e.provider.clone(), e.base_url.clone(), e.api_key.clone())
+        } else {
+            return Ok(());
+        };
+
+        // Options: Fetch list, Type manually, Use Connection Default
+        let options = vec![
+            "📡 Fetch from Provider",
+            "⌨️  Type Manually",
+            "🔙 Revert to Connection Default"
+        ];
+        
+        let sel = Select::with_theme(&theme)
+            .with_prompt("Select Model Method")
+            .items(&options)
+            .default(0)
+            .interact()?;
+
+        let new_model = match sel {
+            0 => {
+                println!("📡 Fetching models from {}...", base_url);
+                match fetch_models_from_provider(&provider, &base_url, &api_key, "").await {
+                    Ok(models) if !models.is_empty() => {
+                        let m_idx = Select::with_theme(&theme)
+                            .with_prompt("Select Model")
+                            .items(&models)
+                            .default(0)
+                            .interact()?;
+                        Some(models[m_idx].clone())
+                    }
+                    Ok(_) => {
+                        println!("⚠️  No models found.");
+                        None
+                    }
+                    Err(e) => {
+                        println!("⚠️  Fetch failed: {}", e);
+                        None
+                    }
+                }
+            }
+            1 => {
+                let current_model = if let Some(p) = self.profiles.iter().find(|p| p.name == profile_name) {
+                    p.model.clone().unwrap_or_default()
+                } else { String::new() };
+                
+                let val: String = Input::with_theme(&theme)
+                    .with_prompt("Enter Model ID")
+                    .with_initial_text(&current_model)
+                    .interact_text()?;
+                Some(val)
+            }
+            2 => None, // Set to None (use default)
+            _ => None,
+        };
+
+        // Apply change
+        // Logic: if user selected 0/1 but cancelled/failed, we don't change anything.
+        // If user selected 2, we set to None.
+        if sel == 2 {
+             if let Some(p) = self.profiles.iter_mut().find(|p| p.name == profile_name) {
+                p.model = None;
+                println!("✅ Reverted to connection default model.");
+            }
+        } else if let Some(model) = new_model {
+            if let Some(p) = self.profiles.iter_mut().find(|p| p.name == profile_name) {
+                p.model = Some(model);
+                println!("✅ Updated profile model override.");
+            }
         }
 
         Ok(())
@@ -814,11 +1060,13 @@ pub fn create_default_config() -> Config {
                 name: "ollama".to_string(),
                 endpoint: "ollama".to_string(),
                 prompt: "default".to_string(),
+                model: None,
             },
             Profile {
                 name: "openai".to_string(),
                 endpoint: "openai".to_string(),
                 prompt: "default".to_string(),
+                model: None,
             },
         ],
         default_endpoint: "ollama".to_string(),

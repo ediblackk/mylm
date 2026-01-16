@@ -38,33 +38,92 @@ impl std::fmt::Display for HubChoice {
 
 #[derive(Debug, PartialEq)]
 pub enum SettingsChoice {
-    SelectProfile,
-    SelectEndpoint,
-    EditEndpoint,
+    SwitchProfile,
+    EditProvider,
+    EditApiUrl,
+    EditApiKey,
+    EditModel,
     EditPrompt,
-    EditSearch,
-    EditGeneral,
-    EditApiKeys,
-    NewProfile,
-    ShellIntegration,
+    ManageEndpoints,
+    Advanced,
     Save,
+    Back,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum AdvancedSettingsChoice {
+    WebSearch,
+    General,
+    ShellIntegration,
+    Back,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum EndpointAction {
+    SwitchConnection, // Link a different endpoint to current profile
+    CreateNew,
+    Delete,
+    Back,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ProfileAction {
+    Select,
+    Create,
+    Duplicate,
+    Rename,
+    Delete,
     Back,
 }
 
 impl std::fmt::Display for SettingsChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SettingsChoice::SelectProfile => write!(f, "👤 Switch Profile"),
-            SettingsChoice::SelectEndpoint => write!(f, "🔗 Change Endpoint for Profile"),
-            SettingsChoice::EditEndpoint => write!(f, "🤖 Edit Endpoint Details"),
-            SettingsChoice::EditGeneral => write!(f, "⚙️  General Settings"),
-            SettingsChoice::EditApiKeys => write!(f, "🔑 API Keys"),
-            SettingsChoice::EditSearch => write!(f, "🌐 Search Config"),
-            SettingsChoice::EditPrompt => write!(f, "📝 System Prompt"),
-            SettingsChoice::NewProfile => write!(f, "➕ Create New Profile"),
-            SettingsChoice::ShellIntegration => write!(f, "🐚 Shell Integration"),
+            SettingsChoice::SwitchProfile => write!(f, "👤 Switch Profile"),
+            SettingsChoice::EditProvider => write!(f, "🏢 Provider (Connection)"),
+            SettingsChoice::EditApiUrl => write!(f, "🔗 API Base URL"),
+            SettingsChoice::EditApiKey => write!(f, "🔑 API Key"),
+            SettingsChoice::EditModel => write!(f, "🧠 Model"),
+            SettingsChoice::EditPrompt => write!(f, "📝 Custom Instructions (Prompt)"),
+            SettingsChoice::ManageEndpoints => write!(f, "🔌 Manage Connections"),
+            SettingsChoice::Advanced => write!(f, "⚙️  Advanced Settings"),
             SettingsChoice::Save => write!(f, "💾 Save & Exit"),
             SettingsChoice::Back => write!(f, "⬅️  Discard & Back"),
+        }
+    }
+}
+
+impl std::fmt::Display for AdvancedSettingsChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AdvancedSettingsChoice::WebSearch => write!(f, "🌐 Web Search"),
+            AdvancedSettingsChoice::General => write!(f, "⚙️  General Config"),
+            AdvancedSettingsChoice::ShellIntegration => write!(f, "🐚 Shell Integration"),
+            AdvancedSettingsChoice::Back => write!(f, "⬅️  Back"),
+        }
+    }
+}
+
+impl std::fmt::Display for EndpointAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EndpointAction::SwitchConnection => write!(f, "🔗 Link Different Connection"),
+            EndpointAction::CreateNew => write!(f, "➕ Create New Connection"),
+            EndpointAction::Delete => write!(f, "🗑️  Delete Connection"),
+            EndpointAction::Back => write!(f, "⬅️  Back"),
+        }
+    }
+}
+
+impl std::fmt::Display for ProfileAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProfileAction::Select => write!(f, "✅ Select Active Profile"),
+            ProfileAction::Create => write!(f, "➕ Create New Profile"),
+            ProfileAction::Duplicate => write!(f, "📋 Duplicate Profile"),
+            ProfileAction::Rename => write!(f, "✏️  Rename Profile"),
+            ProfileAction::Delete => write!(f, "🗑️  Delete Profile"),
+            ProfileAction::Back => write!(f, "⬅️  Back"),
         }
     }
 }
@@ -114,19 +173,6 @@ pub async fn show_hub(config: &Config) -> Result<HubChoice> {
     }
 }
 
-/// Show profile selection menu with a back option
-pub fn show_profile_select(profiles: Vec<String>) -> Result<Option<String>> {
-    let mut options = profiles;
-    options.push("⬅️  Back".to_string());
-
-    let ans: InquireResult<String> = Select::new("Select Active Profile", options).prompt();
-
-    match ans {
-        Ok(choice) if choice == "⬅️  Back" => Ok(None),
-        Ok(choice) => Ok(Some(choice)),
-        Err(_) => Ok(None),
-    }
-}
 
 /// Show endpoint selection menu
 pub fn show_endpoint_select(endpoints: Vec<String>, _current: &str) -> Result<Option<String>> {
@@ -162,38 +208,54 @@ pub fn show_settings_dashboard(config: &Config) -> Result<SettingsChoice> {
     let endpoint = config.get_endpoint(None).ok();
     
     let profile_name = config.active_profile.clone();
-    let llm_status = match (profile, endpoint) {
-        (Some(_), Some(e)) => format!("{} ({} / {})", e.name, e.provider, e.model),
-        _ => "Not Configured".to_string(),
-    };
     
-    let search_status = if config.web_search.enabled {
-        format!("Enabled ({})", config.web_search.provider)
-    } else {
-        "Disabled".to_string()
+    // Calculate status strings
+    let (provider_str, url_str, key_status, model_str) = match (profile, endpoint) {
+        (Some(p), Some(e)) => {
+            let effective_model = config.get_effective_model(p).unwrap_or_else(|_| e.model.clone());
+            let model_source = if p.model.is_some() { "(Profile Override)" } else { "(Connection Default)" };
+            
+            let key_display = if e.api_key == "none" || e.api_key.is_empty() {
+                "❌ Missing"
+            } else {
+                "✅ Set"
+            };
+            
+            (
+                e.provider.clone(),
+                e.base_url.clone(),
+                key_display,
+                format!("{} {}", effective_model, model_source)
+            )
+        }
+        _ => ("?".to_string(), "?".to_string(), "?", "?".to_string()),
     };
 
-    let prompt_status = profile.map(|p| p.prompt.clone()).unwrap_or_else(|| "default".to_string());
+    let prompt_str = profile.map(|p| p.prompt.clone()).unwrap_or_else(|| "default".to_string());
+    
+    println!("\n📊 Active Configuration (Profile: '{}')", profile_name);
+    println!("   ├─ Provider: {}", provider_str);
+    println!("   ├─ Base URL: {}", url_str);
+    println!("   ├─ API Key:  {}", key_status);
+    println!("   ├─ Model:    {}", model_str);
+    println!("   └─ Prompt:   {}", prompt_str);
+    println!();
 
     let options = vec![
-        SettingsChoice::SelectProfile,
-        SettingsChoice::SelectEndpoint,
-        SettingsChoice::EditEndpoint,
+        SettingsChoice::SwitchProfile,
+        SettingsChoice::EditProvider,
+        SettingsChoice::EditApiUrl,
+        SettingsChoice::EditApiKey,
+        SettingsChoice::EditModel,
         SettingsChoice::EditPrompt,
-        SettingsChoice::EditSearch,
-        SettingsChoice::EditGeneral,
-        SettingsChoice::EditApiKeys,
-        SettingsChoice::NewProfile,
-        SettingsChoice::ShellIntegration,
+        SettingsChoice::ManageEndpoints,
+        SettingsChoice::Advanced,
         SettingsChoice::Save,
         SettingsChoice::Back,
     ];
 
     let ans: InquireResult<SettingsChoice> = Select::new(
-        &format!(
-            "⚙️  Settings Dashboard | Profile: {} | Endpoint: {} | Search: {} | Prompt: {}",
-            profile_name, llm_status, search_status, prompt_status
-        ),
+        "Select a field to edit:",
         options
     ).prompt();
 
@@ -203,20 +265,43 @@ pub fn show_settings_dashboard(config: &Config) -> Result<SettingsChoice> {
     }
 }
 
-#[derive(Debug, PartialEq)]
-pub enum ApiKeyEditChoice {
-    LlmKey,
-    SearchKey,
-    Back,
+/// Show Advanced Settings Submenu
+pub fn show_advanced_submenu() -> Result<AdvancedSettingsChoice> {
+    let options = vec![
+        AdvancedSettingsChoice::WebSearch,
+        AdvancedSettingsChoice::General,
+        AdvancedSettingsChoice::ShellIntegration,
+        AdvancedSettingsChoice::Back,
+    ];
+
+    let ans: InquireResult<AdvancedSettingsChoice> = Select::new(
+        "Advanced Settings",
+        options
+    ).prompt();
+
+    match ans {
+        Ok(choice) => Ok(choice),
+        Err(_) => Ok(AdvancedSettingsChoice::Back),
+    }
 }
 
-impl std::fmt::Display for ApiKeyEditChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ApiKeyEditChoice::LlmKey => write!(f, "🤖 LLM API Key"),
-            ApiKeyEditChoice::SearchKey => write!(f, "🌐 Search API Key"),
-            ApiKeyEditChoice::Back => write!(f, "⬅️  Back"),
-        }
+/// Show Connection Management Submenu
+pub fn show_endpoints_submenu() -> Result<EndpointAction> {
+    let options = vec![
+        EndpointAction::SwitchConnection,
+        EndpointAction::CreateNew,
+        EndpointAction::Delete,
+        EndpointAction::Back,
+    ];
+
+    let ans: InquireResult<EndpointAction> = Select::new(
+        "Connection Management",
+        options
+    ).prompt();
+
+    match ans {
+        Ok(choice) => Ok(choice),
+        Err(_) => Ok(EndpointAction::Back),
     }
 }
 
@@ -249,19 +334,131 @@ pub fn show_shell_integration_menu() -> Result<ShellIntegrationChoice> {
     }
 }
 
-pub fn show_api_key_menu() -> Result<ApiKeyEditChoice> {
+/// Show the profiles submenu
+pub fn show_profiles_submenu(_config: &Config) -> Result<ProfileAction> {
     let options = vec![
-        ApiKeyEditChoice::LlmKey,
-        ApiKeyEditChoice::SearchKey,
-        ApiKeyEditChoice::Back,
+        ProfileAction::Select,
+        ProfileAction::Create,
+        ProfileAction::Duplicate,
+        ProfileAction::Rename,
+        ProfileAction::Delete,
+        ProfileAction::Back,
     ];
 
-    let ans: InquireResult<ApiKeyEditChoice> = Select::new("Edit API Keys", options).prompt();
+    let ans: InquireResult<ProfileAction> = Select::new("Profiles Management", options).prompt();
 
     match ans {
         Ok(choice) => Ok(choice),
-        Err(_) => Ok(ApiKeyEditChoice::Back),
+        Err(_) => Ok(ProfileAction::Back),
     }
+}
+
+/// Show profile selection menu
+pub fn show_profile_select(profiles: Vec<String>) -> Result<Option<String>> {
+    let mut options = profiles;
+    options.push("⬅️  Back".to_string());
+
+    let ans: InquireResult<String> = Select::new("Select Active Profile", options).prompt();
+
+    match ans {
+        Ok(choice) if choice == "⬅️  Back" => Ok(None),
+        Ok(choice) => Ok(Some(choice)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Show profile creation wizard
+pub fn show_profile_wizard(config: &Config) -> Result<Option<(String, String, Option<String>, String)>> {
+    // Get profile name
+    let name = inquire::Text::new("Profile name:").prompt()?;
+    if name.trim().is_empty() {
+        return Ok(None);
+    }
+    
+    // Get endpoint selection
+    let endpoints: Vec<String> = config.endpoints.iter().map(|e| e.name.clone()).collect();
+    if endpoints.is_empty() {
+        println!("⚠️  No endpoints configured. Please create an endpoint first.");
+        return Ok(None);
+    }
+    
+    let endpoint = inquire::Select::new("Select endpoint:", endpoints).prompt()?;
+    
+    // Get model (optional)
+    let model_choice = inquire::Select::new("Select model:", vec!["Use endpoint default", "Choose specific model"]).prompt()?;
+    let model = if model_choice == "Choose specific model" {
+        let model_name = inquire::Text::new("Model name:").prompt()?;
+        if model_name.trim().is_empty() {
+            None
+        } else {
+            Some(model_name)
+        }
+    } else {
+        None
+    };
+    
+    // Get prompt
+    let prompt = inquire::Text::new("Prompt name (without .md extension):")
+        .with_default("default")
+        .prompt()?;
+    
+    Ok(Some((name, endpoint, model, prompt)))
+}
+
+/// Show profile duplication wizard
+pub fn show_profile_duplicate_wizard(config: &Config, source_profile: &str) -> Result<Option<(String, String, Option<String>, String)>> {
+    // Get new profile name
+    let name = inquire::Text::new("New profile name:").prompt()?;
+    if name.trim().is_empty() {
+        return Ok(None);
+    }
+    
+    // Get source profile details
+    let source = config.profiles.iter().find(|p| p.name == source_profile)
+        .ok_or_else(|| anyhow::anyhow!("Profile not found"))?;
+    
+    // Get endpoint (default to source)
+    let endpoints: Vec<String> = config.endpoints.iter().map(|e| e.name.clone()).collect();
+    let endpoint = inquire::Select::new("Select endpoint:", endpoints).prompt()?;
+    
+    // Get model (default to source)
+    let model = if let Some(model) = &source.model {
+        let model_choice = inquire::Select::new("Model:", vec!["Keep source model", "Choose different model"]).prompt()?;
+        if model_choice == "Choose different model" {
+            let model_name = inquire::Text::new("Model name:").prompt()?;
+            if model_name.trim().is_empty() {
+                None
+            } else {
+                Some(model_name)
+            }
+        } else {
+            Some(model.clone())
+        }
+    } else {
+        None
+    };
+    
+    // Get prompt (default to source)
+    let prompt = inquire::Text::new("Prompt name (without .md extension):")
+        .prompt()?;
+    
+    Ok(Some((name, endpoint, model, prompt)))
+}
+
+/// Show profile rename wizard
+pub fn show_profile_rename_wizard(config: &Config, _old_name: &str) -> Result<Option<String>> {
+    let new_name = inquire::Text::new("New profile name:").prompt()?;
+    if new_name.trim().is_empty() {
+        return Ok(None);
+    }
+    
+    // Check if name already exists
+    if config.profiles.iter().any(|p| p.name == new_name) {
+        println!("⚠️  Profile with this name already exists.");
+        return Ok(None);
+    }
+    
+    Ok(Some(new_name))
 }
 
 async fn print_banner(config: &Config) {

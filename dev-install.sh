@@ -59,12 +59,38 @@ cargo build
 BUILT_VERSION=$(./target/debug/mylm --version)
 echo "📦 Built: $BUILT_VERSION"
 
+# --- Busy Check Function ---
+check_busy() {
+    local target="$1"
+    if [ -f "$target" ]; then
+        if command -v fuser &> /dev/null; then
+            if fuser "$target" >/dev/null 2>&1; then
+                echo "⚠️  Binary $target is currently in use (Text file busy)."
+                read -p "Kill running processes using it? [y/N]: " kill_it
+                if [[ "$kill_it" =~ ^[Yy]$ ]]; then
+                    sudo fuser -k -TERM "$target" >/dev/null 2>&1 || true
+                    sleep 0.5
+                    if fuser "$target" >/dev/null 2>&1; then
+                        sudo fuser -k -KILL "$target" >/dev/null 2>&1 || true
+                        sleep 0.5
+                    fi
+                else
+                    echo "❌ Aborting: target file is busy."
+                    exit 1
+                fi
+            fi
+        fi
+    fi
+}
+
 # Install binary
+check_busy /usr/local/bin/mylm
 sudo cp target/debug/mylm /usr/local/bin/mylm
 sudo chmod +x /usr/local/bin/mylm
 
 # Also update /usr/local/bin/ai if it exists to maintain compatibility with existing aliases
 if [ -f "/usr/local/bin/ai" ]; then
+    check_busy /usr/local/bin/ai
     sudo cp target/debug/mylm /usr/local/bin/ai
     sudo chmod +x /usr/local/bin/ai
 fi

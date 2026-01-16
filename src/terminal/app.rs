@@ -446,6 +446,7 @@ impl App {
                 self.chat_history.push(ChatMessage::assistant(
                     "Available commands:\n\
                     /profile <name> - Switch profile\n\
+                    /model <name> - Set model for active profile\n\
                     /config <key> <value> - Update active profile\n\
                     /exec <command> - Execute shell command\n\
                     /verbose - Toggle verbose mode\n\
@@ -458,6 +459,55 @@ impl App {
                     Arrows - Navigate lines/history"
                     .to_string()
                 ));
+            }
+            "/model" => {
+                if parts.len() < 2 {
+                    // Show current model info
+                    let active_profile = self.config.active_profile.clone();
+                    if let Some(profile) = self.config.profiles.iter().find(|p| p.name == active_profile) {
+                        let effective_model = self.config.get_effective_model(profile)
+                            .unwrap_or_else(|_| "unknown".to_string());
+                        let endpoint = self.config.get_endpoint(Some(&profile.endpoint))
+                            .ok()
+                            .map(|e| e.model.clone())
+                            .unwrap_or_else(|| "unknown".to_string());
+                        let model_source = if profile.model.is_some() {
+                            "profile override"
+                        } else {
+                            "endpoint default"
+                        };
+                        self.chat_history.push(ChatMessage::assistant(
+                            format!("Current model: {} ({} via {})\nEndpoint default: {}\n\nUsage: /model <model-name> to set profile model override, or /model clear to use endpoint default.",
+                                effective_model, model_source, active_profile, endpoint)
+                        ));
+                    } else {
+                        self.chat_history.push(ChatMessage::assistant("No active profile.".to_string()));
+                    }
+                    return;
+                }
+                
+                let value = parts[1];
+                if value == "clear" {
+                    // Clear profile model override, use endpoint default
+                    let active_profile_name = self.config.active_profile.clone();
+                    if let Some(profile) = self.config.profiles.iter_mut().find(|p| p.name == active_profile_name) {
+                        profile.model = None;
+                        let _ = event_tx.send(TuiEvent::ConfigUpdate(self.config.clone()));
+                        self.chat_history.push(ChatMessage::assistant(
+                            format!("Model override cleared for profile '{}'. Using endpoint default.", active_profile_name)
+                        ));
+                    }
+                } else {
+                    // Set profile model override
+                    let active_profile_name = self.config.active_profile.clone();
+                    if let Some(profile) = self.config.profiles.iter_mut().find(|p| p.name == active_profile_name) {
+                        profile.model = Some(value.to_string());
+                        let _ = event_tx.send(TuiEvent::ConfigUpdate(self.config.clone()));
+                        self.chat_history.push(ChatMessage::assistant(
+                            format!("Model set to '{}' for profile '{}' (profile override)", value, active_profile_name)
+                        ));
+                    }
+                }
             }
             "/verbose" => {
                 self.verbose_mode = !self.verbose_mode;

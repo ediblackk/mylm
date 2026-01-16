@@ -29,9 +29,57 @@ get_installed_version() {
     fi
 }
 
+check_busy() {
+    local target="$1"
+    if [ -f "$target" ]; then
+        if command -v fuser &> /dev/null; then
+            if fuser "$target" >/dev/null 2>&1; then
+                echo "⚠️  Binary $target is currently in use (Text file busy)."
+                read -p "Kill running processes using it? [y/N]: " kill_it
+                if [[ "$kill_it" =~ ^[Yy]$ ]]; then
+                    # Try non-sudo first if we own the file, else sudo
+                    if [ -w "$target" ]; then
+                        fuser -k -TERM "$target" >/dev/null 2>&1 || true
+                    else
+                        sudo fuser -k -TERM "$target" >/dev/null 2>&1 || true
+                    fi
+                    sleep 0.5
+                    if fuser "$target" >/dev/null 2>&1; then
+                        if [ -w "$target" ]; then
+                            fuser -k -KILL "$target" >/dev/null 2>&1 || true
+                        else
+                            sudo fuser -k -KILL "$target" >/dev/null 2>&1 || true
+                        fi
+                        sleep 0.5
+                    fi
+                else
+                    echo "❌ Aborting: target file is busy."
+                    exit 1
+                fi
+            fi
+        fi
+    fi
+}
+
 check_and_install_dependencies() {
     echo "🔍 Checking for system dependencies..."
-    
+
+    # Check for Rust/Cargo FIRST
+    if ! command -v cargo &> /dev/null; then
+        echo "❌ Rust/Cargo not found."
+        read -p "Would you like to install Rust now via rustup.rs? [Y/n]: " install_rust
+        if [[ ! "$install_rust" =~ ^[Nn]$ ]]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            source "$HOME/.cargo/env"
+            echo "✅ Rust installed."
+            echo "⚠️  IMPORTANT: You MUST restart your terminal or run 'source \$HOME/.cargo/env' before continuing with other steps if you are running this in a new shell."
+            echo "💡 This script will continue now using the sourced environment."
+        else
+            echo "❌ Error: Rust is required to build mylm. Exiting."
+            exit 1
+        fi
+    fi
+
     if [ -f /etc/os-release ]; then
         . /etc/os-release
         OS=$ID
@@ -181,19 +229,6 @@ check_and_install_dependencies() {
             echo "⚠️  Warning: Build will likely fail if sccache is missing."
         fi
     fi
-
-    # Check for Rust/Cargo
-    if ! command -v cargo &> /dev/null; then
-        echo "❌ Rust/Cargo not found."
-        read -p "Would you like to install Rust now via rustup.rs? [Y/n]: " install_rust
-        if [[ ! "$install_rust" =~ ^[Nn]$ ]]; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            source "$HOME/.cargo/env"
-        else
-            echo "❌ Error: Rust is required to build mylm. Exiting."
-            exit 1
-        fi
-    fi
 }
 
 build_binary() {
@@ -240,6 +275,9 @@ install_binary() {
     local profile=${1:-"release"}
     echo "📦 Installing/Updating binary to $BINARY_DEST..."
     mkdir -p "$(dirname "$BINARY_DEST")"
+    
+    check_busy "$BINARY_DEST"
+    
     cp "target/$profile/mylm" "$BINARY_DEST"
     chmod +x "$BINARY_DEST"
     
