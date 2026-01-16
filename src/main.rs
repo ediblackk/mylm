@@ -415,7 +415,14 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
     loop {
         let choice = crate::cli::hub::show_settings_dashboard(config)?;
         match choice {
-            crate::cli::hub::SettingsChoice::SwitchProfile => {
+            crate::cli::hub::SettingsChoice::SelectActiveProfile => {
+                let profiles: Vec<String> = config.profiles.iter().map(|p| p.name.clone()).collect();
+                if let Some(ans) = crate::cli::hub::show_profile_select(profiles)? {
+                    config.active_profile = ans;
+                    println!("✅ Active profile set to: {}", config.active_profile);
+                }
+            }
+            crate::cli::hub::SettingsChoice::ManageProfiles => {
                 loop {
                     let action = crate::cli::hub::show_profiles_submenu(config)?;
                     match action {
@@ -423,17 +430,31 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                             let profiles: Vec<String> = config.profiles.iter().map(|p| p.name.clone()).collect();
                             if let Some(ans) = crate::cli::hub::show_profile_select(profiles)? {
                                 config.active_profile = ans;
+                                println!("✅ Active profile set to: {}", config.active_profile);
                             }
                         }
                         crate::cli::hub::ProfileAction::Create => {
                             if let Some((name, endpoint, model, prompt)) = crate::cli::hub::show_profile_wizard(config)? {
-                                config.profiles.push(mylm_core::config::Profile {
-                                    name: name.clone(),
-                                    endpoint,
-                                    prompt,
-                                    model,
-                                });
-                                config.active_profile = name;
+                                // Check if name already exists
+                                if config.profiles.iter().any(|p| p.name == name) {
+                                    println!("⚠️  Profile '{}' already exists. Overwriting.", name);
+                                    if let Some(p) = config.profiles.iter_mut().find(|p| p.name == name) {
+                                        p.endpoint = endpoint;
+                                        p.model = model;
+                                        p.prompt = prompt;
+                                    }
+                                } else {
+                                    config.profiles.push(mylm_core::config::Profile {
+                                        name: name.clone(),
+                                        endpoint,
+                                        prompt,
+                                        model,
+                                    });
+                                }
+                                config.active_profile = name.clone();
+                                println!("✅ Profile '{}' created and selected.", name);
+                            } else {
+                                println!("⚠️  Profile creation cancelled.");
                             }
                         }
                         crate::cli::hub::ProfileAction::Duplicate => {
@@ -446,7 +467,7 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                                         prompt,
                                         model,
                                     });
-                                    config.active_profile = name;
+                                    config.active_profile = name.clone();
                                 }
                             }
                         }
@@ -458,8 +479,9 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                                         p.name = new_name.clone();
                                     }
                                     if config.active_profile == old_name {
-                                        config.active_profile = new_name;
+                                        config.active_profile = new_name.clone();
                                     }
+                                    println!("✅ Profile renamed to '{}'.", new_name);
                                 }
                             }
                         }
@@ -467,9 +489,16 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                             let profiles: Vec<String> = config.profiles.iter().map(|p| p.name.clone()).collect();
                             if let Some(name) = crate::cli::hub::show_profile_select(profiles)? {
                                 if config.profiles.len() > 1 {
-                                    config.profiles.retain(|p| p.name != name);
-                                    if config.active_profile == name {
-                                        config.active_profile = config.profiles[0].name.clone();
+                                    if dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                                        .with_prompt(format!("Delete profile '{}'?", name))
+                                        .default(false)
+                                        .interact()? 
+                                    {
+                                        config.profiles.retain(|p| p.name != name);
+                                        if config.active_profile == name {
+                                            config.active_profile = config.profiles[0].name.clone();
+                                        }
+                                        println!("🗑️  Deleted profile '{}'.", name);
                                     }
                                 } else {
                                     println!("⚠️  Cannot delete the last profile.");
@@ -480,78 +509,45 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                     }
                 }
             }
-            crate::cli::hub::SettingsChoice::EditProvider => {
-                let endpoint_name = config.get_active_profile().map(|p| p.endpoint.clone()).unwrap_or_default();
-                if config.endpoints.iter().any(|e| e.name == endpoint_name) {
-                    config.edit_endpoint_provider(&endpoint_name).await?;
-                } else {
-                    config.edit_endpoint_details(&endpoint_name).await?;
-                }
-            }
-            crate::cli::hub::SettingsChoice::EditApiUrl => {
-                let endpoint_name = config.get_active_profile().map(|p| p.endpoint.clone()).unwrap_or_default();
-                if config.endpoints.iter().any(|e| e.name == endpoint_name) {
-                    config.edit_endpoint_base_url(&endpoint_name)?;
-                } else {
-                    config.edit_endpoint_details(&endpoint_name).await?;
-                }
-            }
-            crate::cli::hub::SettingsChoice::EditApiKey => {
-                let endpoint_name = config.get_active_profile().map(|p| p.endpoint.clone()).unwrap_or_default();
-                if config.endpoints.iter().any(|e| e.name == endpoint_name) {
-                    config.edit_endpoint_api_key(&endpoint_name)?;
-                } else {
-                    config.edit_endpoint_details(&endpoint_name).await?;
-                }
-            }
-            crate::cli::hub::SettingsChoice::EditModel => {
-                let profile_name = config.active_profile.clone();
-                let endpoint_name = config.get_active_profile().map(|p| p.endpoint.clone()).unwrap_or_default();
-                if config.endpoints.iter().any(|e| e.name == endpoint_name) {
-                    config.edit_profile_model(&profile_name).await?;
-                } else {
-                    println!("⚠️  Connection '{}' not found. Please configure it first.", endpoint_name);
-                    config.edit_endpoint_details(&endpoint_name).await?;
-                }
-            }
-            crate::cli::hub::SettingsChoice::EditPrompt => {
-                let profile = config.get_active_profile()
-                    .map(|p| p.prompt.clone())
-                    .unwrap_or_else(|| "default".to_string());
-                let path = mylm_core::config::prompt::get_prompts_dir().join(format!("{}.md", profile));
-                let _ = mylm_core::config::prompt::load_prompt(&profile)?;
-                let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
-                std::process::Command::new(editor).arg(path).status()?;
-            }
             crate::cli::hub::SettingsChoice::ManageEndpoints => {
                 loop {
                     let action = crate::cli::hub::show_endpoints_submenu()?;
                     match action {
                         crate::cli::hub::EndpointAction::SwitchConnection => {
                             let endpoints: Vec<String> = config.endpoints.iter().map(|e| e.name.clone()).collect();
+                            if endpoints.is_empty() {
+                                println!("⚠️  No endpoints configured.");
+                                continue;
+                            }
                             let current_endpoint = config.get_active_profile().map(|p| p.endpoint.clone()).unwrap_or_default();
                             if let Some(new_endpoint) = crate::cli::hub::show_endpoint_select(endpoints, &current_endpoint)? {
                                 if let Some(p) = config.profiles.iter_mut().find(|p| p.name == config.active_profile) {
-                                    p.endpoint = new_endpoint;
+                                    p.endpoint = new_endpoint.clone();
                                 }
+                                println!("✅ Switched to connection: {}", new_endpoint);
                             }
                         }
                         crate::cli::hub::EndpointAction::CreateNew => {
                             let name = inquire::Text::new("New connection name:").prompt()?;
                             if !name.trim().is_empty() {
                                 config.edit_endpoint_details(&name).await?;
+                                println!("✅ Connection '{}' created.", name);
                             }
                         }
                         crate::cli::hub::EndpointAction::Delete => {
                             let endpoints: Vec<String> = config.endpoints.iter().map(|e| e.name.clone()).collect();
-                             if endpoints.len() <= 1 {
+                            if endpoints.len() <= 1 {
                                 println!("⚠️  Cannot delete the last connection.");
                             } else {
                                 let del = inquire::Select::new("Delete Connection", endpoints).prompt()?;
-                                let active_uses = config.get_active_profile().map(|p| p.endpoint == del).unwrap_or(false);
+                                let active_uses = config.profiles.iter().any(|p| p.endpoint == del);
                                 if active_uses {
-                                     println!("⚠️  Cannot delete the connection used by the active profile. Switch first.");
-                                } else {
+                                     println!("⚠️  Cannot delete the connection used by a profile. Switch the profile's endpoint first.");
+                                } else if dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())
+                                    .with_prompt(format!("Delete connection '{}'?", del))
+                                    .default(false)
+                                    .interact()? 
+                                {
                                      config.endpoints.retain(|e| e.name != del);
                                      println!("🗑️  Deleted connection '{}'.", del);
                                 }
@@ -561,14 +557,21 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                     }
                 }
             }
-            crate::cli::hub::SettingsChoice::Advanced => {
+            crate::cli::hub::SettingsChoice::GeneralSettings => {
                 loop {
-                    let adv_choice = crate::cli::hub::show_advanced_submenu()?;
-                    match adv_choice {
-                        crate::cli::hub::AdvancedSettingsChoice::WebSearch => config.edit_search().await?,
-                        crate::cli::hub::AdvancedSettingsChoice::General => config.edit_general()?,
-                        crate::cli::hub::AdvancedSettingsChoice::ShellIntegration => {
-                             loop {
+                    let options = vec![
+                        "Web Search",
+                        "General Config",
+                        "Shell Integration",
+                        "⬅️  Back",
+                    ];
+                    let selection = inquire::Select::new("General Settings", options).prompt()?;
+
+                    match selection {
+                        "Web Search" => config.edit_search().await?,
+                        "General Config" => config.edit_general()?,
+                        "Shell Integration" => {
+                            loop {
                                 let choice = crate::cli::hub::show_shell_integration_menu()?;
                                 match choice {
                                     crate::cli::hub::ShellIntegrationChoice::ToggleTmuxAutoStart => {
@@ -578,7 +581,7 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                                 }
                             }
                         }
-                        crate::cli::hub::AdvancedSettingsChoice::Back => break,
+                        _ => break,
                     }
                 }
             }
