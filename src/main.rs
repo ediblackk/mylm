@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
     let formatter = OutputFormatter::new();
 
     // Load configuration
-    let config = Config::load().context("Failed to load configuration")?;
+    let mut config = Config::load().context("Failed to load configuration")?;
 
     // Handle different commands
     match &cli.command {
@@ -134,8 +134,7 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
                 if config.endpoints.is_empty() {
                     println!("🤖 Welcome to mylm! Let's get you set up.");
                 }
-                let mut mut_config = config.clone();
-                handle_settings_dashboard(&mut mut_config).await?;
+                handle_settings_dashboard(&mut config).await?;
                 mylm_core::memory::VectorStore::warmup().await?;
             }
         }
@@ -203,23 +202,21 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
                 Some(ConfigCommand::Select) => {
                     let profiles: Vec<String> = config.profiles.iter().map(|p| p.name.clone()).collect();
                     let ans = inquire::Select::new("Select Active Profile", profiles).prompt()?;
-                    let mut new_config = config.clone();
-                    new_config.active_profile = ans;
-                    new_config.save_to_default_location()?;
-                    println!("Active profile set to {}", new_config.active_profile);
+                    config.active_profile = ans;
+                    config.save_to_default_location()?;
+                    println!("Active profile set to {}", config.active_profile);
                 }
                 Some(ConfigCommand::New) => {
-                    let mut mut_config = config.clone();
                     let name = inquire::Text::new("New profile name:").prompt()?;
                     if !name.trim().is_empty() {
-                        mut_config.profiles.push(mylm_core::config::Profile {
+                        config.profiles.push(mylm_core::config::Profile {
                             name: name.clone(),
-                            endpoint: mut_config.default_endpoint.clone(),
+                            endpoint: config.default_endpoint.clone(),
                             prompt: "default".to_string(),
                             model: None,
                         });
-                        mut_config.active_profile = name;
-                        handle_settings_dashboard(&mut mut_config).await?;
+                        config.active_profile = name;
+                        handle_settings_dashboard(&mut config).await?;
                     }
                 }
                 Some(ConfigCommand::Edit { cmd: edit_cmd }) => {
@@ -234,14 +231,12 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
                             std::process::Command::new(editor).arg(path).status()?;
                         }
                         None => {
-                            let mut mut_config = config.clone();
-                            handle_settings_dashboard(&mut mut_config).await?;
+                            handle_settings_dashboard(&mut config).await?;
                         }
                     }
                 }
                 None => {
-                    let mut mut_config = config.clone();
-                    handle_settings_dashboard(&mut mut_config).await?;
+                    handle_settings_dashboard(&mut config).await?;
                 }
             }
         }
@@ -251,7 +246,7 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
         }
 
         None => {
-            handle_hub(&config, &formatter, initial_context).await?;
+            handle_hub(&mut config, &formatter, initial_context).await?;
         }
     }
 
@@ -259,7 +254,7 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
 }
 
 /// Handle the interactive hub menu
-async fn handle_hub(config: &Config, formatter: &OutputFormatter, initial_context: mylm_core::context::TerminalContext) -> Result<()> {
+async fn handle_hub(config: &mut Config, formatter: &OutputFormatter, initial_context: mylm_core::context::TerminalContext) -> Result<()> {
     loop {
         let choice = crate::cli::hub::show_hub(config).await?;
         match choice {
@@ -306,8 +301,7 @@ async fn handle_hub(config: &Config, formatter: &OutputFormatter, initial_contex
                 }
             }
             HubChoice::Configuration => {
-                let mut mut_config = config.clone();
-                handle_settings_dashboard(&mut mut_config).await?;
+                handle_settings_dashboard(config).await?;
             }
             HubChoice::ManageSessions => {
                 let sessions = list_sessions()?;
