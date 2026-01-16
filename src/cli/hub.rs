@@ -38,23 +38,11 @@ impl std::fmt::Display for HubChoice {
 
 #[derive(Debug, PartialEq)]
 pub enum SettingsChoice {
-    SwitchProfile,
-    EditProvider,
-    EditApiUrl,
-    EditApiKey,
-    EditModel,
-    EditPrompt,
+    SelectActiveProfile,
+    ManageProfiles,
     ManageEndpoints,
-    Advanced,
+    GeneralSettings,
     Save,
-    Back,
-}
-
-#[derive(Debug, PartialEq)]
-pub enum AdvancedSettingsChoice {
-    WebSearch,
-    General,
-    ShellIntegration,
     Back,
 }
 
@@ -79,27 +67,12 @@ pub enum ProfileAction {
 impl std::fmt::Display for SettingsChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SettingsChoice::SwitchProfile => write!(f, "👤 Switch Profile"),
-            SettingsChoice::EditProvider => write!(f, "🏢 Provider (Connection)"),
-            SettingsChoice::EditApiUrl => write!(f, "🔗 API Base URL"),
-            SettingsChoice::EditApiKey => write!(f, "🔑 API Key"),
-            SettingsChoice::EditModel => write!(f, "🧠 Model"),
-            SettingsChoice::EditPrompt => write!(f, "📝 Custom Instructions (Prompt)"),
-            SettingsChoice::ManageEndpoints => write!(f, "🔌 Manage Connections"),
-            SettingsChoice::Advanced => write!(f, "⚙️  Advanced Settings"),
+            SettingsChoice::SelectActiveProfile => write!(f, "👤 [1] Select Active Profile"),
+            SettingsChoice::ManageProfiles => write!(f, "📂 [2] Manage Profiles (Create/Edit)"),
+            SettingsChoice::ManageEndpoints => write!(f, "🔌 [3] Manage Endpoints (Providers/Keys)"),
+            SettingsChoice::GeneralSettings => write!(f, "⚙️  [4] General Settings (Prompts/etc)"),
             SettingsChoice::Save => write!(f, "💾 Save & Exit"),
-            SettingsChoice::Back => write!(f, "⬅️  Discard & Back"),
-        }
-    }
-}
-
-impl std::fmt::Display for AdvancedSettingsChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AdvancedSettingsChoice::WebSearch => write!(f, "🌐 Web Search"),
-            AdvancedSettingsChoice::General => write!(f, "⚙️  General Config"),
-            AdvancedSettingsChoice::ShellIntegration => write!(f, "🐚 Shell Integration"),
-            AdvancedSettingsChoice::Back => write!(f, "⬅️  Back"),
+            SettingsChoice::Back => write!(f, "⬅️  Back"),
         }
     }
 }
@@ -233,7 +206,7 @@ pub fn show_settings_dashboard(config: &Config) -> Result<SettingsChoice> {
 
     let prompt_str = profile.map(|p| p.prompt.clone()).unwrap_or_else(|| "default".to_string());
     
-    println!("\n📊 Active Configuration (Profile: '{}')", profile_name);
+    println!("\n📊 Current Profile: {}", Style::new().blue().bold().apply_to(&profile_name));
     println!("   ├─ Provider: {}", provider_str);
     println!("   ├─ Base URL: {}", url_str);
     println!("   ├─ API Key:  {}", key_status);
@@ -242,46 +215,22 @@ pub fn show_settings_dashboard(config: &Config) -> Result<SettingsChoice> {
     println!();
 
     let options = vec![
-        SettingsChoice::SwitchProfile,
-        SettingsChoice::EditProvider,
-        SettingsChoice::EditApiUrl,
-        SettingsChoice::EditApiKey,
-        SettingsChoice::EditModel,
-        SettingsChoice::EditPrompt,
+        SettingsChoice::SelectActiveProfile,
+        SettingsChoice::ManageProfiles,
         SettingsChoice::ManageEndpoints,
-        SettingsChoice::Advanced,
+        SettingsChoice::GeneralSettings,
         SettingsChoice::Save,
         SettingsChoice::Back,
     ];
 
     let ans: InquireResult<SettingsChoice> = Select::new(
-        "Select a field to edit:",
+        "Configuration Menu",
         options
     ).prompt();
 
     match ans {
         Ok(choice) => Ok(choice),
         Err(_) => Ok(SettingsChoice::Back),
-    }
-}
-
-/// Show Advanced Settings Submenu
-pub fn show_advanced_submenu() -> Result<AdvancedSettingsChoice> {
-    let options = vec![
-        AdvancedSettingsChoice::WebSearch,
-        AdvancedSettingsChoice::General,
-        AdvancedSettingsChoice::ShellIntegration,
-        AdvancedSettingsChoice::Back,
-    ];
-
-    let ans: InquireResult<AdvancedSettingsChoice> = Select::new(
-        "Advanced Settings",
-        options
-    ).prompt();
-
-    match ans {
-        Ok(choice) => Ok(choice),
-        Err(_) => Ok(AdvancedSettingsChoice::Back),
     }
 }
 
@@ -480,7 +429,7 @@ async fn print_banner(config: &Config) {
  / /  / / / /_/ / / /___ / /  / /
 /_/  /_/  \__, / /_____//_/  /_/
          /____/
-    "#;
+     "#;
 
     println!("{}", green.apply_to(banner));
     println!("          {}", cyan.apply_to("My Language Model"));
