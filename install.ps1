@@ -1,4 +1,3 @@
-#!/usr/bin/env pwsh
 <#
 .SYNOPSIS
     mylm Windows Installation Script
@@ -6,9 +5,30 @@
     Native Windows installer for mylm AI assistant with PowerShell integration
 .NOTES
     This script provides a Windows-native installation alternative to WSL2
+    
+    USAGE:
+    - PowerShell 7+:  pwsh -ExecutionPolicy Bypass -File install.ps1
+    - Windows PowerShell: powershell -ExecutionPolicy Bypass -File install.ps1
 #>
 
-#Requires -Version 7.0
+# Detect if we're running in cmd.exe (shebang failed)
+$inCmd = $null -ne $env:COMSPEC -and $env:COMSPEC.EndsWith("cmd.exe")
+if ($inCmd -and -not $MyInvocation.MyCommand.Path) {
+    Write-Host "❌ Error: 'pwsh' is not recognized." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "To run this script, use one of these commands:" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  Option 1 - PowerShell 7+ (recommended):" -ForegroundColor Cyan
+    Write-Host "    pwsh -ExecutionPolicy Bypass -File install.ps1" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  Option 2 - Windows PowerShell (built-in):" -ForegroundColor Cyan
+    Write-Host "    powershell -ExecutionPolicy Bypass -File install.ps1" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  Option 3 - Install PowerShell 7+:" -ForegroundColor Cyan
+    Write-Host "    winget install Microsoft.PowerShell" -ForegroundColor Gray
+    Write-Host ""
+    exit 1
+}
 
 param(
     [switch]$Force,
@@ -630,14 +650,81 @@ function Start-UpdateExisting {
     Write-ColorOutput "✅ Update complete! (Your configuration and aliases were preserved)" Green
 }
 
+# Check for PowerShell 7 and add to PATH if needed
+function Add-PowerShell7ToPath {
+    $ps7Paths = @(
+        "$env:ProgramFiles\PowerShell\7\pwsh.exe",
+        "${env:ProgramFiles(x86)}\PowerShell\7\pwsh.exe",
+        "$env:LOCALAPPDATA\Microsoft\PowerShell\7\pwsh.exe"
+    )
+    
+    foreach ($ps7Path in $ps7Paths) {
+        if (Test-Path $ps7Path) {
+            $ps7Dir = Split-Path $ps7Path -Parent
+            $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+            $pathEntries = $userPath -split ';'
+            $normalizedEntries = $pathEntries | ForEach-Object { $_.TrimEnd('\') }
+            $normalizedPs7Dir = $ps7Dir.TrimEnd('\')
+            
+            if ($normalizedEntries -notcontains $normalizedPs7Dir) {
+                Write-ColorOutput "🔍 Found PowerShell 7 at: $ps7Path" Cyan
+                Write-ColorOutput "   Adding to PATH..." Cyan
+                $newPath = "$userPath;$ps7Dir"
+                [Environment]::SetEnvironmentVariable("PATH", $newPath, "User")
+                $env:PATH = "$env:PATH;$ps7Dir"
+                Write-ColorOutput "✅ Added PowerShell 7 to PATH" Green
+            }
+            return $true
+        }
+    }
+    return $false
+}
+
 # --- Main Execution ---
 
 Write-ColorOutput "🔷 mylm Windows Installation Script" Magenta
 Write-ColorOutput "================================" Magenta
 Write-Host ""
 
+# Detect if pwsh command is available
+$pwshAvailable = Test-CommandExists "pwsh"
+
+if (-not $pwshAvailable) {
+    # Try to find and add PowerShell 7 to PATH
+    Write-ColorOutput "🔍 Looking for PowerShell 7 installation..." Cyan
+    $foundPS7 = Add-PowerShell7ToPath
+    
+    # Re-check if pwsh is now available
+    $pwshAvailable = Test-CommandExists "pwsh"
+    
+    if (-not $pwshAvailable) {
+        Write-ColorOutput "⚠️  PowerShell 7 not found or not in PATH." Yellow
+        Write-Host ""
+        Write-ColorOutput "If you installed PowerShell 7 via winget, run this in PowerShell 5.1 as Admin:" Cyan
+        Write-Host "  [Environment]::SetEnvironmentVariable('PATH', \$env:PATH + ';C:\Program Files\PowerShell\7', 'User')" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "Then run this script with:" -ForegroundColor Yellow
+        Write-Host "  pwsh -ExecutionPolicy Bypass -File install.ps1" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "OR run this script directly with PowerShell 5.1:" -ForegroundColor Yellow
+        Write-Host "  powershell -ExecutionPolicy Bypass -File install.ps1" -ForegroundColor Gray
+        Write-Host ""
+        
+        $usePS5 = Read-Host "Continue with PowerShell 5.1? [y/N]"
+        if ($usePS5 -notmatch '^[Yy]$') {
+            exit 0
+        }
+    }
+}
+
 # Check if running as administrator (not required but warn)
-$isAdmin = (New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$isAdmin = $false
+try {
+    $isAdmin = (New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+} catch {
+    # PS 5.1 might not support this fully
+}
+
 if ($isAdmin) {
     Write-ColorOutput "⚠️  WARNING: Running as Administrator. This is NOT required." Yellow
     Write-ColorOutput "   Running as admin may cause permission issues." Yellow
@@ -650,12 +737,9 @@ if ($isAdmin) {
 # Check PowerShell version
 $psVersion = $PSVersionTable.PSVersion.Major
 if ($psVersion -lt 7) {
-    Write-ColorOutput "⚠️  WARNING: PowerShell 7+ recommended. You are running PowerShell $psVersion" Yellow
-    Write-ColorOutput "   Some features may not work correctly." Yellow
-    $continue = Read-Host "Continue anyway? [y/N]"
-    if ($continue -notmatch '^[Yy]$') {
-        exit 0
-    }
+    Write-ColorOutput "ℹ️  Running on PowerShell $psVersion (legacy version)" Cyan
+    Write-ColorOutput "   PowerShell 7+ is recommended for best experience." Yellow
+    Write-Host ""
 }
 
 # Main menu loop
