@@ -9,6 +9,7 @@ pub mod output;
 pub mod state;
 pub mod protocol;
 pub mod factory;
+pub mod util;
 
 // Re-exports for convenience
 pub use agent::core::Agent;

@@ -8,6 +8,7 @@ use super::{
     chat::{ChatMessage, ChatRequest, ChatResponse, Choice, StreamEvent, Usage},
     LlmConfig, TokenUsage,
 };
+use super::super::util::{sanitize_base_url, validate_api_key};
 use anyhow::{bail, Context, Result};
 use futures::{Stream, StreamExt};
 use reqwest::{
@@ -100,7 +101,9 @@ impl LlmClient {
 
     /// OpenAI-compatible API chat
     async fn chat_openai(&self, request: &ChatRequest) -> Result<ChatResponse> {
-        let url = format!("{}/chat/completions", self.config.base_url.trim_end_matches('/'));
+        // Validate and sanitize the base URL before constructing the request URL
+        let base_url = sanitize_base_url(&self.config.base_url, "Base URL")?;
+        let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
         let body = OpenAiRequest {
             model: self.config.model.clone(),
@@ -262,11 +265,15 @@ impl LlmClient {
             parts: vec![GeminiPart { text }],
         });
 
+        // Validate and sanitize the base URL before constructing the request URL
+        let base_url = sanitize_base_url(&self.config.base_url, "Base URL")?;
+        let api_key = self.config.api_key.as_deref().unwrap_or("");
+        
         let url = format!(
             "{}/v1beta/models/{}:generateContent?key={}",
-            self.config.base_url.trim_end_matches('/'),
+            base_url.trim_end_matches('/'),
             self.config.model,
-            self.config.api_key.as_ref().map(|k| k.trim()).unwrap_or("")
+            api_key
         );
 
         let body = GeminiRequest {
@@ -398,7 +405,9 @@ impl LlmClient {
         &'a self,
         request: &'a ChatRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send + 'a>> {
-        let url = format!("{}/chat/completions", self.config.base_url.trim_end_matches('/'));
+        // Validate and sanitize the base URL before constructing the request URL
+        let base_url = sanitize_base_url(&self.config.base_url, "Base URL").expect("Base URL should have been validated in LlmClient::new");
+        let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
 
         let body = OpenAiRequest {
             model: self.config.model.clone(),
@@ -496,27 +505,29 @@ impl LlmClient {
 
         match self.config.provider {
             LlmProvider::OpenAiCompatible | LlmProvider::MoonshotKimi => {
-                headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
+                headers.insert(CONTENT_TYPE, "application/json".parse().context("Invalid content-type header")?);
                 
                 // OpenRouter specific headers
                 if self.config.base_url.contains("openrouter.ai") {
-                    headers.insert("HTTP-Referer", "https://github.com/edward/mylm".parse().unwrap());
-                    headers.insert("X-Title", "mylm".parse().unwrap());
+                    headers.insert("HTTP-Referer", "https://github.com/edward/mylm".parse().context("Invalid HTTP-Referer header")?);
+                    headers.insert("X-Title", "mylm".parse().context("Invalid X-Title header")?);
                 }
 
                 if let Some(api_key) = &self.config.api_key {
-                    let key = api_key.trim();
-                    if key != "none" && !key.is_empty() {
+                    // Use shared validation to ensure API key is safe for HTTP headers
+                    let validated_key = validate_api_key(api_key)?;
+                    if !validated_key.is_empty() {
+                        let auth_value = format!("Bearer {}", validated_key);
                         headers.insert(
                             "Authorization",
-                            format!("Bearer {}", key).parse().unwrap(),
+                            auth_value.parse().context("Invalid Authorization header")?,
                         );
                     }
                 }
             }
             LlmProvider::GoogleGenerativeAi => {
                 // API key is included in URL, not headers
-                headers.insert(CONTENT_TYPE, "application/json".parse().unwrap());
+                headers.insert(CONTENT_TYPE, "application/json".parse().context("Invalid content-type header")?);
             }
         }
 

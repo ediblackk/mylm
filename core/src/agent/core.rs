@@ -587,6 +587,29 @@ impl Agent {
         Ok(AgentDecision::Message(content, self.total_usage.clone()))
     }
 
+    /// Inject relevant memories into the conversation history based on the last user message.
+    pub async fn inject_memory_context(&mut self) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        if !self.llm_client.config().memory.auto_context {
+            return Ok(());
+        }
+
+        if let Some(store) = &self.memory_store {
+            // Find the last user message to use as a search query
+            if let Some(last_user_msg) = self.history.iter().rev().find(|m| m.role == MessageRole::User) {
+                let memories = store.search_memory(&last_user_msg.content, 5).await.unwrap_or_default();
+                if !memories.is_empty() {
+                    let context = self.build_context_from_memories(&memories);
+                    // Append context to the last user message
+                    if let Some(user_idx) = self.history.iter().rposition(|m| m.role == MessageRole::User) {
+                        self.history[user_idx].content.push_str("\n\n");
+                        self.history[user_idx].content.push_str(&context);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Legacy run method for backward compatibility.
     pub async fn run(
         &mut self,
