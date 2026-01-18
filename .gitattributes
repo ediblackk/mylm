@@ -1,0 +1,5 @@
+# Ensure consistent line endings for cross-platform compatibility
+*.ps1 text eol=lf
+*.sh text eol=lf
+*.md text
+*.txt text
