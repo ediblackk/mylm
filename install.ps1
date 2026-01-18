@@ -358,25 +358,51 @@ function Install-VisualStudioBuildToolsIfNeeded {
             Write-ColorOutput "✅ Visual Studio C++ Workload found." Green
             return
         }
+        
+        # Check if basic Build Tools are installed without the workload
+        $vsWhereBaseOutput = & $vsWherePath -latest -products * -requires Microsoft.VisualStudio.Component.Roslyn.Compiler -property installationPath 2>&1
+        if ($vsWhereBaseOutput) {
+            Write-ColorOutput "⚠️  Visual Studio Build Tools found, but C++ workload is missing." Yellow
+            $hasBuildTools = $true
+        }
     }
     
     Write-ColorOutput "⚠️  Visual Studio C++ Build Tools (Linker) not found." Yellow
     Write-ColorOutput "   The Rust compiler requires the Microsoft C++ Linker (link.exe)." Yellow
     Write-Host ""
     
-    # Check for winget
-    if (Test-CommandExists "winget") {
-        Write-ColorOutput "🚀 Installing Visual Studio 2022 Build Tools + C++ Workload..." Cyan
-        Write-ColorOutput "   This is a large download (~3GB) and may take 15-30 minutes." Cyan
-        Write-ColorOutput "   A UAC prompt may appear to authorize the installer." Cyan
+    # 1. Try modifying existing installation if detected
+    if ($hasBuildTools -and (Test-Path $vsWherePath)) {
+        Write-ColorOutput "🔄 Attempting to add C++ workload to existing installation..." Cyan
         
-        # We need to install the Build Tools AND the specific C++ Desktop workload
-        # Using --override to pass arguments to the VS installer
-        # --add Microsoft.VisualStudio.Workload.VCTools: This is the C++ workload
-        # --includeRecommended: Adds recommended components
+        # Find the installer executable
+        $vsInstallerPath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+        
+        if (Test-Path $vsInstallerPath) {
+            Write-ColorOutput "🚀 Launching VS Installer to add C++ components..." Cyan
+            
+            # Use 'modify' command directly
+            $installArgs = "modify --installPath `"$vsWhereBaseOutput`" --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --norestart"
+            
+            $process = Start-Process -FilePath $vsInstallerPath -ArgumentList $installArgs -Wait -PassThru
+            
+            if ($process.ExitCode -eq 0) {
+                 Write-ColorOutput "✅ C++ Workload added successfully." Green
+                 Write-ColorOutput "💡 You may need to reboot." Cyan
+                 return
+            }
+        }
+    }
+    
+    # 2. Try winget
+    if (Test-CommandExists "winget") {
+        Write-ColorOutput "🚀 Attempting installation via winget..." Cyan
+        
+        # If we think it's partially installed, winget might fail with "No applicable update found"
+        # We can try 'configure' but that's complex. Let's try 'install' first.
+        
         $installArgs = "install --id Microsoft.VisualStudio.2022.BuildTools --override `"--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended`" --source winget"
         
-        # Execute winget
         $process = Start-Process -FilePath "winget" -ArgumentList $installArgs -Wait -PassThru
         
         if ($process.ExitCode -eq 0) {
@@ -394,10 +420,47 @@ function Install-VisualStudioBuildToolsIfNeeded {
         }
         else {
              Write-ColorOutput "⚠️  Winget install failed with code $($process.ExitCode)." Yellow
+             if ($process.ExitCode -eq -1978335189) { # 0x8A15002B
+                 Write-ColorOutput "   (Code indicates 'No applicable update found' - likely already installed but missing components)" Yellow
+             }
         }
     }
     
-    # Fallback manual instructions
+    # 3. Fallback: Download vs_BuildTools.exe directly
+    Write-ColorOutput "📥 Downloading Visual Studio Build Tools installer directly..." Cyan
+    $vsBootstrapperUrl = "https://aka.ms/vs/17/release/vs_BuildTools.exe"
+    $vsBootstrapperPath = "$env:TEMP\vs_BuildTools.exe"
+    
+    try {
+        Invoke-WebRequest -Uri $vsBootstrapperUrl -OutFile $vsBootstrapperPath -UseBasicParsing
+        
+        Write-ColorOutput "🚀 Running VS Build Tools Installer..." Cyan
+        
+        # Arguments to install/modify with specific workload
+        $bootstrapperArgs = "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive --norestart --wait"
+        
+        $process = Start-Process -FilePath $vsBootstrapperPath -ArgumentList $bootstrapperArgs -Wait -PassThru
+        
+        if ($process.ExitCode -eq 0) {
+            Write-ColorOutput "✅ Visual Studio Build Tools configured successfully." Green
+            return
+        }
+        elseif ($process.ExitCode -eq 3010) { # Reboot required
+             Write-ColorOutput "✅ Visual Studio Build Tools configured (Reboot Required)." Green
+             Write-ColorOutput "⚠️  A reboot is required to complete the installation." Yellow
+             $reboot = Read-Host "Reboot now? [y/N]"
+             if ($reboot -match '^[Yy]$') {
+                Restart-Computer
+                exit 0
+             }
+             exit 0
+        }
+    }
+    catch {
+        Write-ColorOutput "❌ Failed to download or run installer: $_" Red
+    }
+    
+    # Final manual fallback
     Write-ColorOutput "❌ Could not automatically install C++ Build Tools." Red
     Write-Host ""
     Write-ColorOutput "📥 Please download and install manually:" Cyan
@@ -406,7 +469,7 @@ function Install-VisualStudioBuildToolsIfNeeded {
     Write-Host "  3. Run the installer" -ForegroundColor Gray
     Write-Host "  4. IMPORTANT: Select 'Desktop development with C++' workload" -ForegroundColor Yellow
     Write-Host "     (Look for the checkbox in the top-left of the installer)" -ForegroundColor Gray
-    Write-Host "  5. Click Install" -ForegroundColor Gray
+    Write-Host "  5. Click Install/Modify" -ForegroundColor Gray
     Write-Host ""
     
     $continue = Read-Host "Continue anyway? (Build will FAIL without link.exe) [y/N]"

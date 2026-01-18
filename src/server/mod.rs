@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Mutex, oneshot};
 use tokio_tungstenite::accept_async;
@@ -15,8 +14,6 @@ use mylm_core::agent::core::{Agent, AgentDecision};
 use mylm_core::llm::chat::ChatMessage;
 use mylm_core::terminal::app::TuiEvent;
 use mylm_core::protocol::{ServerEvent, ClientMessage, MessageEnvelope, ServerInfo, Capabilities};
-use mylm_core::memory::store::VectorStore;
-use mylm_core::memory::graph::MemoryGraph;
 
 pub struct AppState {
     pub config: Arc<Mutex<Config>>,
@@ -25,7 +22,7 @@ pub struct AppState {
 
 pub struct SessionRuntime {
     pub agent: Arc<Mutex<Agent>>,
-    pub event_tx: mpsc::UnboundedSender<TuiEvent>,
+    pub _event_tx: mpsc::UnboundedSender<TuiEvent>,
     pub terminal_buffer: Arc<Mutex<String>>,
     pub pending_approvals: Arc<Mutex<HashMap<Uuid, oneshot::Sender<bool>>>>,
     pub run_lock: Arc<Mutex<()>>,
@@ -66,7 +63,7 @@ async fn handle_connection(
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerEvent>();
 
     // Task to forward ServerEvents to WebSocket
-    let mut send_task = tokio::spawn(async move {
+    let send_task = tokio::spawn(async move {
         let mut event_id = 0;
         while let Some(event) = rx.recv().await {
             event_id += 1;
@@ -127,7 +124,7 @@ async fn handle_client_message(
 
             let runtime = Arc::new(SessionRuntime {
                 agent,
-                event_tx: event_tx.clone(),
+                _event_tx: event_tx.clone(),
                 terminal_buffer: Arc::new(Mutex::new(String::new())),
                 pending_approvals: Arc::new(Mutex::new(HashMap::new())),
                 run_lock: Arc::new(Mutex::new(())),
