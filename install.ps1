@@ -315,57 +315,101 @@ function Install-ProtocIfNeeded {
     }
 }
 
-function Install-VisualStudioBuildToolsIfNeeded {
-    # Check if already installed
+function Check-LinkerAvailable {
+    # Check if link.exe is available in PATH
+    if (Test-CommandExists "link.exe") {
+        return $true
+    }
+    
+    # Try to find it in standard VS locations to verify installation, even if not in current PATH
     $vsWherePath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-    
     if (Test-Path $vsWherePath) {
-        $vsWhereOutput = & $vsWherePath -latest -requires Microsoft.VisualStudio.Workload.NativeDesktop -property installationPath 2>&1
-        if ($vsWhereOutput) {
-            Write-ColorOutput "✅ Visual Studio Build Tools found." Green
-            return
+        $vsPath = & $vsWherePath -latest -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>&1
+        if ($vsPath) {
+            # Found VS with C++ tools, so it should work if we run from Dev Prompt
+            # or if the user refreshes their environment.
+            # We can try to add it to path temporarily if we find the VC directory
+            $vcToolsPath = "$vsPath\VC\Tools\MSVC"
+            if (Test-Path $vcToolsPath) {
+                return $true
+            }
         }
     }
     
-    Write-ColorOutput "🔍 Visual Studio Build Tools not found. Installing..." Cyan
+    return $false
+}
+
+function Install-VisualStudioBuildToolsIfNeeded {
+    Write-ColorOutput "🔍 Checking for Visual Studio C++ Build Tools..." Cyan
     
-    # Check for winget
-    if (Test-CommandExists "winget") {
-        Write-ColorOutput "Installing Visual Studio Build Tools 2022 via winget..." Cyan
-        Write-ColorOutput "   This may take 10-15 minutes..." Cyan
-        
-        # Try installing Build Tools (winget ID might vary)
-        $wingetResult = & winget install --id Microsoft.VisualStudio.2022.BuildTools -e --source winget 2>&1
-        
-        if ($LASTEXITCODE -eq 0) {
-            Write-ColorOutput "✅ Visual Studio Build Tools installed." Green
-            return
-        }
-        Write-ColorOutput "⚠️  winget install failed, trying with workload specification..." Yellow
-    }
-    
-    # Try with full workload via vs_buildtools.exe if available
-    $vsInstallPath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools"
-    if (Test-Path "$vsInstallPath\VC\Auxiliary\Build\vcvars64.bat") {
-        Write-ColorOutput "✅ Visual Studio Build Tools found at $vsInstallPath" Green
+    # Check if link.exe is available (critical for Rust linking)
+    if (Check-LinkerAvailable) {
+        Write-ColorOutput "✅ C++ Linker (link.exe) found." Green
         return
     }
     
-    Write-ColorOutput "⚠️  Could not automatically install Visual Studio Build Tools." Yellow
-    Write-Host ""
-    Write-ColorOutput "📥 Please download and install manually:" Cyan
-    Write-Host "  1. Go to: https://visualstudio.microsoft.com/downloads/" -ForegroundColor Gray
-    Write-Host "  2. Scroll to 'Tools for Visual Studio 2022'" -ForegroundColor Gray
-    Write-Host "  3. Download 'Build Tools for Visual Studio 2022'" -ForegroundColor Gray
-    Write-Host "  4. Run the installer" -ForegroundColor Gray
-    Write-Host "  5. Select 'Desktop development with C++' workload" -ForegroundColor Gray
-    Write-Host "  6. Click Install" -ForegroundColor Gray
-    Write-Host ""
-    Write-Host "   OR use winget in PowerShell as Administrator:" -ForegroundColor Yellow
-    Write-Host "   winget install --id Microsoft.VisualStudio.2022.BuildTools -e" -ForegroundColor Gray
+    # Check if we have VS Build Tools but maybe just missing the C++ workload
+    $vsWherePath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    $hasBuildTools = $false
+    
+    if (Test-Path $vsWherePath) {
+        $vsWhereOutput = & $vsWherePath -latest -products * -requires Microsoft.VisualStudio.Workload.VCTools -property installationPath 2>&1
+        if ($vsWhereOutput) {
+            Write-ColorOutput "✅ Visual Studio C++ Workload found." Green
+            return
+        }
+    }
+    
+    Write-ColorOutput "⚠️  Visual Studio C++ Build Tools (Linker) not found." Yellow
+    Write-ColorOutput "   The Rust compiler requires the Microsoft C++ Linker (link.exe)." Yellow
     Write-Host ""
     
-    $continue = Read-Host "Continue anyway? (Build will likely fail without C++ compiler) [y/N]"
+    # Check for winget
+    if (Test-CommandExists "winget") {
+        Write-ColorOutput "🚀 Installing Visual Studio 2022 Build Tools + C++ Workload..." Cyan
+        Write-ColorOutput "   This is a large download (~3GB) and may take 15-30 minutes." Cyan
+        Write-ColorOutput "   A UAC prompt may appear to authorize the installer." Cyan
+        
+        # We need to install the Build Tools AND the specific C++ Desktop workload
+        # Using --override to pass arguments to the VS installer
+        # --add Microsoft.VisualStudio.Workload.VCTools: This is the C++ workload
+        # --includeRecommended: Adds recommended components
+        $installArgs = "install --id Microsoft.VisualStudio.2022.BuildTools --override `"--passive --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended`" --source winget"
+        
+        # Execute winget
+        $process = Start-Process -FilePath "winget" -ArgumentList $installArgs -Wait -PassThru
+        
+        if ($process.ExitCode -eq 0) {
+            Write-ColorOutput "✅ Visual Studio Build Tools installed successfully." Green
+            Write-ColorOutput "⚠️  A system reboot is often required after installing Build Tools." Yellow
+            
+            $reboot = Read-Host "Would you like to reboot now? (Recommended) [y/N]"
+            if ($reboot -match '^[Yy]$') {
+                Restart-Computer
+                exit 0
+            }
+            
+            Write-ColorOutput "💡 Please restart your terminal/computer before continuing." Cyan
+            exit 0
+        }
+        else {
+             Write-ColorOutput "⚠️  Winget install failed with code $($process.ExitCode)." Yellow
+        }
+    }
+    
+    # Fallback manual instructions
+    Write-ColorOutput "❌ Could not automatically install C++ Build Tools." Red
+    Write-Host ""
+    Write-ColorOutput "📥 Please download and install manually:" Cyan
+    Write-Host "  1. Go to: https://visualstudio.microsoft.com/visual-cpp-build-tools/" -ForegroundColor Gray
+    Write-Host "  2. Download 'Build Tools for Visual Studio 2022'" -ForegroundColor Gray
+    Write-Host "  3. Run the installer" -ForegroundColor Gray
+    Write-Host "  4. IMPORTANT: Select 'Desktop development with C++' workload" -ForegroundColor Yellow
+    Write-Host "     (Look for the checkbox in the top-left of the installer)" -ForegroundColor Gray
+    Write-Host "  5. Click Install" -ForegroundColor Gray
+    Write-Host ""
+    
+    $continue = Read-Host "Continue anyway? (Build will FAIL without link.exe) [y/N]"
     if ($continue -notmatch '^[Yy]$') {
         exit 1
     }
@@ -386,13 +430,21 @@ function Install-SystemDependencies {
         Write-ColorOutput "ℹ️  sccache not found (optional, for faster builds)" Cyan
         $installSccache = Read-Host "Install sccache via cargo for faster rebuilds? [Y/n]"
         if ($installSccache -notmatch '^[Nn]$') {
-            Write-ColorOutput "🚀 Installing sccache via cargo..." Cyan
-            cargo install sccache
-            if ($LASTEXITCODE -eq 0) {
-                Write-ColorOutput "✅ sccache installed." Green
+            # Check for linker again before trying to install sccache (which needs to build)
+            if (-not (Check-LinkerAvailable)) {
+                Write-ColorOutput "⚠️  Cannot install sccache: C++ Linker (link.exe) not found." Yellow
+                Write-ColorOutput "   Please restart your terminal (or computer) if you just installed Build Tools." Yellow
+                Write-ColorOutput "   Skipping sccache installation." Yellow
             }
             else {
-                Write-ColorOutput "⚠️  Failed to install sccache. Build will continue without it." Yellow
+                Write-ColorOutput "🚀 Installing sccache via cargo..." Cyan
+                cargo install sccache
+                if ($LASTEXITCODE -eq 0) {
+                    Write-ColorOutput "✅ sccache installed." Green
+                }
+                else {
+                    Write-ColorOutput "⚠️  Failed to install sccache. Build will continue without it." Yellow
+                }
             }
         }
     }
@@ -458,6 +510,13 @@ function Build-Binary {
     # Set build target
     $env:CARGO_BUILD_TARGET = "x86_64-pc-windows-msvc"
     
+    # Final check for linker before Cargo runs
+    if (-not (Check-LinkerAvailable)) {
+        Write-ColorOutput "⚠️  WARNING: link.exe not found in PATH." Yellow
+        Write-ColorOutput "   The build will likely fail." Yellow
+        Write-ColorOutput "   Try running this script from the 'Developer PowerShell for VS 2022'." Yellow
+    }
+
     if ($profile -eq "release") {
         if (Test-CommandExists "sccache") {
             $env:RUSTC_WRAPPER = "sccache"
@@ -483,9 +542,10 @@ function Build-Binary {
         Write-ColorOutput "❌ Build failed." Red
         Write-ColorOutput ""
         Write-ColorOutput "Troubleshooting steps:" Yellow
-        Write-ColorOutput "1. Ensure Visual Studio Build Tools are installed" Cyan
-        Write-ColorOutput "2. Run this script from 'Developer PowerShell for VS'" Cyan
-        Write-ColorOutput "3. Try running 'cargo clean' and rebuilding" Cyan
+        Write-ColorOutput "1. Ensure Visual Studio Build Tools are installed WITH 'Desktop development with C++'" Cyan
+        Write-ColorOutput "2. Run this script from 'Developer PowerShell for VS' (search in Start Menu)" Cyan
+        Write-ColorOutput "3. If you just installed Build Tools, REBOOT your computer" Cyan
+        Write-ColorOutput "4. Try running 'cargo clean' and rebuilding" Cyan
         exit 1
     }
     

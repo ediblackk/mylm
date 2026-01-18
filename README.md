@@ -3,8 +3,6 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Terminal AI](https://img.shields.io/badge/Terminal-AI-blue.svg)](#)
 
-![mylm Ad](assets/Top.png)
-
 **mylm (My Language Model)** is a high-performance **Terminal AI Assistant** built for developers who actually spend their day in the CLI. 
 
 ![mylm Dashboard](assets/hero.png)

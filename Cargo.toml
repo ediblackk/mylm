@@ -69,6 +69,11 @@ home = "0.5"
 chrono = { version = "0.4", features = ["std", "serde"] }
 hostname = "0.4"
 arboard = "3.4"
+base64 = "0.22"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# WebSocket Server
+tokio-tungstenite = "0.21"
 
 [dev-dependencies]
 tempfile = "3.10"

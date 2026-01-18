@@ -18,6 +18,7 @@ use std::process::Command;
 
 mod cli;
 mod terminal;
+mod server;
 
 /// Main entry point for the AI assistant CLI
 #[tokio::main]
@@ -278,6 +279,10 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
 
         Some(Commands::Session { cmd }) => {
             handle_session_command(cmd, &config).await?;
+        }
+
+        Some(Commands::Server { port }) => {
+            server::start_server(*port).await?;
         }
 
         None => {

@@ -107,6 +107,13 @@ pub enum Commands {
         #[command(subcommand)]
         cmd: SessionCommand,
     },
+
+    /// Start the WebSocket server
+    Server {
+        /// Port to listen on
+        #[arg(short, long, default_value_t = 41901)]
+        port: u16,
+    },
 }
 
 #[derive(Subcommand, Debug)]
