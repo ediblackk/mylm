@@ -31,8 +31,6 @@ if ($inCmd -and -not $MyInvocation.MyCommand.Path) {
 }
 
 param(
-    [switch]$Force,
-    [switch]$SkipTmux,
     [string]$InstallPrefix,
     [string]$BuildProfile = "release"
 )
