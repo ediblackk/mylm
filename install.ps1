@@ -11,6 +11,19 @@
     - Windows PowerShell: powershell -ExecutionPolicy Bypass -File install.ps1
 #>
 
+param(
+    [string]$InstallPrefix,
+    [string]$BuildProfile = "debug"
+)
+
+# Set default install prefix after param block
+if (-not $InstallPrefix) {
+    $InstallPrefix = "$env:LOCALAPPDATA\mylm"
+}
+
+# Exit on error
+$ErrorActionPreference = "Stop"
+
 # Detect if we're running in cmd.exe (shebang failed)
 $inCmd = $null -ne $env:COMSPEC -and $env:COMSPEC.EndsWith("cmd.exe")
 if ($inCmd -and -not $MyInvocation.MyCommand.Path) {
@@ -29,19 +42,6 @@ if ($inCmd -and -not $MyInvocation.MyCommand.Path) {
     Write-Host ""
     exit 1
 }
-
-param(
-    [string]$InstallPrefix,
-    [string]$BuildProfile = "release"
-)
-
-# Set default install prefix after param block
-if (-not $InstallPrefix) {
-    $InstallPrefix = "$env:LOCALAPPDATA\mylm"
-}
-
-# Exit on error
-$ErrorActionPreference = "Stop"
 
 # Configuration
 $ConfigDir = "$env:APPDATA\mylm"
