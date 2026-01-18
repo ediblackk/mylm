@@ -160,19 +160,51 @@ function Stop-ProcessesUsingBinary {
 function Install-RustIfNeeded {
     if (-not (Test-CommandExists "cargo")) {
         Write-ColorOutput "❌ Rust/Cargo not found." Red
-        $installRust = Read-Host "Would you like to install Rust now via rustup.rs? [Y/n]"
+        $installRust = Read-Host "Would you like to install Rust now? [Y/n]"
         
         if ($installRust -notmatch '^[Nn]$') {
             Write-ColorOutput "🚀 Installing Rust..." Cyan
             
-            # Download and run rustup installer
-            $rustupUrl = "https://win.rustup.rs/x86_64-pc-windows-msvc"
+            # Try multiple rustup URLs (CDN might be down)
+            $rustupUrls = @(
+                "https://win.rustup.rs/x86_64-pc-windows-msvc",
+                "https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe",
+                "https://rustup.rs.rs/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe"
+            )
+            
             $rustupPath = "$env:TEMP\rustup-init.exe"
+            $downloadSuccess = $false
+            
+            foreach ($rustupUrl in $rustupUrls) {
+                try {
+                    Write-ColorOutput "Trying: $rustupUrl" Cyan
+                    Invoke-WebRequest -Uri $rustupUrl -OutFile $rustupPath -UseBasicParsing -TimeoutSec 30
+                    $downloadSuccess = $true
+                    Write-ColorOutput "✅ Downloaded rustup successfully!" Green
+                    break
+                }
+                catch {
+                    Write-ColorOutput "⚠️  Download failed: $($_.Exception.Message)" Yellow
+                }
+            }
+            
+            if (-not $downloadSuccess) {
+                Write-ColorOutput "❌ All rustup download sources failed." Red
+                Write-Host ""
+                Write-ColorOutput "Manual installation options:" Yellow
+                Write-Host "  1. Download from: https://rustup.rs/" -ForegroundColor Gray
+                Write-Host "  2. Or install via chocolatey: choco install rustup" -ForegroundColor Gray
+                Write-Host "  3. Or install via winget: winget install Rustlang.Rustup" -ForegroundColor Gray
+                Write-Host ""
+                
+                $manualInstall = Read-Host "Install manually and then restart this script? [y/N]"
+                if ($manualInstall -match '^[Yy]$') {
+                    Write-ColorOutput "💡 After installing Rust, restart your terminal and run this script again." Cyan
+                }
+                exit 1
+            }
             
             try {
-                Write-ColorOutput "Downloading rustup..." Cyan
-                Invoke-WebRequest -Uri $rustupUrl -OutFile $rustupPath -UseBasicParsing
-                
                 Write-ColorOutput "Running rustup installer..." Cyan
                 & $rustupPath -y --default-toolchain stable
                 
@@ -184,7 +216,8 @@ function Install-RustIfNeeded {
                 Write-ColorOutput "💡 This script will continue now using the updated PATH." Cyan
             }
             catch {
-                Write-ColorOutput "❌ Failed to install Rust: $_" Red
+                Write-ColorOutput "❌ Failed to run rustup installer: $_" Red
+                Write-ColorOutput "   The installer may have failed. Please check and try again." Yellow
                 exit 1
             }
             finally {
@@ -202,6 +235,11 @@ function Install-RustIfNeeded {
     # Verify cargo is now available
     if (-not (Test-CommandExists "cargo")) {
         Write-ColorOutput "❌ Cargo not found in PATH. Please restart your terminal and try again." Red
+        Write-Host ""
+        Write-ColorOutput "Manual steps:" Yellow
+        Write-Host "  1. Close this terminal" -ForegroundColor Gray
+        Write-Host "  2. Open a new terminal (cargo should be in PATH)" -ForegroundColor Gray
+        Write-Host "  3. Run this script again" -ForegroundColor Gray
         exit 1
     }
 }
