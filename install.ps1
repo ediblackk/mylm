@@ -33,9 +33,14 @@ if ($inCmd -and -not $MyInvocation.MyCommand.Path) {
 param(
     [switch]$Force,
     [switch]$SkipTmux,
-    [string]$InstallPrefix = "$env:LOCALAPPDATA\mylm",
+    [string]$InstallPrefix,
     [string]$BuildProfile = "release"
 )
+
+# Set default install prefix after param block
+if (-not $InstallPrefix) {
+    $InstallPrefix = "$env:LOCALAPPDATA\mylm"
+}
 
 # Exit on error
 $ErrorActionPreference = "Stop"
