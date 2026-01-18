@@ -247,38 +247,144 @@ function Install-RustIfNeeded {
     }
 }
 
-function Install-SystemDependencies {
-    Write-ColorOutput "🔍 Checking for system dependencies..." Cyan
-    
-    $missingDeps = @()
-    
-    # Check for protoc
-    if (-not (Test-CommandExists "protoc")) {
-        Write-ColorOutput "⚠️  protoc (Protocol Buffers compiler) not found." Yellow
-        $missingDeps += "protoc"
+function Install-ProtocIfNeeded {
+    if (Test-CommandExists "protoc") {
+        Write-ColorOutput "✅ protoc found: $(protoc --version)" Green
+        return
     }
     
-    # Check for Visual Studio Build Tools
-    $vsWherePath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-    $vsInstalled = $false
+    Write-ColorOutput "🔍 protoc not found. Installing..." Cyan
     
-    if (Test-Path $vsWherePath) {
-        $vsWhereOutput = & $vsWherePath -latest -requires Microsoft.VisualStudio.Workload.NativeDesktop -property installationPath
-        if ($vsWhereOutput) {
-            $vsInstalled = $true
-            Write-ColorOutput "✅ Visual Studio Build Tools found." Green
+    # Try winget first
+    if (Test-CommandExists "winget") {
+        Write-ColorOutput "Installing protoc via winget..." Cyan
+        $installOutput = & winget install --id ProtocolBuffers.protoc -e --source winget 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-ColorOutput "✅ protoc installed via winget." Green
+            return
+        }
+        Write-ColorOutput "⚠️  winget install failed, trying alternative..." Yellow
+    }
+    
+    # Try chocolatey
+    if (Test-CommandExists "choco") {
+        Write-ColorOutput "Installing protoc via chocolatey..." Cyan
+        $null = & choco install protoc -y 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-ColorOutput "✅ protoc installed via chocolatey." Green
+            return
         }
     }
     
-    if (-not $vsInstalled) {
-        Write-ColorOutput "⚠️  Visual Studio Build Tools not found." Yellow
-        $missingDeps += "visual-studio-build-tools"
+    # Fallback: Download directly from GitHub releases
+    Write-ColorOutput "📥 Downloading protoc from GitHub..." Cyan
+    $protocUrl = "https://github.com/protocolbuffers/protobuf/releases/download/v25.1/protoc-25.1-win64.zip"
+    $protocZip = "$env:TEMP\protoc.zip"
+    $protocInstallDir = "$env:ProgramFiles\protoc"
+    
+    try {
+        Invoke-WebRequest -Uri $protocUrl -OutFile $protocZip -UseBasicParsing -TimeoutSec 60
+        
+        # Extract
+        Write-ColorOutput "📦 Extracting protoc..." Cyan
+        Expand-Archive -Path $protocZip -DestinationPath $protocInstallDir -Force
+        
+        # Add to PATH for this session
+        $binPath = "$protocInstallDir\bin"
+        $env:PATH = "$binPath;$env:PATH"
+        
+        # Add to system PATH permanently
+        $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+        if ($userPath -notlike "*$binPath*") {
+            [Environment]::SetEnvironmentVariable("PATH", "$userPath;$binPath", "User")
+        }
+        
+        Write-ColorOutput "✅ protoc installed to $binPath" Green
+        
+        # Cleanup
+        Remove-Item $protocZip -Force -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-ColorOutput "❌ Failed to install protoc: $_" Red
+        Write-Host ""
+        Write-ColorOutput "Manual installation required:" Yellow
+        Write-Host "  1. Download from: https://github.com/protocolbuffers/protobuf/releases" -ForegroundColor Gray
+        Write-Host "  2. Extract to C:\Program Files\protoc" -ForegroundColor Gray
+        Write-Host "  3. Add C:\Program Files\protoc\bin to your PATH" -ForegroundColor Gray
+        exit 1
+    }
+}
+
+function Install-VisualStudioBuildToolsIfNeeded {
+    # Check if already installed
+    $vsWherePath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    
+    if (Test-Path $vsWherePath) {
+        $vsWhereOutput = & $vsWherePath -latest -requires Microsoft.VisualStudio.Workload.NativeDesktop -property installationPath 2>&1
+        if ($vsWhereOutput) {
+            Write-ColorOutput "✅ Visual Studio Build Tools found." Green
+            return
+        }
     }
     
-    # Check for sccache
+    Write-ColorOutput "🔍 Visual Studio Build Tools not found. Installing..." Cyan
+    
+    # Check for winget
+    if (Test-CommandExists "winget") {
+        Write-ColorOutput "Installing Visual Studio Build Tools 2022 via winget..." Cyan
+        Write-ColorOutput "   This may take 10-15 minutes..." Cyan
+        
+        # Try installing Build Tools (winget ID might vary)
+        $wingetResult = & winget install --id Microsoft.VisualStudio.2022.BuildTools -e --source winget 2>&1
+        
+        if ($LASTEXITCODE -eq 0) {
+            Write-ColorOutput "✅ Visual Studio Build Tools installed." Green
+            return
+        }
+        Write-ColorOutput "⚠️  winget install failed, trying with workload specification..." Yellow
+    }
+    
+    # Try with full workload via vs_buildtools.exe if available
+    $vsInstallPath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools"
+    if (Test-Path "$vsInstallPath\VC\Auxiliary\Build\vcvars64.bat") {
+        Write-ColorOutput "✅ Visual Studio Build Tools found at $vsInstallPath" Green
+        return
+    }
+    
+    Write-ColorOutput "⚠️  Could not automatically install Visual Studio Build Tools." Yellow
+    Write-Host ""
+    Write-ColorOutput "📥 Please download and install manually:" Cyan
+    Write-Host "  1. Go to: https://visualstudio.microsoft.com/downloads/" -ForegroundColor Gray
+    Write-Host "  2. Scroll to 'Tools for Visual Studio 2022'" -ForegroundColor Gray
+    Write-Host "  3. Download 'Build Tools for Visual Studio 2022'" -ForegroundColor Gray
+    Write-Host "  4. Run the installer" -ForegroundColor Gray
+    Write-Host "  5. Select 'Desktop development with C++' workload" -ForegroundColor Gray
+    Write-Host "  6. Click Install" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "   OR use winget in PowerShell as Administrator:" -ForegroundColor Yellow
+    Write-Host "   winget install --id Microsoft.VisualStudio.2022.BuildTools -e" -ForegroundColor Gray
+    Write-Host ""
+    
+    $continue = Read-Host "Continue anyway? (Build will likely fail without C++ compiler) [y/N]"
+    if ($continue -notmatch '^[Yy]$') {
+        exit 1
+    }
+}
+
+function Install-SystemDependencies {
+    Write-ColorOutput "🔍 Checking and installing system dependencies..." Cyan
+    Write-Host ""
+    
+    # Install protoc
+    Install-ProtocIfNeeded
+    
+    # Install Visual Studio Build Tools
+    Install-VisualStudioBuildToolsIfNeeded
+    
+    # Check for sccache (optional, install via cargo)
     if (-not (Test-CommandExists "sccache")) {
-        Write-ColorOutput "⚠️  sccache is not installed, but it is recommended for faster builds." Yellow
-        $installSccache = Read-Host "Would you like to install sccache now? [Y/n]"
+        Write-ColorOutput "ℹ️  sccache not found (optional, for faster builds)" Cyan
+        $installSccache = Read-Host "Install sccache via cargo for faster rebuilds? [Y/n]"
         if ($installSccache -notmatch '^[Nn]$') {
             Write-ColorOutput "🚀 Installing sccache via cargo..." Cyan
             cargo install sccache
@@ -286,27 +392,12 @@ function Install-SystemDependencies {
                 Write-ColorOutput "✅ sccache installed." Green
             }
             else {
-                Write-ColorOutput "⚠️  Failed to install sccache via cargo. Build will continue without it." Yellow
+                Write-ColorOutput "⚠️  Failed to install sccache. Build will continue without it." Yellow
             }
         }
     }
-    
-    if ($missingDeps.Count -gt 0) {
-        Write-ColorOutput "⚠️  Missing system dependencies: $($missingDeps -join ', ')" Yellow
-        Write-ColorOutput "🔒 This installer will continue, but you may need to install these manually." Cyan
-        Write-ColorOutput ""
-        Write-ColorOutput "➡️  For protoc:" Cyan
-        Write-ColorOutput "   Option 1: choco install protoc" Cyan
-        Write-ColorOutput "   Option 2: Download from https://github.com/protocolbuffers/protobuf/releases" Cyan
-        Write-ColorOutput ""
-        Write-ColorOutput "➡️  For Visual Studio Build Tools:" Cyan
-        Write-ColorOutput "   Download: https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022" Cyan
-        Write-ColorOutput "   Required workload: 'Desktop development with C++'" Cyan
-        
-        $continue = Read-Host "Continue anyway? [y/N]"
-        if ($continue -notmatch '^[Yy]$') {
-            exit 1
-        }
+    else {
+        Write-ColorOutput "✅ sccache found: $(sccache --version)" Green
     }
 }
 
