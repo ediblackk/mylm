@@ -11,6 +11,7 @@ use base64::Engine;
 
 use mylm_core::config::Config;
 use mylm_core::agent::core::{Agent, AgentDecision};
+use mylm_core::agent::tool::ToolOutput;
 use mylm_core::llm::chat::ChatMessage;
 use mylm_core::terminal::app::TuiEvent;
 use mylm_core::protocol::{ServerEvent, ClientMessage, MessageEnvelope, ServerInfo, Capabilities};
@@ -361,21 +362,22 @@ async fn run_agent_for_user_message(
                                         args.clone()
                                     };
                                     t.call(&processed_args).await
-                                        .unwrap_or_else(|e| format!("Tool Error: {e}"))
+                                        .unwrap_or_else(|e| ToolOutput::Immediate(serde_json::Value::String(format!("Tool Error: {e}"))))
                                 }
-                                None => format!("Error: Tool '{tool}' not found."),
+                                None => ToolOutput::Immediate(serde_json::Value::String(format!("Error: Tool '{tool}' not found."))),
                             }
                         };
 
+                        let output_str = output.as_string();
                         let _ = tx.send(ServerEvent::ToolResult {
                             session_id,
                             tool: tool.clone(),
                             call_id,
-                            ok: !output.starts_with("Tool Error:"),
-                            output: serde_json::Value::String(output.clone()),
+                            ok: !output_str.starts_with("Tool Error:"),
+                            output: serde_json::Value::String(output_str.clone()),
                         });
 
-                        last_observation = Some(output);
+                        last_observation = Some(output_str);
                     }
                     AgentDecision::MalformedAction(err) => {
                         let _ = tx.send(ServerEvent::Error {

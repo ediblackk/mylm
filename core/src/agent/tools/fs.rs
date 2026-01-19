@@ -1,7 +1,7 @@
-use crate::agent::tool::{Tool, ToolKind};
-use anyhow::Result;
+use crate::agent::tool::{Tool, ToolKind, ToolOutput};
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::error::Error as StdError;
 use std::fs;
 
 /// A tool for reading file contents.
@@ -39,7 +39,7 @@ impl Tool for FileReadTool {
         })
     }
 
-    async fn call(&self, args: &str) -> Result<String> {
+    async fn call(&self, args: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
         // Try to parse as JSON (modern Tool Calling)
         let path = if let Ok(parsed) = serde_json::from_str::<ReadArgs>(args) {
             parsed.path
@@ -49,8 +49,11 @@ impl Tool for FileReadTool {
         };
 
         match fs::read_to_string(&path) {
-            Ok(content) => Ok(content),
-            Err(e) => Ok(format!("Error reading file '{}': {}", path, e)),
+            Ok(content) => Ok(ToolOutput::Immediate(serde_json::Value::String(content))),
+            Err(e) => Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
+                "Error reading file '{}': {}",
+                path, e
+            )))),
         }
     }
 
@@ -99,28 +102,40 @@ impl Tool for FileWriteTool {
         })
     }
 
-    async fn call(&self, args: &str) -> Result<String> {
+    async fn call(&self, args: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
         // Try to parse as JSON (modern Tool Calling)
         let (path, content) = if let Ok(parsed) = serde_json::from_str::<WriteArgs>(args) {
             (parsed.path, parsed.content)
         } else {
             // ReAct fallback is harder for multiple args, but we can try simple split for "path content"
             // though it's unreliable. We prefer JSON.
-            return Ok("Error: write_file requires structured JSON arguments: { \"path\": \"...\", \"content\": \"...\" }".to_string());
+            return Ok(ToolOutput::Immediate(serde_json::Value::String(
+                "Error: write_file requires structured JSON arguments: { \"path\": \"...\", \"content\": \"...\" }".to_string()
+            )));
         };
 
         // Create parent directories if they don't exist
         if let Some(parent) = std::path::Path::new(&path).parent() {
             if !parent.exists() {
                 if let Err(e) = fs::create_dir_all(parent) {
-                    return Ok(format!("Error creating directory '{}': {}", parent.display(), e));
+                    return Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
+                        "Error creating directory '{}': {}",
+                        parent.display(),
+                        e
+                    ))));
                 }
             }
         }
 
         match fs::write(&path, &content) {
-            Ok(_) => Ok(format!("Successfully wrote to file '{}'", path)),
-            Err(e) => Ok(format!("Error writing to file '{}': {}", path, e)),
+            Ok(_) => Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
+                "Successfully wrote to file '{}'",
+                path
+            )))),
+            Err(e) => Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
+                "Error writing to file '{}': {}",
+                path, e
+            )))),
         }
     }
 

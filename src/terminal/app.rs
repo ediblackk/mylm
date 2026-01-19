@@ -940,17 +940,17 @@ async fn run_agent_loop(
 
                         let call_res = match agent_lock.tools.get(&tool) {
                             Some(t) => t.call(&t_args).await,
-                            None => Err(anyhow::anyhow!("Tool '{}' not found", tool)),
+                            None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, format!("Tool '{}' not found", tool))) as Box<dyn std::error::Error + Send + Sync>),
                         };
 
                         match call_res {
                             Ok(out) => {
-                                observation = out;
+                                observation = out.as_string();
                                 success = true;
                             }
                             Err(e) => {
                                 // Check if it's a safety/allowlist error
-                                let err_str = e.to_string();
+                                let err_str: String = e.to_string();
                                 if err_str.contains("allowlist") || err_str.contains("dangerous") {
                                     // STOP on safety/allowlist failure as requested
                                     let _ = event_tx.send(TuiEvent::AgentResponseFinal(format!("⛔ Terminal command blocked: {}", err_str), TokenUsage::default()));

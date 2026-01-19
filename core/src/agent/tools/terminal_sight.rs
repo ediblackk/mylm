@@ -1,7 +1,7 @@
-use crate::agent::tool::{Tool, ToolKind};
+use crate::agent::tool::{Tool, ToolKind, ToolOutput};
 use crate::terminal::app::TuiEvent;
-use anyhow::Result;
 use async_trait::async_trait;
+use std::error::Error as StdError;
 use tokio::sync::{mpsc, oneshot};
 
 /// A tool for peeking at the current terminal screen buffer.
@@ -38,17 +38,22 @@ impl Tool for TerminalSightTool {
         ToolKind::Internal
     }
 
-    async fn call(&self, _args: &str) -> Result<String> {
+    async fn call(&self, _args: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
         let (tx, rx) = oneshot::channel::<String>();
         self.event_tx.send(TuiEvent::GetTerminalScreen(tx))
             .map_err(|_| anyhow::anyhow!("Failed to contact UI for terminal sight"))?;
 
         let screen = rx.await.map_err(|_| anyhow::anyhow!("UI failed to provide terminal sight"))?;
-        
+
         if screen.trim().is_empty() {
-            Ok("Terminal is currently empty or has no visible text.".to_string())
+            Ok(ToolOutput::Immediate(serde_json::Value::String(
+                "Terminal is currently empty or has no visible text.".to_string(),
+            )))
         } else {
-            Ok(format!("## Terminal Screen Snapshot:\n\n{}", screen))
+            Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
+                "## Terminal Screen Snapshot:\n\n{}",
+                screen
+            ))))
         }
     }
 }

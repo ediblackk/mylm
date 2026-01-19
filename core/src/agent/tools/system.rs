@@ -1,7 +1,7 @@
-use anyhow::Result;
+use crate::agent::tool::{Tool, ToolKind, ToolOutput};
 use async_trait::async_trait;
-use crate::agent::tool::{Tool, ToolKind};
-use sysinfo::{System, ProcessRefreshKind, CpuRefreshKind, Networks, RefreshKind};
+use std::error::Error as StdError;
+use sysinfo::{CpuRefreshKind, Networks, ProcessRefreshKind, RefreshKind, System};
 
 /// A tool for monitoring system resources, processes, and network statistics.
 pub struct SystemMonitorTool;
@@ -114,21 +114,26 @@ impl Tool for SystemMonitorTool {
         "Arguments: 'resources', 'processes [limit]', or 'network'"
     }
 
-    async fn call(&self, args: &str) -> Result<String> {
+    async fn call(&self, args: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
         let args = args.trim().to_lowercase();
-        if args.is_empty() || args.contains("resources") {
-            Ok(self.system_resources().await)
+        let output = if args.is_empty() || args.contains("resources") {
+            self.system_resources().await
         } else if args.starts_with("processes") {
             let limit = args.split_whitespace()
                 .nth(1)
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(10);
-            Ok(self.process_list(limit))
+            self.process_list(limit)
         } else if args.contains("network") {
-            Ok(self.network_stats())
+            self.network_stats()
         } else {
-            Ok(format!("Unknown system_monitor command: '{}'.\nUsage: {}", args, self.usage()))
-        }
+            format!(
+                "Unknown system_monitor command: '{}'.\nUsage: {}",
+                args,
+                self.usage()
+            )
+        };
+        Ok(ToolOutput::Immediate(serde_json::Value::String(output)))
     }
 
     fn kind(&self) -> ToolKind {

@@ -1,7 +1,8 @@
-use anyhow::{Result, Context};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
-use crate::agent::tool::{Tool, ToolKind};
+use crate::agent::tool::{Tool, ToolKind, ToolOutput};
 use crate::state::StateStore;
+use std::error::Error as StdError;
 use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 
@@ -69,32 +70,42 @@ Examples:
         })
     }
 
-    async fn call(&self, args: &str) -> Result<String> {
+    async fn call(&self, args: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
         let cmd: StateCommand = serde_json::from_str(args)
-            .context("Failed to parse state command. Ensure it's a valid JSON matching the schema.")?;
+            .context("Failed to parse state command. Ensure it's a valid JSON matching the schema.")
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync + 'static> { e.into() })?;
 
         match cmd {
             StateCommand::Get { key } => {
                 let store = self.store.read().map_err(|_| anyhow::anyhow!("Lock poisoned"))?;
                 match store.get(&key) {
-                    Some(val) => Ok(serde_json::to_string(&val)?),
-                    None => Ok(format!("Key '{}' not found", key)),
+                    Some(val) => Ok(ToolOutput::Immediate(serde_json::to_value(&val)?)),
+                    None => Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
+                        "Key '{}' not found",
+                        key
+                    )))),
                 }
             }
             StateCommand::Set { key, value } => {
                 let mut store = self.store.write().map_err(|_| anyhow::anyhow!("Lock poisoned"))?;
                 store.set(key.clone(), value)?;
-                Ok(format!("Successfully set key '{}'", key))
+                Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
+                    "Successfully set key '{}'",
+                    key
+                ))))
             }
             StateCommand::Delete { key } => {
                 let mut store = self.store.write().map_err(|_| anyhow::anyhow!("Lock poisoned"))?;
                 store.delete(&key)?;
-                Ok(format!("Successfully deleted key '{}'", key))
+                Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
+                    "Successfully deleted key '{}'",
+                    key
+                ))))
             }
             StateCommand::List => {
                 let store = self.store.read().map_err(|_| anyhow::anyhow!("Lock poisoned"))?;
                 let keys = store.list();
-                Ok(serde_json::to_string(&keys)?)
+                Ok(ToolOutput::Immediate(serde_json::to_value(keys)?))
             }
         }
     }

@@ -1,6 +1,6 @@
-use crate::agent::tool::{Tool, ToolKind};
-use anyhow::Result;
+use crate::agent::tool::{Tool, ToolKind, ToolOutput};
 use async_trait::async_trait;
+use std::error::Error as StdError;
 use tokio::time::{sleep, Duration};
 
 /// A tool for pausing agent execution.
@@ -25,12 +25,15 @@ impl Tool for WaitTool {
         ToolKind::Internal
     }
 
-    async fn call(&self, args: &str) -> Result<String> {
+    async fn call(&self, args: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
         let seconds: u64 = args.trim().parse().unwrap_or(2);
         let seconds = seconds.clamp(1, 60); // Safety limit
-        
+
         sleep(Duration::from_secs(seconds)).await;
-        
-        Ok(format!("Waited for {} seconds.", seconds))
+
+        Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
+            "Waited for {} seconds.",
+            seconds
+        ))))
     }
 }

@@ -1,9 +1,13 @@
-use crate::agent::tool::Tool;
-use crate::llm::{LlmClient, LlmConfig, LlmProvider, chat::{ChatRequest, ChatMessage, ChatTool, ChatFunction}};
+use crate::agent::tool::{Tool, ToolOutput};
 use crate::config::WebSearchConfig;
+use crate::llm::{
+    chat::{ChatFunction, ChatMessage, ChatRequest, ChatTool},
+    LlmClient, LlmConfig, LlmProvider,
+};
 use crate::terminal::app::TuiEvent;
-use anyhow::{Result, bail, Context};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
+use std::error::Error as StdError;
 use tokio::sync::mpsc;
 
 /// A tool for searching the web using various providers (Kimi, Google, etc.)
@@ -23,15 +27,15 @@ impl WebSearchTool {
         Self { config, client, event_tx }
     }
 
-    async fn call_kimi(&self, query: &str) -> Result<String> {
+    async fn call_kimi(&self, query: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
         let _ = self.event_tx.send(TuiEvent::StatusUpdate(format!("Searching (Kimi): {}", query)));
         let base_url = "https://api.moonshot.ai/v1".to_string();
-        let model = if self.config.model.is_empty() { 
-            "kimi-k2-turbo-preview".to_string() 
-        } else { 
-            self.config.model.clone() 
+        let model = if self.config.model.is_empty() {
+            "kimi-k2-turbo-preview".to_string()
+        } else {
+            self.config.model.clone()
         };
-        
+
         let llm_config = LlmConfig::new(
             LlmProvider::MoonshotKimi,
             base_url,
@@ -56,16 +60,14 @@ impl WebSearchTool {
         ];
 
         // 2. Handle the tool call loop (as per Kimi docs)
-        for _ in 0..5 { // Limit turns to prevent infinite loops
-            let request = ChatRequest::new(
-                client.model().to_string(),
-                messages.clone(),
-            )
-            .with_tools(vec![web_search_tool.clone()]);
+        for _ in 0..5 {
+            // Limit turns to prevent infinite loops
+            let request = ChatRequest::new(client.model().to_string(), messages.clone())
+                .with_tools(vec![web_search_tool.clone()]);
 
             let response = client.chat(&request).await.context("Kimi API request failed")?;
             let choice = response.choices.first().context("Kimi returned no choices")?;
-            
+
             if choice.finish_reason.as_deref() == Some("tool_calls") {
                 if let Some(tool_calls) = &choice.message.tool_calls {
                     messages.push(choice.message.clone());
@@ -75,7 +77,7 @@ impl WebSearchTool {
                             messages.push(ChatMessage::tool(
                                 tool_call.id.clone(),
                                 tool_call.function.name.clone(),
-                                tool_call.function.arguments.clone()
+                                tool_call.function.arguments.clone(),
                             ));
                         }
                     }
@@ -85,34 +87,42 @@ impl WebSearchTool {
 
             let content = response.content().trim().to_string();
             if content.is_empty() {
-                return Ok("No results found.".to_string());
+                return Ok(ToolOutput::Immediate(serde_json::Value::String(
+                    "No results found.".to_string(),
+                )));
             }
-            return Ok(content);
+            return Ok(ToolOutput::Immediate(serde_json::Value::String(content)));
         }
-        
-        bail!("Kimi search timed out (too many tool call turns)");
+
+        Err(anyhow::anyhow!("Kimi search timed out (too many tool call turns)").into())
     }
 
-    async fn call_serpapi(&self, query: &str) -> Result<String> {
+    async fn call_serpapi(
+        &self,
+        query: &str,
+    ) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
         let _ = self.event_tx.send(TuiEvent::StatusUpdate(format!("Searching (SerpAPI): {}", query)));
-        let url = format!("https://serpapi.com/search.json?q={}&api_key={}",
+        let url = format!(
+            "https://serpapi.com/search.json?q={}&api_key={}",
             urlencoding::encode(query),
             self.config.api_key
         );
 
         let resp_res = self.client.get(url).send().await;
         let resp = match resp_res {
-            Ok(r) => {
-                match r.json::<serde_json::Value>().await {
-                    Ok(v) => v,
-                    Err(_) => return Ok("Error parsing response".to_string()),
+            Ok(r) => match r.json::<serde_json::Value>().await {
+                Ok(v) => v,
+                Err(_) => {
+                    return Ok(ToolOutput::Immediate(serde_json::Value::String(
+                        "Error parsing response".to_string(),
+                    )))
                 }
             },
-            Err(e) => bail!("Failed to connect to SerpAPI: {}", e),
+            Err(e) => return Err(anyhow::anyhow!("Failed to connect to SerpAPI: {}", e).into()),
         };
-        
+
         if let Some(error) = resp.get("error").and_then(|e| e.as_str()) {
-            bail!("SerpAPI error: {}", error);
+            return Err(anyhow::anyhow!("SerpAPI error: {}", error).into());
         }
 
         // Extract snippets from organic results
@@ -127,9 +137,11 @@ impl WebSearchTool {
         }
 
         if results.is_empty() {
-            Ok("No results found.".to_string())
+            Ok(ToolOutput::Immediate(serde_json::Value::String(
+                "No results found.".to_string(),
+            )))
         } else {
-            Ok(results.join("\n\n"))
+            Ok(ToolOutput::Immediate(serde_json::Value::String(results.join("\n\n"))))
         }
     }
 }
@@ -152,15 +164,18 @@ impl Tool for WebSearchTool {
         crate::agent::tool::ToolKind::Web
     }
 
-    async fn call(&self, args: &str) -> Result<String> {
+    async fn call(&self, args: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
         if !self.config.enabled {
-            bail!("Web search is currently disabled. Please enable it in configuration.");
+            return Err(anyhow::anyhow!(
+                "Web search is currently disabled. Please enable it in configuration."
+            )
+            .into());
         }
 
         match self.config.provider.as_str() {
             "kimi" => self.call_kimi(args).await,
             "serpapi" | "google" => self.call_serpapi(args).await,
-            p => bail!("Unsupported web search provider: {}", p),
+            p => Err(anyhow::anyhow!("Unsupported web search provider: {}", p).into()),
         }
     }
 }

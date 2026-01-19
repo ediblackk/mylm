@@ -108,7 +108,7 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
 
     // Setup Tools
     let mut tools: Vec<Box<dyn Tool>> = Vec::new();
-    let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone(), Some(store.clone()), Some(categorizer.clone()), None);
+    let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone(), Some(store.clone()), Some(categorizer.clone()), None, None);
     let memory_tool = MemoryTool::new(store.clone());
     let web_search_tool = WebSearchTool::new(config.web_search.clone(), event_tx.clone());
     let crawl_tool = CrawlTool::new(event_tx.clone());
@@ -523,7 +523,7 @@ async fn run_loop(
                                     mylm_core::executor::safety::SafetyChecker::new(),
                                 ));
 
-                                let shell_tool = ShellTool::new(updated_executor, context.clone(), event_tx.clone(), Some(store.clone()), categorizer, Some(agent_session_id));
+                                let shell_tool = ShellTool::new(updated_executor, context.clone(), event_tx.clone(), Some(store.clone()), categorizer, Some(agent_session_id), None);
                                 let memory_tool = MemoryTool::new(store.clone());
                                 let web_search_tool = WebSearchTool::new(new_config.web_search.clone(), event_tx.clone());
                                 let crawl_tool = CrawlTool::new(event_tx.clone());

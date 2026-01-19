@@ -97,6 +97,34 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release_assets/*
+          files: |
+            release_assets/*
           generate_release_notes: true
           draft: true
+
+  checksums:
+    name: Generate Checksums
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mylm-*
+          merge-multiple: true
+          path: release_assets
+
+      - name: Generate SHA256 sums
+        run: |
+          cd release_assets
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Update Release with Checksums
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: release_assets/SHA256SUMS
+          append_body: true

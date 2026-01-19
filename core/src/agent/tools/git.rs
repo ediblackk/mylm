@@ -1,7 +1,7 @@
-use crate::agent::tool::{Tool, ToolKind};
-use anyhow::Result;
+use crate::agent::tool::{Tool, ToolKind, ToolOutput};
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::error::Error as StdError;
 use tokio::process::Command;
 
 /// A tool for checking the git status.
@@ -29,19 +29,21 @@ impl Tool for GitStatusTool {
         })
     }
 
-    async fn call(&self, _args: &str) -> Result<String> {
+    async fn call(&self, _args: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
         let output = Command::new("git")
             .args(["status", "--short", "--branch"])
             .output()
             .await?;
 
         if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            Ok(ToolOutput::Immediate(serde_json::Value::String(
+                String::from_utf8_lossy(&output.stdout).to_string(),
+            )))
         } else {
-            Ok(format!(
+            Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
                 "Error executing git status: {}",
                 String::from_utf8_lossy(&output.stderr)
-            ))
+            ))))
         }
     }
 
@@ -90,7 +92,7 @@ impl Tool for GitLogTool {
         })
     }
 
-    async fn call(&self, args: &str) -> Result<String> {
+    async fn call(&self, args: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
         let limit = if let Ok(parsed) = serde_json::from_str::<LogArgs>(args) {
             parsed.limit
         } else {
@@ -103,12 +105,14 @@ impl Tool for GitLogTool {
             .await?;
 
         if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            Ok(ToolOutput::Immediate(serde_json::Value::String(
+                String::from_utf8_lossy(&output.stdout).to_string(),
+            )))
         } else {
-            Ok(format!(
+            Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
                 "Error executing git log: {}",
                 String::from_utf8_lossy(&output.stderr)
-            ))
+            ))))
         }
     }
 
@@ -151,7 +155,7 @@ impl Tool for GitDiffTool {
         })
     }
 
-    async fn call(&self, args: &str) -> Result<String> {
+    async fn call(&self, args: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
         let path = serde_json::from_str::<DiffArgs>(args).ok().and_then(|a| a.path);
 
         let mut cmd = Command::new("git");
@@ -165,15 +169,19 @@ impl Tool for GitDiffTool {
         if output.status.success() {
             let diff = String::from_utf8_lossy(&output.stdout);
             if diff.is_empty() {
-                Ok("No changes detected.".to_string())
+                Ok(ToolOutput::Immediate(serde_json::Value::String(
+                    "No changes detected.".to_string(),
+                )))
             } else {
-                Ok(diff.to_string())
+                Ok(ToolOutput::Immediate(serde_json::Value::String(
+                    diff.to_string(),
+                )))
             }
         } else {
-            Ok(format!(
+            Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
                 "Error executing git diff: {}",
                 String::from_utf8_lossy(&output.stderr)
-            ))
+            ))))
         }
     }
 

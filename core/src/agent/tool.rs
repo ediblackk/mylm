@@ -1,5 +1,37 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use std::error::Error as StdError;
+
+/// The output of a tool execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", content = "data")]
+pub enum ToolOutput {
+    /// The tool completed immediately with a result.
+    Immediate(serde_json::Value),
+    /// The tool started a background job.
+    Background {
+        job_id: String,
+        description: String,
+    },
+}
+
+impl ToolOutput {
+    pub fn as_string(&self) -> String {
+        match self {
+            Self::Immediate(v) => {
+                if let Some(s) = v.as_str() {
+                    s.to_string()
+                } else {
+                    v.to_string()
+                }
+            }
+            Self::Background { job_id, description } => {
+                format!("Started background job {}: {}", job_id, description)
+            }
+        }
+    }
+}
 
 /// Categorizes tools based on how they should be executed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +74,7 @@ pub trait Tool: Send + Sync {
     }
 
     /// Execute the tool with the provided arguments
-    async fn call(&self, args: &str) -> Result<String>;
+    async fn call(&self, args: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>>;
 
     /// The kind of tool (Internal or Terminal)
     fn kind(&self) -> ToolKind {

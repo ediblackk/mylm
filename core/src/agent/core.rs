@@ -1,7 +1,7 @@
 //! Agent Core Implementation
-use crate::llm::{LlmClient, chat::{ChatMessage, ChatRequest, MessageRole}, TokenUsage};
 use crate::agent::tool::{Tool, ToolKind};
-use crate::memory::{MemoryCategorizer};
+use crate::llm::{chat::{ChatMessage, ChatRequest, MessageRole}, LlmClient, TokenUsage};
+use crate::memory::MemoryCategorizer;
 use crate::terminal::app::TuiEvent;
 use std::error::Error as StdError;
 use serde::{Deserialize, Serialize};
@@ -772,12 +772,12 @@ impl Agent {
 
                     let observation = match self.tools.get(&tool) {
                         Some(t) => match t.call(&processed_args).await {
-                            Ok(output) => output,
+                            Ok(output) => output.as_string(),
                             Err(e) => {
                                 let error_msg = format!("Tool Error: {}. Analyze the failure and try a different command or approach if possible.", e);
                                 let _ = event_tx.send(TuiEvent::StatusUpdate(format!("❌ Tool '{}' failed", tool)));
                                 error_msg
-                            },
+                            }
                         },
                         None => format!("Error: Tool '{}' not found. Check the available tools list.", tool),
                     };

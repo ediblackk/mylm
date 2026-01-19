@@ -782,7 +782,7 @@ async fn handle_one_shot(
 
     // Load tools
     let tools: Vec<Box<dyn mylm_core::agent::Tool>> = vec![
-        Box::new(mylm_core::agent::tools::shell::ShellTool::new(executor, ctx.clone(), event_tx.clone(), Some(store.clone()), Some(Arc::new(mylm_core::memory::MemoryCategorizer::new(client.clone(), store.clone()))), None)) as Box<dyn mylm_core::agent::Tool>,
+        Box::new(mylm_core::agent::tools::shell::ShellTool::new(executor, ctx.clone(), event_tx.clone(), Some(store.clone()), Some(Arc::new(mylm_core::memory::MemoryCategorizer::new(client.clone(), store.clone()))), None, None)) as Box<dyn mylm_core::agent::Tool>,
         Box::new(mylm_core::agent::tools::web_search::WebSearchTool::new(config.web_search.clone(), event_tx.clone())) as Box<dyn mylm_core::agent::Tool>,
         Box::new(mylm_core::agent::tools::memory::MemoryTool::new(store.clone())) as Box<dyn mylm_core::agent::Tool>,
         Box::new(mylm_core::agent::tools::crawl::CrawlTool::new(event_tx.clone())) as Box<dyn mylm_core::agent::Tool>,

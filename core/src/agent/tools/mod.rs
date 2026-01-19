@@ -19,3 +19,5 @@ pub use system::SystemMonitorTool;
 pub use terminal_sight::TerminalSightTool;
 pub mod wait;
 pub use wait::WaitTool;
+pub mod delegate;
+pub use delegate::DelegateTool;
