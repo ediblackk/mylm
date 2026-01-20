@@ -542,11 +542,11 @@ async fn run_loop(
                                 tools.push(Box::new(GitLogTool) as Box<dyn Tool>);
                                 tools.push(Box::new(GitDiffTool) as Box<dyn Tool>);
 
-                                let mut tool_map = std::collections::HashMap::new();
+                                // Register tools in the new tool registry
+                                let rt = tokio::runtime::Handle::current();
                                 for tool in tools {
-                                    tool_map.insert(tool.name().to_string(), tool);
+                                    let _ = rt.block_on(agent.tool_registry.register_tool(tool));
                                 }
-                                agent.tools = tool_map;
                             }
                         }
                     }

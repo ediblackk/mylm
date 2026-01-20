@@ -938,9 +938,9 @@ async fn run_agent_loop(
                             args.clone()
                         };
 
-                        let call_res = match agent_lock.tools.get(&tool) {
-                            Some(t) => t.call(&t_args).await,
-                            None => Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, format!("Tool '{}' not found", tool))) as Box<dyn std::error::Error + Send + Sync>),
+                        let call_res = match agent_lock.tool_registry.execute_tool(&tool, &t_args).await {
+                            Ok(output) => Ok(output),
+                            Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)) as Box<dyn std::error::Error + Send + Sync>),
                         };
 
                         match call_res {

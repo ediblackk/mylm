@@ -346,25 +346,9 @@ async fn run_agent_for_user_message(
                         // Execute tool
                         let output = {
                             let agent = runtime.agent.lock().await;
-                            match agent.tools.get(&tool) {
-                                Some(t) => {
-                                    let processed_args = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&args) {
-                                        if let Some(a) = v.get("args").and_then(|a| a.as_str()) {
-                                            a.to_string()
-                                        } else if let Some(c) = v.get("command").and_then(|c| c.as_str()) {
-                                            c.to_string()
-                                        } else if let Some(s) = v.as_str() {
-                                            s.to_string()
-                                        } else {
-                                            args.clone()
-                                        }
-                                    } else {
-                                        args.clone()
-                                    };
-                                    t.call(&processed_args).await
-                                        .unwrap_or_else(|e| ToolOutput::Immediate(serde_json::Value::String(format!("Tool Error: {e}"))))
-                                }
-                                None => ToolOutput::Immediate(serde_json::Value::String(format!("Error: Tool '{tool}' not found."))),
+                            match agent.tool_registry.execute_tool(&tool, &args).await {
+                                Ok(output) => output,
+                                Err(e) => ToolOutput::Immediate(serde_json::Value::String(format!("Tool Error: {e}"))),
                             }
                         };
 

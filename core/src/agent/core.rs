@@ -7,7 +7,7 @@ use std::error::Error as StdError;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::sync::Arc;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use regex::Regex;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -212,7 +212,7 @@ pub enum AgentDecision {
 /// The core Agent that manages the agentic loop.
 pub struct Agent {
     pub llm_client: Arc<LlmClient>,
-    pub tools: HashMap<String, Box<dyn Tool>>,
+    pub tool_registry: crate::agent::ToolRegistry,
     pub max_iterations: usize,
     pub system_prompt_prefix: String,
     pub memory_store: Option<Arc<crate::memory::store::VectorStore>>,
@@ -242,16 +242,20 @@ impl Agent {
         memory_store: Option<Arc<crate::memory::store::VectorStore>>,
         categorizer: Option<Arc<MemoryCategorizer>>,
     ) -> Self {
-        let mut tool_map = HashMap::new();
+        let tool_registry = crate::agent::ToolRegistry::new();
+        
+        // Register tools synchronously for now (in real usage, this would be async)
+        let rt = tokio::runtime::Handle::current();
         for tool in tools {
-            tool_map.insert(tool.name().to_string(), tool);
+            let _tool_name = tool.name().to_string();
+            let _ = rt.block_on(tool_registry.register_tool(tool));
         }
 
         let session_id = chrono::Utc::now().timestamp_millis().to_string();
 
         Self {
             llm_client: client,
-            tools: tool_map,
+            tool_registry,
             max_iterations,
             system_prompt_prefix,
             categorizer,
@@ -355,16 +359,9 @@ impl Agent {
         
         // Provide tool definitions if supported
         let mut chat_tools = Vec::new();
-        for tool in self.tools.values() {
-            chat_tools.push(crate::llm::chat::ChatTool {
-                type_: "function".to_string(),
-                function: crate::llm::chat::ChatFunction {
-                    name: tool.name().to_string(),
-                    description: Some(tool.description().to_string()),
-                    parameters: Some(tool.parameters()),
-                },
-            });
-        }
+        let rt = tokio::runtime::Handle::current();
+        let tool_definitions = rt.block_on(self.tool_registry.get_tool_definitions());
+        chat_tools.extend(tool_definitions);
         if !chat_tools.is_empty() {
             request = request.with_tools(chat_tools);
         }
@@ -427,9 +424,8 @@ impl Agent {
                 }
                 self.last_tool_call = Some((tool_name.to_string(), args.clone()));
 
-                let kind = self
-                    .tools
-                    .get(tool_name)
+                let rt = tokio::runtime::Handle::current();
+                let kind = rt.block_on(self.tool_registry.get_tool(tool_name))
                     .map(|t| t.kind())
                     .unwrap_or(ToolKind::Internal);
 
@@ -490,7 +486,10 @@ impl Agent {
                 }
                 self.last_tool_call = Some((tool_name.clone(), args.clone()));
 
-                let kind = self.tools.get(&tool_name).map(|t| t.kind()).unwrap_or(ToolKind::Internal);
+                let rt = tokio::runtime::Handle::current();
+                let kind = rt.block_on(self.tool_registry.get_tool(&tool_name))
+                    .map(|t| t.kind())
+                    .unwrap_or(ToolKind::Internal);
                 self.history.push(message);
 
                 let action = AgentDecision::Action {
@@ -550,7 +549,10 @@ impl Agent {
                 return Ok(AgentDecision::Message(content, self.total_usage.clone()));
             }
 
-            let kind = self.tools.get(&tool_name).map(|t| t.kind()).unwrap_or(ToolKind::Internal);
+            let rt = tokio::runtime::Handle::current();
+            let kind = rt.block_on(self.tool_registry.get_tool(&tool_name))
+                .map(|t| t.kind())
+                .unwrap_or(ToolKind::Internal);
             self.history.push(ChatMessage::assistant(content.clone()));
             
             let action_decision = AgentDecision::Action {
@@ -770,16 +772,13 @@ impl Agent {
                         args.clone()
                     };
 
-                    let observation = match self.tools.get(&tool) {
-                        Some(t) => match t.call(&processed_args).await {
-                            Ok(output) => output.as_string(),
-                            Err(e) => {
-                                let error_msg = format!("Tool Error: {}. Analyze the failure and try a different command or approach if possible.", e);
-                                let _ = event_tx.send(TuiEvent::StatusUpdate(format!("❌ Tool '{}' failed", tool)));
-                                error_msg
-                            }
-                        },
-                        None => format!("Error: Tool '{}' not found. Check the available tools list.", tool),
+                    let observation = match self.tool_registry.execute_tool(&tool, &processed_args).await {
+                        Ok(output) => output.as_string(),
+                        Err(e) => {
+                            let error_msg = format!("Tool Error: {}. Analyze the failure and try a different command or approach if possible.", e);
+                            let _ = event_tx.send(TuiEvent::StatusUpdate(format!("❌ Tool '{}' failed", tool)));
+                            error_msg
+                        }
                     };
 
                     if kind == ToolKind::Internal {
@@ -917,8 +916,14 @@ impl Agent {
         use crate::config::prompt::{get_memory_protocol, get_react_protocol};
 
         let mut tools_desc = String::new();
-        for tool in self.tools.values() {
-            tools_desc.push_str(&format!("- {}: {}\n  Usage: {}\n", tool.name(), tool.description(), tool.usage()));
+        let rt = tokio::runtime::Handle::current();
+        let tool_names = rt.block_on(self.tool_registry.get_tool_names());
+        
+        // For each tool name, get the tool and add its description
+        for tool_name in tool_names {
+            if let Some(tool) = rt.block_on(self.tool_registry.get_tool(&tool_name)) {
+                tools_desc.push_str(&format!("- {}: {}\n  Usage: {}\n", tool.name(), tool.description(), tool.usage()));
+            }
         }
 
         format!(
