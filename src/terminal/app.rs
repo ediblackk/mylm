@@ -12,7 +12,7 @@ use vt100::Parser;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
-use std::io::{self, Write};
+use std::sync::RwLock;
 use tokio::sync::Mutex;
 
 use tokio::sync::mpsc;
@@ -104,10 +104,17 @@ pub struct App {
     pub selection_pane: Option<Focus>, // which pane the selection started in
     pub is_selecting: bool,
     pub clipboard: Option<arboard::Clipboard>,
+    pub scratchpad: Arc<RwLock<String>>,
 }
 
 impl App {
-    pub fn new(pty_manager: PtyManager, agent: Agent, config: mylm_core::config::Config) -> Self {
+    pub fn new(
+        pty_manager: PtyManager,
+        agent: Agent,
+        config: mylm_core::config::Config,
+        scratchpad: Arc<RwLock<String>>,
+        job_registry: JobRegistry,
+    ) -> Self {
         // In V2, context limits and prices are not stored in config
         // Use sensible defaults
         let max_ctx = 128000_usize;
@@ -170,7 +177,7 @@ impl App {
             // Job Panel state
             show_jobs_panel: false,
             selected_job_index: None,
-            job_registry: JobRegistry::new(),
+            job_registry,
             show_job_detail: false,
             job_scroll: 0,
             // UI Layout state
@@ -182,6 +189,7 @@ impl App {
             selection_pane: None,
             is_selecting: false,
             clipboard,
+            scratchpad,
         }
     }
 

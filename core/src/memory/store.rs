@@ -53,6 +53,7 @@ impl From<&str> for MemoryType {
 pub struct Memory {
     pub id: i64,
     pub content: String,
+    pub summary: Option<String>,
     pub created_at: i64,
     pub r#type: MemoryType,
     pub session_id: Option<String>,
@@ -112,6 +113,7 @@ impl VectorStore {
         Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int64, false),
             Field::new("content", DataType::Utf8, false),
+            Field::new("summary", DataType::Utf8, true),
             Field::new("created_at", DataType::Int64, false),
             Field::new("embedding", DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 384), false),
             Field::new("type", DataType::Utf8, false),
@@ -163,7 +165,7 @@ impl VectorStore {
     }
 
     pub async fn add_memory(&self, content: &str) -> Result<()> {
-        self.add_memory_typed(content, MemoryType::UserNote, None, None, None).await
+        self.add_memory_typed(content, MemoryType::UserNote, None, None, None, None).await
     }
 
     pub async fn record_command(
@@ -195,6 +197,7 @@ impl VectorStore {
             session_id,
             Some(metadata),
             Some("shell_commands".to_string()),
+            None,
         ).await?;
         
         Ok(id)
@@ -207,9 +210,10 @@ impl VectorStore {
         session_id: Option<String>,
         metadata: Option<serde_json::Value>,
         category_id: Option<String>,
+        summary: Option<String>,
     ) -> Result<()> {
         let id = Utc::now().timestamp_nanos_opt().unwrap_or_else(|| Utc::now().timestamp());
-        self.add_memory_typed_with_id(id, content, memory_type, session_id, metadata, category_id).await
+        self.add_memory_typed_with_id(id, content, memory_type, session_id, metadata, category_id, summary).await
     }
 
     pub async fn add_memory_typed_with_id(
@@ -220,9 +224,11 @@ impl VectorStore {
         session_id: Option<String>,
         metadata: Option<serde_json::Value>,
         category_id: Option<String>,
+        summary: Option<String>,
     ) -> Result<()> {
         let model = self.embedding_model.clone();
-        let text = content.to_string();
+        // If summary is provided, use it for embedding. Otherwise use content.
+        let text = summary.clone().unwrap_or_else(|| content.to_string());
         
         // Run embedding in blocking thread
         let embeddings = task::spawn_blocking(move || {
@@ -238,6 +244,7 @@ impl VectorStore {
         
         let id_array = Int64Array::from(vec![id]);
         let content_array = StringArray::from(vec![content]);
+        let summary_array = StringArray::from(vec![summary]);
         let created_at_array = Int64Array::from(vec![created_at]);
         
         let flat_embeddings = Float32Array::from(embedding);
@@ -256,6 +263,7 @@ impl VectorStore {
             vec![
                 Arc::new(id_array),
                 Arc::new(content_array),
+                Arc::new(summary_array),
                 Arc::new(created_at_array),
                 Arc::new(embedding_array),
                 Arc::new(type_array),
@@ -301,6 +309,14 @@ impl VectorStore {
         for batch in batches {
             let id_col = batch.column_by_name("id").context("id column missing")?.as_any().downcast_ref::<Int64Array>().context("Failed downcast id")?;
             let content_col = batch.column_by_name("content").context("content column missing")?.as_any().downcast_ref::<StringArray>().context("Failed downcast content")?;
+            
+            let summary_col = batch.column_by_name("summary");
+            let summary_array = if let Some(col) = summary_col {
+                col.as_any().downcast_ref::<StringArray>()
+            } else {
+                None
+            };
+
             let created_at_col = batch.column_by_name("created_at").context("created_at column missing")?.as_any().downcast_ref::<Int64Array>().context("Failed downcast created_at")?;
             let type_col = batch.column_by_name("type").context("type column missing")?.as_any().downcast_ref::<StringArray>().context("Failed downcast type")?;
             
@@ -321,9 +337,16 @@ impl VectorStore {
                     serde_json::from_str(metadata_str).ok()
                 };
 
+                let summary = if let Some(arr) = summary_array {
+                    if arr.is_null(i) { None } else { Some(arr.value(i).to_string()) }
+                } else {
+                    None
+                };
+
                 memories.push(Memory {
                     id: id_col.value(i),
                     content: content_col.value(i).to_string(),
+                    summary,
                     created_at: created_at_col.value(i),
                     r#type: MemoryType::from(type_col.value(i)),
                     session_id: if session_col.is_null(i) { None } else { Some(session_array.value(i).to_string()) },
@@ -413,6 +436,14 @@ impl VectorStore {
         for batch in batches {
             let id_col = batch.column_by_name("id").context("id column missing")?.as_any().downcast_ref::<Int64Array>().context("Failed downcast id")?;
             let content_col = batch.column_by_name("content").context("content column missing")?.as_any().downcast_ref::<StringArray>().context("Failed downcast content")?;
+            
+            let summary_col = batch.column_by_name("summary");
+            let summary_array = if let Some(col) = summary_col {
+                col.as_any().downcast_ref::<StringArray>()
+            } else {
+                None
+            };
+
             let created_at_col = batch.column_by_name("created_at").context("created_at column missing")?.as_any().downcast_ref::<Int64Array>().context("Failed downcast created_at")?;
             let type_col = batch.column_by_name("type").context("type column missing")?.as_any().downcast_ref::<StringArray>().context("Failed downcast type")?;
             let session_col = batch.column_by_name("session_id").context("session_id column missing")?.as_any().downcast_ref::<StringArray>().context("Failed downcast session")?;
@@ -427,9 +458,16 @@ impl VectorStore {
                     serde_json::from_str(metadata_str).ok()
                 };
 
+                let summary = if let Some(arr) = summary_array {
+                    if arr.is_null(i) { None } else { Some(arr.value(i).to_string()) }
+                } else {
+                    None
+                };
+
                 memories.push(Memory {
                     id: id_col.value(i),
                     content: content_col.value(i).to_string(),
+                    summary,
                     created_at: created_at_col.value(i),
                     r#type: MemoryType::from(type_col.value(i)),
                     session_id: if session_col.is_null(i) { None } else { Some(session_col.value(i).to_string()) },

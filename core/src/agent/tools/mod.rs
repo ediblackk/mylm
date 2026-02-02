@@ -21,3 +21,8 @@ pub mod wait;
 pub use wait::WaitTool;
 pub mod delegate;
 pub use delegate::DelegateTool;
+
+pub mod scratchpad;
+pub use scratchpad::ScratchpadTool;
+pub mod consolidate;
+pub use consolidate::ConsolidateTool;

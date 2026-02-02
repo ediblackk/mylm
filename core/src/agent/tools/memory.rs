@@ -27,49 +27,90 @@ impl Tool for MemoryTool {
     }
 
     fn usage(&self) -> &str {
-        "Use 'add: <content>' to remember something, or 'search: <query>' to find something. IMPORTANT: Do not use any other format. Example: 'add: The user likes Rust' or 'search: what are the user's preferences?'"
+        "Use 'add: <content>' or 'add: { \"content\": \"...\", \"summary\": \"...\" }' to remember something. Use 'search: <query>' to find something. The summary is used for indexing (vector search) while content is for retrieval."
     }
 
     async fn call(&self, args: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
         let args = args.trim();
 
-        // Helper to extract content from JSON wrapper
-        fn extract_from_json(args: &str) -> String {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
-                // Check for wrapper keys like "args" or "arguments"
-                if let Some(inner) = v.get("args").or_else(|| v.get("arguments")) {
-                    if let Some(s) = inner.as_str() {
-                        return extract_from_json(s);
+        // Try to parse args as JSON first
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(args) {
+            // Check for wrapped args (e.g. from some LLM outputs)
+            let root = if let Some(inner) = v.get("args").or_else(|| v.get("arguments")) {
+                if let Some(s) = inner.as_str() {
+                    serde_json::from_str(s).unwrap_or(v.clone())
+                } else {
+                    inner.clone()
+                }
+            } else {
+                v
+            };
+
+            // Case 1: "add" key
+            if let Some(add_val) = root.get("add") {
+                if let Some(content) = add_val.as_str() {
+                    // add: "content"
+                    self.store.add_memory(content).await?;
+                    return Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
+                        "Successfully added to memory: '{}'",
+                        content
+                    ))));
+                } else if let Some(obj) = add_val.as_object() {
+                    // add: { "content": "...", "summary": "..." }
+                    if let Some(content) = obj.get("content").and_then(|c| c.as_str()) {
+                        let summary = obj.get("summary").and_then(|s| s.as_str()).map(|s| s.to_string());
+                        self.store.add_memory_typed(
+                            content, 
+                            crate::memory::store::MemoryType::UserNote, 
+                            None, 
+                            None, 
+                            None, 
+                            summary.clone()
+                        ).await?;
+                        return Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
+                            "Successfully added to memory (with summary '{}'): '{}'",
+                            summary.unwrap_or_default(),
+                            content
+                        ))));
                     }
                 }
+            }
 
-                // Check for direct command keys
-                if let Some(content) = v.get("add").and_then(|s| s.as_str()) {
-                    return format!("add: {}", content);
-                }
-                if let Some(query) = v.get("search").and_then(|s| s.as_str()) {
-                    return format!("search: {}", query);
-                }
-                if let Some(query) = v.get("query").and_then(|s| s.as_str()) {
-                    return format!("search: {}", query);
+            // Case 2: "search" or "query" key
+            let search_val = root.get("search").or_else(|| root.get("query"));
+            if let Some(search_val) = search_val {
+                let query = if let Some(q) = search_val.as_str() {
+                    q.to_string()
+                } else if let Some(obj) = search_val.as_object() {
+                    obj.get("query").and_then(|q| q.as_str()).unwrap_or("").to_string()
+                } else {
+                    String::new()
+                };
+
+                if !query.is_empty() {
+                    let results = self.store.search_memory(&query, 5).await?;
+                    if results.is_empty() {
+                        return Ok(ToolOutput::Immediate(serde_json::Value::String(
+                            "No relevant memories found.".to_string(),
+                        )));
+                    } else {
+                        let mut output = String::from("Found relevant memories:\n");
+                        for (i, res) in results.iter().enumerate() {
+                            output.push_str(&format!("{}. {}\n", i + 1, res));
+                        }
+                        return Ok(ToolOutput::Immediate(serde_json::Value::String(output)));
+                    }
                 }
             }
-            args.to_string()
         }
 
-        let cleaned_args = if args.starts_with('{') {
-            extract_from_json(args)
-        } else {
-            args.to_string()
-        };
-
-        let args = cleaned_args.as_str();
-
+        // Fallback: Legacy string parsing
         if let Some(content) = args.strip_prefix("add:") {
             let content = content.trim();
             if content.is_empty() {
                 return Err(anyhow::anyhow!("Content for 'add' cannot be empty").into());
             }
+            // For legacy add, we just use content (summary=None)
             self.store.add_memory(content).await?;
             Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
                 "Successfully added to memory: '{}'",

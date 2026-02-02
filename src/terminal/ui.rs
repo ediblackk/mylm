@@ -80,8 +80,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 fn render_memory_view(frame: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
         .split(area);
+
+    let right_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(chunks[1]);
 
     let list_block = Block::default()
         .borders(Borders::ALL)
@@ -148,6 +153,12 @@ fn render_memory_view(frame: &mut Frame, app: &mut App, area: Rect) {
                 Span::raw(cat),
             ]));
         }
+        if let Some(summary) = &node.memory.summary {
+            detail_lines.push(Line::from(vec![
+                Span::styled("Summary (Index): ", Style::default().fg(Color::Gray)),
+                Span::raw(summary),
+            ]));
+        }
         detail_lines.push(Line::from(""));
         detail_lines.push(Line::from(Span::styled("Content:", Style::default().add_modifier(Modifier::UNDERLINED))));
         
@@ -168,12 +179,25 @@ fn render_memory_view(frame: &mut Frame, app: &mut App, area: Rect) {
         let p = Paragraph::new(detail_lines)
             .block(detail_block)
             .wrap(Wrap { trim: true });
-        frame.render_widget(p, chunks[1]);
+        frame.render_widget(p, right_chunks[0]);
     } else {
         let p = Paragraph::new("Select a memory to see details.")
             .block(detail_block);
-        frame.render_widget(p, chunks[1]);
+        frame.render_widget(p, right_chunks[0]);
     }
+
+    // Render Scratchpad
+    let scratchpad_content = app.scratchpad.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let scratchpad_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Scratchpad (Shared State) ")
+        .border_style(Style::default().fg(Color::Magenta));
+    
+    let scratchpad_p = Paragraph::new(scratchpad_content)
+        .block(scratchpad_block)
+        .wrap(Wrap { trim: true });
+    
+    frame.render_widget(scratchpad_p, right_chunks[1]);
 }
 
 fn render_help_view(frame: &mut Frame, _app: &mut App, area: Rect) {

@@ -162,7 +162,23 @@ impl Tool for DelegateTool {
                 format!("You are a specialized worker agent. Your objective is: {}", objective_clone)
             });
             let max_iterations = delegate_args.max_iterations.unwrap_or(50);
-            let _model = delegate_args.model; // Model selection to be applied via LLM client configuration
+            let requested_model = delegate_args.model;
+
+            // Handle worker model configuration
+            let client = if let Some(model_name) = requested_model {
+                let mut config = llm_client.config().clone();
+                config.model = model_name.clone();
+                match LlmClient::new(config) {
+                    Ok(c) => Arc::new(c),
+                    Err(e) => {
+                        crate::error_log!("Failed to create worker client with model {}: {}", model_name, e);
+                        // Fallback to parent client
+                        llm_client.clone()
+                    }
+                }
+            } else {
+                llm_client.clone()
+            };
 
             // TODO: Filter tools based on delegate_args.tools if provided
             // For now, sub-agent starts with empty tool set (inherits context via prompt)
@@ -170,7 +186,7 @@ impl Tool for DelegateTool {
 
             // Create a new AgentV2 instance for the subtask
             let mut sub_agent = AgentV2::new_with_iterations(
-                llm_client,
+                client,
                 scribe,
                 vec![], // Sub-agent will inherit tools from parent or use minimal set
                 system_prompt,
@@ -178,8 +194,9 @@ impl Tool for DelegateTool {
                 crate::config::AgentVersion::V2,
                 memory_store,
                 categorizer,
-                None, // Sub-agent gets its own JobRegistry for now
+                Some(job_registry.clone()), // Share parent's job registry
                 None, // capabilities_context
+                None, // scratchpad
             );
 
             // Set up event channels for the sub-agent

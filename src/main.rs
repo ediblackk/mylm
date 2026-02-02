@@ -745,6 +745,7 @@ async fn handle_one_shot(
         Some(store),
         Some(categorizer),
         Some(job_registry),
+        None, // scratchpad
     ).await;
     
     let messages = vec![

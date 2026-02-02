@@ -51,7 +51,7 @@ impl Scribe {
             InteractionType::Chat => MemoryType::UserNote,
         };
 
-        self.store.add_memory_typed(content, memory_type, None, None, None).await?;
+        self.store.add_memory_typed(content, memory_type, None, None, None, None).await?;
         
         Ok(())
     }
@@ -193,6 +193,7 @@ impl Scribe {
                 None, // session_id
                 Some(metadata),
                 None, // category_id
+                None, // summary
             ).await?;
         }
 

@@ -12,7 +12,7 @@ use mylm_core::agent::{Agent, Tool};
 use mylm_core::agent::tools::{
     ShellTool, MemoryTool, WebSearchTool, CrawlTool, FileReadTool, FileWriteTool,
     GitStatusTool, GitLogTool, GitDiffTool, StateTool, SystemMonitorTool,
-    DelegateTool, WaitTool, TerminalSightTool,
+    DelegateTool, WaitTool, TerminalSightTool, ScratchpadTool,
 };
 use mylm_core::executor::CommandExecutor;
 use mylm_core::executor::allowlist::CommandAllowlist;
@@ -27,7 +27,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{io, time::Duration};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 use std::sync::atomic::Ordering;
 
@@ -85,6 +85,9 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
     // Initialize state store
     let state_store = std::sync::Arc::new(std::sync::RwLock::new(mylm_core::state::StateStore::new()?));
 
+    // Initialize Scratchpad (Shared State)
+    let scratchpad = Arc::new(RwLock::new(String::new()));
+
     // Build hierarchical system prompt
     // V2 doesn't have per-profile prompts, use profile name or "default"
     let prompt_name = "default";
@@ -113,6 +116,7 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
     let delegate_tool = DelegateTool::new(llm_client.clone(), scribe.clone(), job_registry.clone(), Some(store.clone()), Some(categorizer.clone()), None);
     let wait_tool = WaitTool;
     let terminal_sight_tool = TerminalSightTool::new(event_tx.clone());
+    let scratchpad_tool = ScratchpadTool::new(scratchpad.clone());
     
     tools.push(Arc::new(shell_tool));
     tools.push(Arc::new(memory_tool));
@@ -123,6 +127,7 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
     tools.push(Arc::new(delegate_tool));
     tools.push(Arc::new(wait_tool));
     tools.push(Arc::new(terminal_sight_tool));
+    tools.push(Arc::new(scratchpad_tool));
     tools.push(Arc::new(FileReadTool));
     tools.push(Arc::new(FileWriteTool));
     tools.push(Arc::new(GitStatusTool));
@@ -143,14 +148,15 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
         mylm_core::config::AgentVersion::V2,
         Some(store.clone()),
         Some(categorizer.clone()),
-        Some(job_registry)
+        Some(job_registry.clone()),
+        Some(scratchpad.clone())
     ).await;
 
     // Setup PTY with context CWD
     let (pty_manager, mut pty_rx) = spawn_pty(context.cwd.clone())?;
 
     // Create app state
-    let mut app = App::new(pty_manager, agent, config);
+    let mut app = App::new(pty_manager, agent, config, scratchpad, job_registry);
     app.update_available = update_available;
     
     // Resize app to current terminal size before injecting context

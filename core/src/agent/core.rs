@@ -8,6 +8,7 @@ use std::error::Error as StdError;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::collections::HashSet;
 use regex::Regex;
 use tokio::sync::Mutex;
@@ -232,6 +233,7 @@ pub struct Agent {
     pub job_registry: crate::agent::v2::jobs::JobRegistry,
     pub session_id: String,
     pub version: crate::config::AgentVersion,
+    pub scratchpad: Option<Arc<RwLock<String>>>,
     
     // State maintained between steps
     pub history: Vec<ChatMessage>,
@@ -255,6 +257,7 @@ impl Agent {
         memory_store: Option<Arc<crate::memory::store::VectorStore>>,
         categorizer: Option<Arc<MemoryCategorizer>>,
         job_registry: Option<crate::agent::v2::jobs::JobRegistry>,
+        scratchpad: Option<Arc<RwLock<String>>>,
     ) -> Self {
         let tool_registry = crate::agent::ToolRegistry::new();
         
@@ -299,6 +302,7 @@ impl Agent {
             repetition_count: 0,
             pending_tool_call_id: None,
             version,
+            scratchpad,
         }
     }
 
@@ -729,6 +733,7 @@ impl Agent {
                 categorizer,
                 Some(job_registry),
                 None, // capabilities_context
+                self.scratchpad.clone(),
             );
 
             // 4. Bridge Channels

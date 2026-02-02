@@ -112,6 +112,7 @@ pub async fn create_agent_for_session(
                 Some(store),
                 Some(categorizer),
                 None, // job_registry
+                None, // scratchpad
             ).await;
             Ok(crate::agent::factory::BuiltAgent::V1(agent))
         }
@@ -224,5 +225,6 @@ pub async fn create_agent_v2_for_session(
         Some(categorizer),
         Some(job_registry),
         None, // capabilities_context is already included in system_prompt
+        None, // scratchpad
     ))
 }

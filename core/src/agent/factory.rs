@@ -28,6 +28,7 @@ pub struct AgentBuilder {
     version: AgentVersion,
     memory_store: Option<Arc<crate::memory::store::VectorStore>>,
     categorizer: Option<Arc<crate::memory::MemoryCategorizer>>,
+    job_registry: Option<crate::agent::v2::jobs::JobRegistry>,
 }
 
 impl AgentBuilder {
@@ -43,6 +44,7 @@ impl AgentBuilder {
             version: AgentVersion::V1,
             memory_store: None,
             categorizer: None,
+            job_registry: None,
         }
     }
 
@@ -81,6 +83,12 @@ impl AgentBuilder {
         self.categorizer = Some(categorizer);
         self
     }
+
+    /// Set the job registry
+    pub fn with_job_registry(mut self, registry: crate::agent::v2::jobs::JobRegistry) -> Self {
+        self.job_registry = Some(registry);
+        self
+    }
     
     /// Add a single tool to the registry
     pub fn with_tool(mut self, tool: Box<dyn crate::agent::tool::Tool>) -> Self {
@@ -117,8 +125,9 @@ impl AgentBuilder {
                     self.version,
                     self.memory_store,
                     self.categorizer,
-                    None, // JobRegistry
+                    self.job_registry, // JobRegistry
                     None, // capabilities_context
+                    None, // scratchpad
                 ))
             },
             AgentVersion::V1 => {
@@ -130,7 +139,8 @@ impl AgentBuilder {
                     self.version,
                     self.memory_store,
                     self.categorizer,
-                    None, // job_registry
+                    self.job_registry, // job_registry
+                    None, // scratchpad
                 ).await)
             }
         }

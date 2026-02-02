@@ -12,8 +12,11 @@ use std::error::Error as StdError;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::collections::HashMap;
 use regex::Regex;
+use crate::agent::tools::ScratchpadTool;
+use crate::agent::tools::ConsolidateTool;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShortKeyAction {
@@ -312,6 +315,9 @@ pub struct AgentV2 {
 
     /// Optional capabilities context to inject into system prompt
     pub capabilities_context: Option<String>,
+
+    /// Scratchpad for short-term working memory
+    pub scratchpad: Arc<RwLock<String>>,
 }
 
 impl AgentV2 {
@@ -326,10 +332,20 @@ impl AgentV2 {
         categorizer: Option<Arc<MemoryCategorizer>>,
         job_registry: Option<JobRegistry>,
         capabilities_context: Option<String>,
+        scratchpad: Option<Arc<RwLock<String>>>,
     ) -> Self {
         let mut tool_map = HashMap::new();
         for tool in tools {
             tool_map.insert(tool.name().to_string(), tool);
+        }
+
+        let scratchpad = scratchpad.unwrap_or_else(|| Arc::new(RwLock::new(String::new())));
+        let scratchpad_tool = Arc::new(ScratchpadTool::new(scratchpad.clone()));
+        tool_map.insert(scratchpad_tool.name().to_string(), scratchpad_tool);
+
+        if let Some(store) = &memory_store {
+            let consolidate_tool = Arc::new(ConsolidateTool::new(scratchpad.clone(), store.clone()));
+            tool_map.insert(consolidate_tool.name().to_string(), consolidate_tool);
         }
 
         let session_id = chrono::Utc::now().timestamp_millis().to_string();
@@ -360,6 +376,7 @@ impl AgentV2 {
             heartbeat_interval: std::time::Duration::from_secs(5), // 5 second heartbeat
             safety_timeout: std::time::Duration::from_secs(300), // 5 minute safety timeout
             capabilities_context,
+            scratchpad,
         }
     }
 
@@ -411,7 +428,7 @@ impl AgentV2 {
     /// 4. Ensures the model knows it should proactively use memory tools
     ///
     /// NOTE: To also inject hot memory context, call `inject_hot_memory()` after this.
-    pub fn reset(&mut self, history: Vec<ChatMessage>) {
+    pub async fn reset(&mut self, history: Vec<ChatMessage>) {
         self.history = history;
         self.iteration_count = 0;
         self.total_usage = TokenUsage::default();
@@ -424,7 +441,8 @@ impl AgentV2 {
 
         // Ensure system prompt is present with capability awareness
         if self.history.is_empty() || self.history[0].role != MessageRole::System {
-            self.history.insert(0, ChatMessage::system(self.generate_system_prompt()));
+            let scratchpad_content = self.scratchpad.read().unwrap_or_else(|e| e.into_inner());
+            self.history.insert(0, ChatMessage::system(self.generate_system_prompt(&scratchpad_content)));
         }
     }
 
@@ -456,7 +474,7 @@ impl AgentV2 {
     ///
     /// This is a convenience method that combines `reset()` and `inject_hot_memory()`.
     pub async fn reset_with_memory(&mut self, history: Vec<ChatMessage>, limit: usize) {
-        self.reset(history);
+        self.reset(history).await;
         self.inject_hot_memory(limit).await;
     }
 
@@ -491,6 +509,22 @@ impl AgentV2 {
 
     /// Perform a single step in the agentic loop.
     pub async fn step(&mut self, observation: Option<String>) -> Result<AgentDecision, Box<dyn StdError + Send + Sync>> {
+        // Check scratchpad size and inject warning if needed
+        if let Ok(guard) = self.scratchpad.read() {
+            if guard.len() > 4000 {
+                let warning = format!("SYSTEM ALERT: Scratchpad size is {}/4000. Please use `consolidate_memory` to save important facts to long-term memory and condense the scratchpad.", guard.len());
+                
+                // Avoid spamming if the last message is already the warning
+                let last_msg_is_warning = self.history.last()
+                    .map(|m| m.content == warning)
+                    .unwrap_or(false);
+
+                if !last_msg_is_warning {
+                    self.history.push(ChatMessage::system(warning));
+                }
+            }
+        }
+
         // 1. Hard Iteration Limit Check
         if self.iteration_count >= self.max_iterations {
             self.pending_decision = None;
@@ -963,7 +997,7 @@ impl AgentV2 {
             }
         }
 
-        self.reset(history);
+        self.reset(history).await;
         self.inject_hot_memory(5).await;
         
         let mut last_observation = None;
@@ -1251,7 +1285,7 @@ impl AgentV2 {
     }
 
     /// Generate the system prompt with available tools and Short-Key JSON instructions.
-    fn generate_system_prompt(&self) -> String {
+    fn generate_system_prompt(&self, scratchpad_content: &str) -> String {
         let mut tools_desc = String::new();
         for tool in self.tools.values() {
             tools_desc.push_str(&format!("- {}: {}\n  Usage: {}\n", tool.name(), tool.description(), tool.usage()));
@@ -1262,10 +1296,16 @@ impl AgentV2 {
             .map(|ctx| format!("\n\n{}\n", ctx))
             .unwrap_or_default();
 
+        let scratchpad_section = if !scratchpad_content.is_empty() {
+            format!("\n\n## CURRENT SCRATCHPAD (Working Memory)\n{}\n", scratchpad_content)
+        } else {
+            String::new()
+        };
+
         format!(
             "{}\n\n\
             # Available Tools\n\
-            {}\n\n\
+            {}\n{}\n\
             # Response Format: Short-Key JSON Protocol\n\
             You MUST respond using the Short-Key JSON protocol. This format minimizes token usage and ensures structural integrity.\n\n\
             ## Schema\n\
@@ -1294,6 +1334,7 @@ impl AgentV2 {
             Begin!{}",
             self.system_prompt_prefix,
             tools_desc,
+            scratchpad_section,
             capabilities_section
         )
     }
@@ -1341,7 +1382,7 @@ impl AgentV2 {
         mut approval_rx: tokio::sync::mpsc::Receiver<bool>,
     ) -> Result<(String, TokenUsage), Box<dyn StdError + Send + Sync>> {
         // Reset state for new task and inject hot memory
-        self.reset(history);
+        self.reset(history).await;
         self.inject_hot_memory(5).await;
         
         let start_time = std::time::Instant::now();
