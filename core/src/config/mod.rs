@@ -1,106 +1,53 @@
-//! Configuration management using config-rs
+//! Configuration management - ConfigV2
 //!
-//! Supports YAML configuration files with support for multiple endpoints,
-//! environment variables, and command-line overrides.
-//! test for ccache
+//! TOML-based configuration with profile inheritance and environment overrides.
 
-use anyhow::{Context, Result};
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Password, Select};
-use dirs::config_dir;
-use home::home_dir;
+pub mod v2;
+pub use v2::*;
+
+// Re-export key types
+pub use v2::ConfigV2 as Config;
+pub use v2::EndpointConfig;
+pub use v2::EndpointOverride;
+pub use v2::FeaturesConfig;
+pub use v2::MemoryConfig;
+pub use v2::Profile;
+pub use v2::Provider;
+pub use v2::ResolvedConfig;
+pub use v2::SearchProvider;
+pub use v2::WebSearchConfig;
+pub use v2::AgentOverride;
+pub use v2::ConfigError;
+
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-pub mod endpoints;
-pub mod prompt;
-
-/// Default configuration file name
-const CONFIG_FILE_NAME: &str = "mylm.yaml";
-
-/// Default config directory name
-const CONFIG_DIR_NAME: &str = "mylm";
-
-/// A configuration profile combining an endpoint and a prompt
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Profile {
-    /// Name of the profile
-    pub name: String,
-    /// Name of the endpoint to use
-    pub endpoint: String,
-    /// Name of the prompt file to use (without .md extension)
-    pub prompt: String,
-    /// Optional model override for this profile (None = use endpoint default)
-    #[serde(default)]
-    pub model: Option<String>,
+/// Agent version/loop implementation
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentVersion {
+    /// Classic ReAct loop (V1)
+    V1,
+    /// Multi-layered cognitive architecture (V2)
+    #[default]
+    V2,
 }
 
-/// Main configuration structure
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Config {
-    /// Name of the currently active profile
-    #[serde(default)]
-    pub active_profile: String,
-
-    /// List of available profiles
-    #[serde(default)]
-    pub profiles: Vec<Profile>,
-
-    /// Default endpoint to use when none specified
-    #[serde(default)]
-    pub default_endpoint: String,
-
-    /// List of configured LLM endpoints
-    #[serde(default)]
-    pub endpoints: Vec<endpoints::EndpointConfig>,
-
-    /// Command allowlist settings
-    #[serde(default)]
-    pub commands: CommandConfig,
-
-    /// Web search configuration
-    #[serde(default)]
-    pub web_search: WebSearchConfig,
-
-    /// Memory configuration
-    #[serde(default)]
-    pub memory: MemoryConfig,
-
-    /// Agent configuration
-    #[serde(default)]
-    pub agent: AgentConfig,
-
-    /// Maximum context tokens to keep in history
-    ///
-    /// - None => use endpoint/model max context
-    /// - Some(n) => override context window to n
-    #[serde(default = "default_context_limit")]
-    pub context_limit: Option<usize>,
-
-    /// Whether to show intermediate steps (thoughts/actions)
-    #[serde(default = "default_verbose_mode")]
-    pub verbose_mode: bool,
-
-    /// Context budgeting profile
-    #[serde(default)]
-    pub context_profile: ContextProfile,
+impl std::fmt::Display for AgentVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentVersion::V1 => write!(f, "V1 (Classic ReAct)"),
+            AgentVersion::V2 => write!(f, "V2 (Cognitive Submodule)"),
+        }
+    }
 }
 
 /// Context budgeting profile
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ContextProfile {
-    /// Minimal context: Core system info only
     Minimal,
-    /// Balanced context: Core + Git Summary + Adaptive Memory + Terminal (on demand)
+    #[default]
     Balanced,
-    /// Verbose context: Full Git + Full Terminal History + Detailed Memory
     Verbose,
-}
-
-impl Default for ContextProfile {
-    fn default() -> Self {
-        ContextProfile::Balanced
-    }
 }
 
 impl std::fmt::Display for ContextProfile {
@@ -113,43 +60,68 @@ impl std::fmt::Display for ContextProfile {
     }
 }
 
-pub fn default_context_limit() -> Option<usize> {
-    None
+/// Command execution configuration
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+pub struct CommandConfig {
+    #[serde(default)]
+    pub allow_execution: bool,
+    #[serde(default)]
+    pub allowlist_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
+    #[serde(default)]
+    pub blocked_commands: Vec<String>,
 }
 
-fn default_verbose_mode() -> bool {
-    false
-}
-
-
-/// Web search configuration
+/// Legacy WebSearchConfig for backward compatibility (for existing user configs)
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct WebSearchConfig {
-    /// Whether web search is enabled
+pub struct LegacyWebSearchConfig {
     pub enabled: bool,
-    /// Search provider (kimi, google, serpapi)
     pub provider: String,
-    /// API key for the search provider
     pub api_key: String,
-    /// Model name (specifically for Kimi web search)
     pub model: String,
 }
 
-/// Memory configuration
+impl From<WebSearchConfig> for LegacyWebSearchConfig {
+    fn from(config: WebSearchConfig) -> Self {
+        Self {
+            enabled: config.enabled,
+            provider: match config.provider {
+                SearchProvider::Kimi => "kimi".to_string(),
+                SearchProvider::Serpapi => "serpapi".to_string(),
+                SearchProvider::Brave => "brave".to_string(),
+            },
+            api_key: config.api_key.unwrap_or_default(),
+            model: "kimi-k2-turbo-preview".to_string(),
+        }
+    }
+}
+
+impl From<LegacyWebSearchConfig> for WebSearchConfig {
+    fn from(config: LegacyWebSearchConfig) -> Self {
+        let provider = match config.provider.as_str() {
+            "kimi" => SearchProvider::Kimi,
+            "brave" => SearchProvider::Brave,
+            _ => SearchProvider::Serpapi,
+        };
+        Self {
+            enabled: config.enabled,
+            provider,
+            api_key: if config.api_key.is_empty() { None } else { Some(config.api_key) },
+            max_results: 5,
+        }
+    }
+}
+
+/// Legacy MemoryConfig adapter for compatibility
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct MemoryConfig {
-    /// Whether to automatically record commands and interactions
-    #[serde(default = "default_true")]
+pub struct LegacyMemoryConfig {
     pub auto_record: bool,
-    /// Whether to inject relevant memories into the context
-    #[serde(default = "default_true")]
     pub auto_context: bool,
-    /// Whether to automatically categorize new memories
-    #[serde(default = "default_true")]
     pub auto_categorize: bool,
 }
 
-impl Default for MemoryConfig {
+impl Default for LegacyMemoryConfig {
     fn default() -> Self {
         Self {
             auto_record: true,
@@ -159,824 +131,56 @@ impl Default for MemoryConfig {
     }
 }
 
-fn default_true() -> bool {
-    true
-}
-
-/// Agent version/loop implementation
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
-pub enum AgentVersion {
-    /// Classic ReAct loop (V1)
-    V1,
-    /// Multi-layered cognitive architecture (V2)
-    V2,
-}
-
-impl Default for AgentVersion {
-    fn default() -> Self {
-        AgentVersion::V1
-    }
-}
-
-impl std::fmt::Display for AgentVersion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AgentVersion::V1 => write!(f, "V1 (Classic ReAct)"),
-            AgentVersion::V2 => write!(f, "V2 (Cognitive Submodule)"),
-        }
-    }
-}
-
-/// Agent configuration
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct AgentConfig {
-    /// Version of the agent loop to use
-    #[serde(default)]
-    pub version: AgentVersion,
-    /// Maximum number of iterations for the agent
-    #[serde(default = "default_max_iterations")]
-    pub max_iterations: usize,
-    /// Maximum number of driver loops for the agent
-    #[serde(default = "default_max_driver_loops")]
-    pub max_driver_loops: usize,
-}
-
-impl Default for AgentConfig {
-    fn default() -> Self {
+impl From<MemoryConfig> for LegacyMemoryConfig {
+    fn from(config: MemoryConfig) -> Self {
         Self {
-            version: AgentVersion::default(),
-            max_iterations: default_max_iterations(),
-            max_driver_loops: default_max_driver_loops(),
+            auto_record: config.auto_record,
+            auto_context: config.auto_context,
+            auto_categorize: true,
         }
     }
 }
 
-fn default_max_iterations() -> usize {
-    10
-}
-
-fn default_max_driver_loops() -> usize {
-    30
-}
-
-/// Command execution configuration
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
-pub struct CommandConfig {
-    /// Whether to allow execution of commands
-    #[serde(default)]
-    pub allow_execution: bool,
-
-    /// Paths to custom allowlist files
-    #[serde(default)]
-    pub allowlist_paths: Vec<PathBuf>,
-
-    /// Additional explicitly allowed commands (exact command names, e.g. "bash", "git")
-    #[serde(default)]
-    pub allowed_commands: Vec<String>,
-
-    /// Explicitly blocked commands (exact command names, e.g. "rm")
-    #[serde(default)]
-    pub blocked_commands: Vec<String>,
-}
-
-
-impl Default for Config {
-    fn default() -> Self {
+impl From<LegacyMemoryConfig> for MemoryConfig {
+    fn from(config: LegacyMemoryConfig) -> Self {
         Self {
-            active_profile: String::new(),
-            profiles: Vec::new(),
-            default_endpoint: String::new(),
-            endpoints: Vec::new(),
-            commands: CommandConfig::default(),
-            web_search: WebSearchConfig::default(),
-            memory: MemoryConfig::default(),
-            agent: AgentConfig::default(),
-            context_limit: None,
-            verbose_mode: default_verbose_mode(),
-            context_profile: ContextProfile::default(),
+            enabled: true,
+            auto_record: config.auto_record,
+            auto_context: config.auto_context,
+            max_context_memories: 10,
         }
     }
 }
 
-impl Config {
-    /// Load configuration from file, with fallback to defaults
-    pub fn load() -> Result<Self> {
-        // Try to load from config file
-        if let Some(config_path) = find_config_file() {
-            if config_path.exists() {
-                return Self::load_from_file(&config_path);
-            }
-        }
-
-        // Try config dir as well
-        if let Some(config_dir) = get_config_dir() {
-            let config_path = config_dir.join(CONFIG_FILE_NAME);
-            if config_path.exists() {
-                return Self::load_from_file(&config_path);
-            }
-        }
-
-        // Return default config if no file found
-        Ok(Self::default())
-    }
-
-    /// Load configuration from a specific file path
-    pub fn load_from_file(path: impl AsRef<Path>) -> Result<Self> {
-        let content = fs::read_to_string(path.as_ref())
-            .with_context(|| format!("Failed to read config file: {:?}", path.as_ref()))?;
-
-        let config: Config = serde_yaml::from_str(&content)
-            .with_context(|| format!("Failed to parse config file: {:?}", path.as_ref()))?;
-
-        Ok(config)
-    }
-
-    /// Get endpoint configuration by name
-    pub fn get_endpoint(&self, name: Option<&str>) -> Result<&endpoints::EndpointConfig> {
-        // If a specific name is requested, try to find it
-        if let Some(n) = name {
-            return self.endpoints
-                .iter()
-                .find(|e| e.name == n)
-                .with_context(|| format!("Endpoint '{}' not found", n));
-        }
-
-        // Otherwise, try to find the endpoint for the active profile
-        if let Some(profile) = self.get_active_profile() {
-            if !profile.endpoint.is_empty() {
-                 return self.endpoints
-                    .iter()
-                    .find(|e| e.name == profile.endpoint)
-                    .with_context(|| format!("Endpoint '{}' (from active profile) not found", profile.endpoint));
-            }
-        }
-        
-        // Try to use the default endpoint
-        if !self.default_endpoint.is_empty() {
-            if let Some(endpoint) = self.endpoints.iter().find(|e| e.name == self.default_endpoint) {
-                return Ok(endpoint);
-            }
-        }
-
-        // Fallback: if we have only one endpoint, just return it (convenience for single-endpoint setups)
-        if self.endpoints.len() == 1 {
-            return Ok(&self.endpoints[0]);
-        }
-
-        anyhow::bail!("No endpoint selected or configured. Please set an active profile or endpoint.")
-    }
-
-    /// Get the default endpoint
-    #[allow(dead_code)]
-    pub fn get_default_endpoint(&self) -> Result<&endpoints::EndpointConfig> {
-        self.get_endpoint(Some(&self.default_endpoint))
-    }
-
-    /// Get the active profile
-    pub fn get_active_profile(&self) -> Option<&Profile> {
-        self.profiles.iter().find(|p| p.name == self.active_profile)
-    }
-
-    /// Get the effective model for a profile (profile override or endpoint default)
-    pub fn get_effective_model(&self, profile: &Profile) -> Result<String> {
-        if let Some(model) = &profile.model {
-            return Ok(model.clone());
-        }
-        
-        let endpoint = self.get_endpoint(Some(&profile.endpoint))?;
-        Ok(endpoint.model.clone())
-    }
-
-    /// Save configuration to file
-    /// Save configuration to a specific file path
-    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        let content = serde_yaml::to_string(self)
-            .with_context(|| "Failed to serialize configuration")?;
-
-        fs::write(path.as_ref(), content)
-            .with_context(|| format!("Failed to write config file: {:?}", path.as_ref()))?;
-
-        Ok(())
-    }
-
-    /// Save configuration to the default system location
-    pub fn save_to_default_location(&self) -> Result<()> {
-        let path = find_config_file().or_else(|| {
-            get_config_dir().map(|d| d.join(CONFIG_FILE_NAME))
-        }).context("Could not determine configuration save path")?;
-
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create config directory: {:?}", parent))?;
-            }
-        }
-        
-        self.save(path)
-    }
-
-    /// Interactive setup wizard
-    /// Edit the LLM endpoint configuration with optional pre-fill from existing endpoint
-    pub async fn edit_endpoint_details(&mut self, endpoint_name: &str) -> Result<()> {
-        self.edit_endpoint_with_prefill(endpoint_name, None).await
-    }
-
-    /// Edit endpoint with optional pre-fill from existing endpoint
-    pub async fn edit_endpoint_with_prefill(&mut self, endpoint_name: &str, existing: Option<&endpoints::EndpointConfig>) -> Result<()> {
-        let theme = ColorfulTheme::default();
-        let providers = vec!["OpenAI", "Google (Gemini)", "Ollama", "OpenRouter", "Custom"];
-        
-        // Determine provider selection (pre-select from existing if available)
-        let provider_idx = if let Some(existing_endpoint) = existing {
-            match existing_endpoint.provider.as_str() {
-                "google" => 1,
-                "openrouter" => 3,
-                _ => 0, // Default to OpenAI for unknown/custom
-            }
-        } else {
-            0
-        };
-
-        let selection = Select::with_theme(&theme)
-            .with_prompt("Select your LLM provider")
-            .items(&providers)
-            .default(provider_idx)
-            .interact()?;
-
-        let provider_name = providers[selection];
-        let (provider_id, mut base_url, mut model) = match provider_name {
-            "OpenAI" => ("openai".to_string(), "https://api.openai.com/v1".to_string(), "gpt-4o".to_string()),
-            "Google (Gemini)" => ("google".to_string(), "https://generativelanguage.googleapis.com".to_string(), "gemini-3-flash-preview".to_string()),
-            "Ollama" => ("openai".to_string(), "http://localhost:11434/v1".to_string(), "llama3.2".to_string()),
-            "OpenRouter" => ("openai".to_string(), "https://openrouter.ai/api/v1".to_string(), "google/gemini-2.0-flash-001".to_string()),
-            _ => ("openai".to_string(), String::new(), String::new()),
-        };
-
-        // Pre-fill from existing endpoint if available
-        if let Some(existing_endpoint) = existing {
-            base_url = existing_endpoint.base_url.clone();
-            model = existing_endpoint.model.clone();
-        }
-
-        let mut api_key = if provider_name != "Ollama" {
-            // For editing, ask if user wants to change API key
-            if existing.is_some() {
-                let change_key = Confirm::with_theme(&theme)
-                    .with_prompt("Change API key? (Leave empty to keep existing)")
-                    .default(false)
-                    .interact()?;
-                
-                if change_key {
-                    Password::with_theme(&theme)
-                        .with_prompt(format!("API Key for {} (leave empty to cancel)", provider_name))
-                        .interact()?
-                } else {
-                    // Keep existing API key
-                    if let Some(existing_endpoint) = existing {
-                        existing_endpoint.api_key.clone()
-                    } else {
-                        String::new()
-                    }
-                }
-            } else {
-                Password::with_theme(&theme)
-                    .with_prompt(format!("API Key for {}", provider_name))
-                    .interact()?
-            }
-        } else {
-            "none".to_string()
-        };
-
-        // If user left API key empty when editing, keep the existing one
-        if provider_name != "Ollama" && api_key.is_empty() && existing.is_some() {
-            if let Some(existing_endpoint) = existing {
-                api_key = existing_endpoint.api_key.clone();
-            }
-        }
-
-        let mut fetched_models = Vec::new();
-        if provider_name != "Custom" {
-            let fetch = Select::with_theme(&theme)
-                .with_prompt("Fetch latest models from provider?")
-                .items(&["Yes", "No"])
-                .default(0)
-                .interact()?;
-
-            if fetch == 0 {
-                println!("📡 Fetching models...");
-                match fetch_models_from_provider(provider_name, &base_url, &api_key, "").await {
-                    Ok(models) if !models.is_empty() => {
-                        let m_idx = Select::with_theme(&theme)
-                            .with_prompt("Select model")
-                            .items(&models)
-                            .default(0)
-                            .interact()?;
-                        model = models[m_idx].clone();
-                        fetched_models = models;
-                    }
-                    _ => println!("⚠️ Could not fetch models, using default."),
-                }
-            }
-        }
-
-        if provider_name == "Custom" || fetched_models.is_empty() {
-            model = Input::with_theme(&theme).with_prompt("Model name").with_initial_text(model).interact_text()?;
-            if provider_name != "Ollama" && provider_name != "Google (Gemini)" {
-                base_url = Input::with_theme(&theme).with_prompt("Base URL").with_initial_text(base_url).interact_text()?;
-            }
-        }
-
-        let mut timeout_seconds = 60;
-        let mut input_price_per_1m = 0.0;
-        let mut output_price_per_1m = 0.0;
-        let mut max_context_tokens = 32768;
-        let mut condense_threshold = 0.8;
-
-        if Confirm::with_theme(&theme)
-            .with_prompt("Configure advanced settings (tokens, prices, timeout)?")
-            .default(false)
-            .interact()?
-        {
-            timeout_seconds = Input::with_theme(&theme)
-                .with_prompt("Request timeout (seconds)")
-                .default(timeout_seconds)
-                .interact_text()?;
-
-            input_price_per_1m = Input::with_theme(&theme)
-                .with_prompt("Input price per 1M tokens ($)")
-                .default(input_price_per_1m)
-                .interact_text()?;
-
-            output_price_per_1m = Input::with_theme(&theme)
-                .with_prompt("Output price per 1M tokens ($)")
-                .default(output_price_per_1m)
-                .interact_text()?;
-
-            max_context_tokens = Input::with_theme(&theme)
-                .with_prompt("Max context tokens")
-                .default(max_context_tokens)
-                .interact_text()?;
-
-            condense_threshold = Input::with_theme(&theme)
-                .with_prompt("Condense threshold (0.0 - 1.0)")
-                .default(condense_threshold)
-                .interact_text()?;
-        }
-
-        let endpoint = endpoints::EndpointConfig {
-            name: endpoint_name.to_string(),
-            provider: provider_id,
-            base_url,
-            model,
-            api_key,
-            timeout_seconds,
-            input_price_per_1m,
-            output_price_per_1m,
-            max_context_tokens,
-            condense_threshold,
-        };
-
-        // Update or add the endpoint
-        if let Some(e) = self.endpoints.iter_mut().find(|e| e.name == endpoint_name) {
-            *e = endpoint;
-        } else {
-            self.endpoints.push(endpoint);
-        }
-
-        Ok(())
-    }
-
-    /// Edit only the provider for an endpoint
-    pub async fn edit_endpoint_provider(&mut self, endpoint_name: &str) -> Result<()> {
-        let theme = ColorfulTheme::default();
-        let providers = vec!["OpenAI", "Google (Gemini)", "Ollama", "OpenRouter", "Custom"];
-        
-        let current_idx = if let Ok(e) = self.get_endpoint(Some(endpoint_name)) {
-             match e.provider.as_str() {
-                "google" => 1,
-                "openrouter" => 3,
-                _ => 0,
-            }
-        } else {
-            0
-        };
-
-        let selection = Select::with_theme(&theme)
-            .with_prompt("Select Provider")
-            .items(&providers)
-            .default(current_idx)
-            .interact()?;
-            
-        let provider_name = providers[selection];
-        let (provider_id, default_url) = match provider_name {
-            "OpenAI" => ("openai".to_string(), "https://api.openai.com/v1".to_string()),
-            "Google (Gemini)" => ("google".to_string(), "https://generativelanguage.googleapis.com".to_string()),
-            "Ollama" => ("openai".to_string(), "http://localhost:11434/v1".to_string()),
-            "OpenRouter" => ("openai".to_string(), "https://openrouter.ai/api/v1".to_string()),
-            _ => ("openai".to_string(), String::new()),
-        };
-
-        if let Some(e) = self.endpoints.iter_mut().find(|e| e.name == endpoint_name) {
-            e.provider = provider_id;
-            // Optionally update base URL if it looks like a default one, or ask user?
-            // To be safe/simple, we offer to update it if it's different.
-            if e.base_url != default_url && !default_url.is_empty() {
-                if Confirm::with_theme(&theme)
-                    .with_prompt(format!("Update Base URL to default for {} ({})?", provider_name, default_url))
-                    .default(true)
-                    .interact()?
-                {
-                    e.base_url = default_url;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Edit only the Base URL for an endpoint
-    pub fn edit_endpoint_base_url(&mut self, endpoint_name: &str) -> Result<()> {
-        let theme = ColorfulTheme::default();
-        let current_url = if let Ok(e) = self.get_endpoint(Some(endpoint_name)) {
-            e.base_url.clone()
-        } else {
-            String::new()
-        };
-
-        let new_url: String = Input::with_theme(&theme)
-            .with_prompt("API Base URL")
-            .with_initial_text(&current_url)
-            .interact_text()?;
-
-        if let Some(e) = self.endpoints.iter_mut().find(|e| e.name == endpoint_name) {
-            e.base_url = new_url;
-        }
-        Ok(())
-    }
-
-    /// Edit only the API Key for an endpoint
-    pub fn edit_endpoint_api_key(&mut self, endpoint_name: &str) -> Result<()> {
-        let theme = ColorfulTheme::default();
-        let current_key = if let Ok(e) = self.get_endpoint(Some(endpoint_name)) {
-            e.api_key.clone()
-        } else {
-            String::new()
-        };
-        
-        // Show current status
-        if current_key == "none" || current_key.is_empty() {
-            println!("Current Key: Not Set");
-        } else {
-            println!("Current Key: ******** (Set)");
-        }
-
-        let new_key = Password::with_theme(&theme)
-            .with_prompt("New API Key (leave empty to keep existing)")
-            .allow_empty_password(true)
-            .interact()?;
-
-        if !new_key.is_empty() {
-            if let Some(e) = self.endpoints.iter_mut().find(|e| e.name == endpoint_name) {
-                e.api_key = new_key;
-            }
-        }
-        Ok(())
-    }
-
-    /// Edit the Model for the active profile (Profile override)
-    pub async fn edit_profile_model(&mut self, profile_name: &str) -> Result<()> {
-        let theme = ColorfulTheme::default();
-        
-        // Need to find which endpoint is linked to this profile to fetch models
-        let endpoint_name = if let Some(p) = self.profiles.iter().find(|p| p.name == profile_name) {
-            p.endpoint.clone()
-        } else {
-            return Ok(());
-        };
-
-        let (provider, base_url, api_key) = if let Ok(e) = self.get_endpoint(Some(&endpoint_name)) {
-            (e.provider.clone(), e.base_url.clone(), e.api_key.clone())
-        } else {
-            return Ok(());
-        };
-
-        // Options: Fetch list, Type manually, Use Connection Default
-        let options = vec![
-            "📡 Fetch from Provider",
-            "⌨️  Type Manually",
-            "🔙 Revert to Connection Default"
-        ];
-        
-        let sel = Select::with_theme(&theme)
-            .with_prompt("Select Model Method")
-            .items(&options)
-            .default(0)
-            .interact()?;
-
-        let new_model = match sel {
-            0 => {
-                println!("📡 Fetching models from {}...", base_url);
-                match fetch_models_from_provider(&provider, &base_url, &api_key, "").await {
-                    Ok(models) if !models.is_empty() => {
-                        let m_idx = Select::with_theme(&theme)
-                            .with_prompt("Select Model")
-                            .items(&models)
-                            .default(0)
-                            .interact()?;
-                        Some(models[m_idx].clone())
-                    }
-                    Ok(_) => {
-                        println!("⚠️  No models found.");
-                        None
-                    }
-                    Err(e) => {
-                        println!("⚠️  Fetch failed: {}", e);
-                        None
-                    }
-                }
-            }
-            1 => {
-                let current_model = if let Some(p) = self.profiles.iter().find(|p| p.name == profile_name) {
-                    p.model.clone().unwrap_or_default()
-                } else { String::new() };
-                
-                let val: String = Input::with_theme(&theme)
-                    .with_prompt("Enter Model ID")
-                    .with_initial_text(&current_model)
-                    .interact_text()?;
-                Some(val)
-            }
-            2 => None, // Set to None (use default)
-            _ => None,
-        };
-
-        // Apply change
-        // Logic: if user selected 0/1 but cancelled/failed, we don't change anything.
-        // If user selected 2, we set to None.
-        if sel == 2 {
-             if let Some(p) = self.profiles.iter_mut().find(|p| p.name == profile_name) {
-                p.model = None;
-                println!("✅ Reverted to connection default model.");
-            }
-        } else if let Some(model) = new_model {
-            if let Some(p) = self.profiles.iter_mut().find(|p| p.name == profile_name) {
-                p.model = Some(model);
-                println!("✅ Updated profile model override.");
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Edit General settings (context limit, verbose mode, etc.)
-    pub fn edit_general(&mut self) -> Result<()> {
-        let theme = ColorfulTheme::default();
-        
-        loop {
-            let options = vec![
-                format!(
-                    "Context Limit: {}",
-                    self.context_limit
-                        .map(|l| l.to_string())
-                        .unwrap_or_else(|| "Model Default".to_string())
-                ),
-                format!("Verbose Mode: {}", if self.verbose_mode { "On" } else { "Off" }),
-                format!("Auto-approve:  {}", if self.commands.allow_execution { "Enabled" } else { "Disabled" }),
-                format!("Allowed Commands: {}", self.commands.allowed_commands.len()),
-                format!("Blocked Commands: {}", self.commands.blocked_commands.len()),
-                format!("Agent Version:  {}", self.agent.version),
-                format!("Max Iterations: {} (steps per request)", self.agent.max_iterations),
-                format!("Max Driver Loops: {} (session safety limit)", self.agent.max_driver_loops),
-                format!("Context Profile: {}", self.context_profile),
-                format!("Auto-Memory:   {}", if self.memory.auto_record { "Enabled" } else { "Disabled" }),
-                format!("Auto-Categorize: {}", if self.memory.auto_categorize { "Enabled" } else { "Disabled" }),
-                "⬅️  Back".to_string(),
-            ];
-
-            let selection = Select::with_theme(&theme)
-                .with_prompt("General Settings")
-                .items(&options)
-                .default(0)
-                .interact()?;
-
-            match selection {
-                0 => {
-                    let current = self.context_limit.unwrap_or(0);
-                    let val: String = Input::with_theme(&theme)
-                        .with_prompt("Global context limit (0 to use model default)")
-                        .with_initial_text(current.to_string())
-                        .interact_text()?;
-
-                    let n = val.parse::<usize>().unwrap_or(0);
-                    if n == 0 {
-                        self.context_limit = None;
-                    } else {
-                        self.context_limit = Some(n);
-                    }
-                }
-                1 => {
-                    self.verbose_mode = !self.verbose_mode;
-                }
-                2 => {
-                    self.commands.allow_execution = !self.commands.allow_execution;
-                }
-                3 => {
-                    edit_string_list(
-                        &theme,
-                        "Allowed Commands (exact command names)",
-                        &mut self.commands.allowed_commands,
-                    )?;
-                }
-                4 => {
-                    edit_string_list(
-                        &theme,
-                        "Blocked Commands (exact command names)",
-                        &mut self.commands.blocked_commands,
-                    )?;
-                }
-                5 => {
-                    let mut versions = vec![AgentVersion::V1];
-                    if check_v2_binary_exists() {
-                        versions.push(AgentVersion::V2);
-                    }
-                    
-                    if versions.len() > 1 {
-                        let items: Vec<String> = versions.iter().map(|v| v.to_string()).collect();
-                        let current_idx = versions.iter().position(|v| v == &self.agent.version).unwrap_or(0);
-                        
-                        let idx = Select::with_theme(&theme)
-                            .with_prompt("Select Agent Version")
-                            .items(&items)
-                            .default(current_idx)
-                            .interact()?;
-                        self.agent.version = versions[idx];
-                    } else {
-                        println!("ℹ️ Only V1 is available. V2 binary ('mylm-v2') not found.");
-                        std::thread::sleep(std::time::Duration::from_secs(1));
-                    }
-                }
-                6 => {
-                    self.agent.max_iterations = Input::with_theme(&theme)
-                        .with_prompt("Max steps (thoughts/actions) per single user request")
-                        .default(self.agent.max_iterations)
-                        .interact_text()?;
-                }
-                7 => {
-                    self.agent.max_driver_loops = Input::with_theme(&theme)
-                        .with_prompt("Safety limit: max total exchanges in one session")
-                        .default(self.agent.max_driver_loops)
-                        .interact_text()?;
-                }
-                8 => {
-                    let profiles = vec![
-                        ContextProfile::Minimal,
-                        ContextProfile::Balanced,
-                        ContextProfile::Verbose,
-                    ];
-                    let items: Vec<String> = profiles.iter().map(|p| p.to_string()).collect();
-                    let idx = Select::with_theme(&theme)
-                        .with_prompt("Select Context Profile")
-                        .items(&items)
-                        .default(1)
-                        .interact()?;
-                    self.context_profile = profiles[idx];
-                }
-                9 => {
-                    self.memory.auto_record = !self.memory.auto_record;
-                    self.memory.auto_context = self.memory.auto_record;
-                    self.memory.auto_categorize = self.memory.auto_record;
-                }
-                10 => {
-                    self.memory.auto_categorize = !self.memory.auto_categorize;
-                }
-                _ => break,
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Edit API keys for LLM or Search
-    pub fn edit_api_key(&mut self, search: bool, endpoint_name: Option<&str>) -> Result<()> {
-        let theme = ColorfulTheme::default();
-        let prompt = if search { "Search API Key" } else { "LLM API Key" };
-        let key = Password::with_theme(&theme)
-            .with_prompt(prompt)
-            .interact()?;
-
-        if search {
-            self.web_search.api_key = key;
-        } else if let Some(name) = endpoint_name {
-            if let Some(e) = self.endpoints.iter_mut().find(|e| e.name == name) {
-                e.api_key = key;
-            }
-        } else if let Some(e) = self.endpoints.iter_mut().find(|e| e.name == "default") {
-            e.api_key = key;
-        }
-
-        Ok(())
-    }
-
-    /// Edit Web Search configuration
-    pub async fn edit_search(&mut self) -> Result<()> {
-        let theme = ColorfulTheme::default();
-        let providers = vec!["Kimi (Moonshot AI)", "SerpAPI (Google/Bing/etc.)", "Disabled"];
-        let selection = Select::with_theme(&theme)
-            .with_prompt("Select web search provider")
-            .items(&providers)
-            .default(0)
-            .interact()?;
-
-        match selection {
-            0 => {
-                self.web_search.enabled = true;
-                self.web_search.provider = "kimi".to_string();
-                self.web_search.api_key = Password::with_theme(&theme).with_prompt("Kimi API Key").interact()?;
-                self.web_search.model = "kimi-k2-turbo-preview".to_string();
-            }
-            1 => {
-                self.web_search.enabled = true;
-                self.web_search.provider = "serpapi".to_string();
-                self.web_search.api_key = Password::with_theme(&theme).with_prompt("SerpAPI Key").interact()?;
-            }
-            _ => {
-                self.web_search.enabled = false;
-            }
-        }
-        Ok(())
-    }
+/// UI-facing profile info (for display purposes)
+#[derive(Debug, Clone)]
+pub struct ProfileInfo {
+    pub name: String,
+    pub model_override: Option<String>,
+    pub max_iterations: Option<usize>,
 }
 
-fn edit_string_list(theme: &ColorfulTheme, title: &str, list: &mut Vec<String>) -> Result<()> {
-    loop {
-        let mut options: Vec<String> = Vec::new();
-        options.push("➕ Add".to_string());
-        if !list.is_empty() {
-            options.push("➖ Remove".to_string());
-            options.push("🧹 Clear".to_string());
-        }
-        options.push("⬅️  Back".to_string());
-
-        let sel = Select::with_theme(theme)
-            .with_prompt(title)
-            .items(&options)
-            .default(0)
-            .interact()?;
-
-        let choice = options.get(sel).map(|s| s.as_str()).unwrap_or("⬅️  Back");
-        match choice {
-            "➕ Add" => {
-                let val: String = Input::with_theme(theme)
-                    .with_prompt("Command name")
-                    .interact_text()?;
-                let v = val.trim();
-                if !v.is_empty() {
-                    if !list.iter().any(|x| x == v) {
-                        list.push(v.to_string());
-                    }
-                }
-            }
-            "➖ Remove" => {
-                if list.is_empty() {
-                    continue;
-                }
-                let items = list.clone();
-                let idx = Select::with_theme(theme)
-                    .with_prompt("Remove which?")
-                    .items(&items)
-                    .default(0)
-                    .interact()?;
-                if idx < list.len() {
-                    list.remove(idx);
-                }
-            }
-            "🧹 Clear" => {
-                if dialoguer::Confirm::with_theme(theme)
-                    .with_prompt("Clear all entries?")
-                    .default(false)
-                    .interact()?
-                {
-                    list.clear();
-                }
-            }
-            _ => break,
-        }
-    }
-    Ok(())
+/// UI-facing endpoint info (for display purposes)
+#[derive(Debug, Clone)]
+pub struct EndpointInfo {
+    pub provider: String,
+    pub base_url: String,
+    pub model: String,
+    pub api_key_set: bool,
+    pub timeout_seconds: u64,
 }
 
-/// Find the configuration file in standard locations (only if it exists)
+/// Find the configuration file in standard locations
 pub fn find_config_file() -> Option<PathBuf> {
-    // Check current directory first
     if let Ok(cwd) = std::env::current_dir() {
-        let path = cwd.join(CONFIG_FILE_NAME);
+        let path = cwd.join("mylm.toml");
         if path.exists() {
             return Some(path);
         }
     }
 
-    // Check config directory for existing file
     if let Some(dir) = get_config_dir() {
-        let path = dir.join(CONFIG_FILE_NAME);
+        let path = dir.join("mylm.toml");
         if path.exists() {
             return Some(path);
         }
@@ -987,98 +191,224 @@ pub fn find_config_file() -> Option<PathBuf> {
 
 /// Get the configuration directory path
 pub fn get_config_dir() -> Option<PathBuf> {
-    // Try standard config dir first
+    use dirs::config_dir;
+    use home::home_dir;
+    
     if let Some(dir) = config_dir() {
-        return Some(dir.join(CONFIG_DIR_NAME));
+        return Some(dir.join("mylm"));
     }
 
-    // Fall back to manual home-based config path
     if let Some(home) = home_dir() {
-        return Some(home.join(".config").join(CONFIG_DIR_NAME));
+        return Some(home.join(".config").join("mylm"));
     }
 
     None
 }
 
-/// Check if V2 plugin binary exists
-pub fn check_v2_binary_exists() -> bool {
-    let binary_name = if cfg!(windows) { "mylm-v2.exe" } else { "mylm-v2" };
-    
-    let paths = [
-        PathBuf::from(binary_name),
-        PathBuf::from("./").join(binary_name),
-        PathBuf::from("plugins").join(binary_name),
-    ];
-    
-    paths.iter().any(|p| p.exists())
+/// Create default configuration
+pub fn create_default_config() -> ConfigV2 {
+    ConfigV2::default()
 }
 
-/// Helper to fetch models from various providers
-async fn fetch_models_from_provider(
-    provider: &str,
-    base_url: &str,
-    api_key: &str,
-    filter: &str,
-) -> Result<Vec<String>> {
-    let client = reqwest::Client::new();
-    let mut models = Vec::new();
-
-    match provider {
-        "Google (Gemini)" => {
-            let url = format!("{}/v1beta/models?key={}", base_url, api_key);
-            let resp = client
-                .get(url)
-                .send()
-                .await?
-                .json::<serde_json::Value>()
-                .await?;
-            if let Some(model_list) = resp.get("models").and_then(|m| m.as_array()) {
-                for m in model_list {
-                    if let Some(name) = m.get("name").and_then(|n| n.as_str()) {
-                        // Strip "models/" prefix
-                        models.push(name.replace("models/", ""));
-                    }
-                }
-            }
-        }
-        "OpenAI" | "OpenRouter" | "Ollama" => {
-            let url = format!("{}/models", base_url);
-            let mut req = client.get(url);
-            if api_key != "none" && !api_key.is_empty() {
-                req = req.header("Authorization", format!("Bearer {}", api_key));
-            }
-            let resp = req.send().await?.json::<serde_json::Value>().await?;
-            if let Some(data) = resp.get("data").and_then(|d| d.as_array()) {
-                for m in data {
-                    if let Some(id) = m.get("id").and_then(|i| i.as_str()) {
-                        models.push(id.to_string());
-                    }
-                }
-            } else if let Some(model_list) = resp.get("models").and_then(|m| m.as_array()) {
-                // Ollama format
-                for m in model_list {
-                    if let Some(name) = m.get("name").and_then(|n| n.as_str()) {
-                        models.push(name.to_string());
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-
-    // Apply search filter
-    if !filter.is_empty() {
-        let f = filter.to_lowercase();
-        models.retain(|m| m.to_lowercase().contains(&f));
-    }
-
-    // Sort and filter for chat models if possible (simple heuristic)
-    models.sort();
-    Ok(models)
+/// Extension trait for UI-friendly methods
+pub trait ConfigUiExt {
+    /// Get list of profile names
+    fn profile_names(&self) -> Vec<String>;
+    
+    /// Get profile info for UI display
+    fn get_profile_info(&self, name: &str) -> Option<ProfileInfo>;
+    
+    /// Get the active profile info
+    fn get_active_profile_info(&self) -> Option<ProfileInfo>;
+    
+    /// Set active profile
+    fn set_active_profile(&mut self, name: &str) -> anyhow::Result<()>;
+    
+    /// Create a new profile
+    fn create_profile(&mut self, name: &str) -> anyhow::Result<()>;
+    
+    /// Delete a profile
+    fn delete_profile(&mut self, name: &str) -> anyhow::Result<()>;
+    
+    /// Get base endpoint info
+    fn get_endpoint_info(&self) -> EndpointInfo;
+    
+    /// Get effective endpoint info (with profile overrides applied)
+    fn get_effective_endpoint_info(&self) -> EndpointInfo;
+    
+    /// Update base endpoint
+    fn update_endpoint(&mut self, provider: Provider, model: String, base_url: Option<String>, api_key: Option<String>) -> anyhow::Result<()>;
+    
+    /// Set profile model override
+    fn set_profile_model_override(&mut self, profile_name: &str, model: Option<String>) -> anyhow::Result<()>;
+    
+    /// Set profile max_iterations override
+    fn set_profile_max_iterations(&mut self, profile_name: &str, iterations: Option<usize>) -> anyhow::Result<()>;
+    
+    /// Check if configuration is initialized (has valid endpoint)
+    fn is_initialized(&self) -> bool;
+    
+    /// Save to default location
+    fn save_to_default_location(&self) -> anyhow::Result<()>;
 }
 
-/// Create default configuration (Empty)
-#[allow(dead_code)]
-pub fn create_default_config() -> Config {
-    Config::default()
+impl ConfigUiExt for ConfigV2 {
+    fn profile_names(&self) -> Vec<String> {
+        self.profiles.keys().cloned().collect()
+    }
+    
+    fn get_profile_info(&self, name: &str) -> Option<ProfileInfo> {
+        self.profiles.get(name).map(|p| ProfileInfo {
+            name: name.to_string(),
+            model_override: p.endpoint.as_ref().and_then(|e| e.model.clone()),
+            max_iterations: p.agent.as_ref().and_then(|a| a.max_iterations),
+        })
+    }
+    
+    fn get_active_profile_info(&self) -> Option<ProfileInfo> {
+        self.get_profile_info(&self.profile)
+    }
+    
+    fn set_active_profile(&mut self, name: &str) -> anyhow::Result<()> {
+        if !self.profiles.contains_key(name) {
+            anyhow::bail!("Profile '{}' does not exist", name);
+        }
+        self.profile = name.to_string();
+        Ok(())
+    }
+    
+    fn create_profile(&mut self, name: &str) -> anyhow::Result<()> {
+        if self.profiles.contains_key(name) {
+            anyhow::bail!("Profile '{}' already exists", name);
+        }
+        self.profiles.insert(name.to_string(), Profile::default());
+        Ok(())
+    }
+    
+    fn delete_profile(&mut self, name: &str) -> anyhow::Result<()> {
+        if name == self.profile {
+            anyhow::bail!("Cannot delete the active profile");
+        }
+        if self.profiles.remove(name).is_none() {
+            anyhow::bail!("Profile '{}' does not exist", name);
+        }
+        Ok(())
+    }
+    
+    fn get_endpoint_info(&self) -> EndpointInfo {
+        EndpointInfo {
+            provider: format!("{:?}", self.endpoint.provider).to_lowercase(),
+            base_url: self.endpoint.base_url.clone().unwrap_or_else(|| self.endpoint.provider.default_url()),
+            model: self.endpoint.model.clone(),
+            api_key_set: self.endpoint.api_key.is_some() && !self.endpoint.api_key.as_ref().unwrap().is_empty(),
+            timeout_seconds: self.endpoint.timeout_secs,
+        }
+    }
+    
+    fn get_effective_endpoint_info(&self) -> EndpointInfo {
+        let resolved = self.resolve_profile();
+        EndpointInfo {
+            provider: format!("{:?}", resolved.provider).to_lowercase(),
+            base_url: resolved.base_url.unwrap_or_else(|| resolved.provider.default_url()),
+            model: resolved.model,
+            api_key_set: resolved.api_key.is_some() && !resolved.api_key.as_ref().unwrap().is_empty(),
+            timeout_seconds: resolved.timeout_secs,
+        }
+    }
+    
+    fn update_endpoint(&mut self, provider: Provider, model: String, base_url: Option<String>, api_key: Option<String>) -> anyhow::Result<()> {
+        self.endpoint.provider = provider;
+        self.endpoint.model = model;
+        self.endpoint.base_url = base_url;
+        self.endpoint.api_key = api_key;
+        Ok(())
+    }
+    
+    fn set_profile_model_override(&mut self, profile_name: &str, model: Option<String>) -> anyhow::Result<()> {
+        let profile = self.profiles.get_mut(profile_name)
+            .ok_or_else(|| anyhow::anyhow!("Profile '{}' does not exist", profile_name))?;
+        
+        if let Some(ref m) = model {
+            profile.endpoint = Some(EndpointOverride {
+                model: Some(m.clone()),
+                api_key: profile.endpoint.as_ref().and_then(|e| e.api_key.clone()),
+            });
+        } else {
+            // Remove model override but keep api_key if present
+            let api_key = profile.endpoint.as_ref().and_then(|e| e.api_key.clone());
+            if api_key.is_some() {
+                profile.endpoint = Some(EndpointOverride { model: None, api_key });
+            } else {
+                profile.endpoint = None;
+            }
+        }
+        Ok(())
+    }
+    
+    fn set_profile_max_iterations(&mut self, profile_name: &str, iterations: Option<usize>) -> anyhow::Result<()> {
+        let profile = self.profiles.get_mut(profile_name)
+            .ok_or_else(|| anyhow::anyhow!("Profile '{}' does not exist", profile_name))?;
+        
+        if let Some(iters) = iterations {
+            profile.agent = Some(AgentOverride {
+                max_iterations: Some(iters),
+                main_model: profile.agent.as_ref().and_then(|a| a.main_model.clone()),
+                worker_model: profile.agent.as_ref().and_then(|a| a.worker_model.clone()),
+            });
+        } else {
+            // Remove max_iterations override but keep other agent settings
+            let main_model = profile.agent.as_ref().and_then(|a| a.main_model.clone());
+            let worker_model = profile.agent.as_ref().and_then(|a| a.worker_model.clone());
+            if main_model.is_some() || worker_model.is_some() {
+                profile.agent = Some(AgentOverride {
+                    max_iterations: None,
+                    main_model,
+                    worker_model,
+                });
+            } else {
+                profile.agent = None;
+            }
+        }
+        Ok(())
+    }
+    
+    fn is_initialized(&self) -> bool {
+        // Consider initialized if we have a valid provider and model
+        !self.endpoint.model.is_empty()
+    }
+    
+    fn save_to_default_location(&self) -> anyhow::Result<()> {
+        self.save(None)?;
+        Ok(())
+    }
+}
+
+impl std::str::FromStr for Provider {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "openai" => Ok(Provider::Openai),
+            "google" => Ok(Provider::Google),
+            "ollama" => Ok(Provider::Ollama),
+            "openrouter" => Ok(Provider::Openrouter),
+            "kimi" => Ok(Provider::Kimi),
+            "custom" => Ok(Provider::Custom),
+            _ => Err(()),
+        }
+    }
+}
+
+impl Provider {
+    /// Get default URL for this provider
+    pub fn default_url(&self) -> String {
+        match self {
+            Provider::Openai => "https://api.openai.com/v1".to_string(),
+            Provider::Google => "https://generativelanguage.googleapis.com".to_string(),
+            Provider::Ollama => "http://localhost:11434/v1".to_string(),
+            Provider::Openrouter => "https://openrouter.ai/api/v1".to_string(),
+            Provider::Kimi => "https://api.moonshot.cn/v1".to_string(),
+            Provider::Custom => "".to_string(),
+        }
+    }
 }

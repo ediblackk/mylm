@@ -450,33 +450,28 @@ impl LlmClient {
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
 
                 // Process complete SSE events
-                loop {
-                    if let Some(newline_pos) = buffer.find('\n') {
-                        let line = buffer[..newline_pos].to_string();
-                        buffer = buffer[newline_pos + 1..].to_string();
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].to_string();
+                    buffer = buffer[newline_pos + 1..].to_string();
 
-                        if line.starts_with("data: ") {
-                            let data = &line[6..];
-                            if data == "[DONE]" {
-                                yield StreamEvent::Done;
-                                return;
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        if data == "[DONE]" {
+                            yield StreamEvent::Done;
+                            return;
+                        }
+
+                        if let Ok(parsed) = serde_json::from_str::<OpenAiStreamResponse>(data) {
+                            if let Some(delta) = parsed.choices.first().and_then(|c| c.delta.content.as_ref()) {
+                                yield StreamEvent::Content(delta.clone());
                             }
-
-                            if let Ok(parsed) = serde_json::from_str::<OpenAiStreamResponse>(data) {
-                                if let Some(delta) = parsed.choices.first().and_then(|c| c.delta.content.as_ref()) {
-                                    yield StreamEvent::Content(delta.clone());
-                                }
-                                if let Some(usage) = parsed.usage {
-                                    yield StreamEvent::Usage(TokenUsage {
-                                        prompt_tokens: usage.prompt_tokens,
-                                        completion_tokens: usage.completion_tokens,
-                                        total_tokens: usage.total_tokens,
-                                    });
-                                }
+                            if let Some(usage) = parsed.usage {
+                                yield StreamEvent::Usage(TokenUsage {
+                                    prompt_tokens: usage.prompt_tokens,
+                                    completion_tokens: usage.completion_tokens,
+                                    total_tokens: usage.total_tokens,
+                                });
                             }
                         }
-                    } else {
-                        break;
                     }
                 }
             }

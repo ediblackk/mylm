@@ -3,7 +3,7 @@ use crate::agent::v2::jobs::JobRegistry;
 use crate::context::TerminalContext;
 use crate::executor::CommandExecutor;
 use crate::terminal::app::TuiEvent;
-use async_trait::async_trait;
+// use async_trait::async_trait;
 use serde::Deserialize;
 use std::error::Error as StdError;
 use std::sync::Arc;
@@ -50,7 +50,7 @@ impl ShellTool {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl Tool for ShellTool {
     fn name(&self) -> &str {
         "execute_command"
@@ -61,7 +61,25 @@ impl Tool for ShellTool {
     }
 
     fn usage(&self) -> &str {
-        "Pass the command string directly as arguments. Example: 'ls -la' or 'ps aux'."
+        "Either pass a raw command string (e.g. 'ls -la') OR a JSON object: { \"command\": \"ls -la\", \"background\": false }."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to execute (e.g. ls -la)"
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Run in background as a job",
+                    "default": false
+                }
+            },
+            "required": ["command"]
+        })
     }
 
     fn kind(&self) -> crate::agent::tool::ToolKind {
@@ -81,7 +99,7 @@ impl Tool for ShellTool {
             }
         };
 
-        let cmd = &shell_args.command;
+        let cmd = shell_args.command.trim();
 
         // 1. Safety Check (performed by executor)
         if let Err(e) = self.executor.check_safety(cmd) {
@@ -94,7 +112,7 @@ impl Tool for ShellTool {
                 let job_id = registry.create_job("shell", &format!("Executing: {}", cmd));
                 let registry = registry.clone();
                 let event_tx = self.event_tx.clone();
-                let cmd_clone = cmd.clone();
+                let cmd_clone = cmd.to_string();
                 let job_id_for_task = job_id.clone();
                 let description = format!("Running command: {}", cmd_clone);
 
@@ -152,17 +170,24 @@ impl Tool for ShellTool {
         }
 
         // 3. Request execution via TUI Event
+    // PTY Locking: Sequential execution enforcement for Shell tools
+    // This prevents parallel shell commands from colliding on the single session PTY.
+    lazy_static::lazy_static! {
+        static ref PTY_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    }
+    let _guard = PTY_MUTEX.lock().await;
+
         let (tx, rx) = oneshot::channel::<String>();
-        if let Err(e) = self.event_tx.send(TuiEvent::ExecuteTerminalCommand(args.to_string(), tx)) {
+        if let Err(e) = self.event_tx.send(TuiEvent::ExecuteTerminalCommand(cmd.to_string(), tx)) {
             crate::error_log!("Failed to send ExecuteTerminalCommand event: {}", e);
             return Err(format!("Internal error: Failed to communicate with TUI: {}", e).into());
         }
 
         // 4. Await result from PTY capture
-        crate::debug_log!("Awaiting output from TUI for command: {}", args);
+        crate::debug_log!("Awaiting output from TUI for command: {}", cmd);
         let output = match rx.await {
             Ok(out) => {
-                crate::info_log!("Received output for command: {} ({} bytes)", args, out.len());
+                crate::info_log!("Received output for command: {} ({} bytes)", cmd, out.len());
                 out
             }
             Err(e) => {
@@ -174,9 +199,9 @@ impl Tool for ShellTool {
 
         // 5. Auto-record to memory if enabled
         if let Some(store) = &self.memory_store {
-            if let Ok(memory_id) = store.record_command(args, &output, 0, self.session_id.clone()).await {
+            if let Ok(memory_id) = store.record_command(cmd, &output, 0, self.session_id.clone()).await {
                 if let Some(categorizer) = &self.categorizer {
-                    let content = format!("Command: {}\nOutput: {}", args, output);
+                    let content = format!("Command: {}\nOutput: {}", cmd, output);
                     if let Ok(category_id) = categorizer.categorize_memory(&content).await {
                         let _ = store.update_memory_category(memory_id, category_id.clone()).await;
                         let _ = categorizer.update_category_summary(&category_id).await;

@@ -14,10 +14,7 @@ pub enum CommandSafety {
 impl CommandSafety {
     /// Check if the command is dangerous
     pub fn is_dangerous(&self) -> bool {
-        match self {
-            CommandSafety::Dangerous(_) => true,
-            _ => false,
-        }
+        matches!(self, CommandSafety::Dangerous(_))
     }
 
     /// Get the reason for danger

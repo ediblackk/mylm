@@ -305,18 +305,12 @@ pub enum StreamEvent {
 impl StreamEvent {
     /// Check if this is a content event
     pub fn is_content(&self) -> bool {
-        match self {
-            StreamEvent::Content(_) => true,
-            _ => false,
-        }
+        matches!(self, StreamEvent::Content(_))
     }
 
     /// Check if streaming is done
     pub fn is_done(&self) -> bool {
-        match self {
-            StreamEvent::Done => true,
-            _ => false,
-        }
+        matches!(self, StreamEvent::Done)
     }
 
     /// Get content if available

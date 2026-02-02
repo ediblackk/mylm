@@ -2,6 +2,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use crate::config::Config;
 use crate::agent::{Agent, Tool};
+use crate::config::AgentVersion;
 use crate::agent::v2::core::AgentV2;
 use crate::llm::{LlmClient, LlmConfig};
 use crate::terminal::app::TuiEvent;
@@ -14,16 +15,20 @@ use crate::context::TerminalContext;
 pub async fn create_agent_for_session(
     config: &Config,
     event_tx: mpsc::UnboundedSender<TuiEvent>,
-) -> anyhow::Result<Agent> {
-    let endpoint_config = config.get_endpoint(None)?;
+) -> anyhow::Result<crate::agent::factory::BuiltAgent> {
+    // Resolve configuration with profile overrides
+    let resolved = config.resolve_profile();
+    
+    let base_url = resolved.base_url.unwrap_or_else(|| resolved.provider.default_url());
+    let api_key = resolved.api_key.unwrap_or_default();
 
     let llm_config = LlmConfig::new(
-        endpoint_config.provider.parse().map_err(|e| anyhow::anyhow!("{}", e))?,
-        endpoint_config.base_url.clone(),
-        endpoint_config.model.clone(),
-        Some(endpoint_config.api_key.clone()),
+        format!("{:?}", resolved.provider).to_lowercase().parse().map_err(|e| anyhow::anyhow!("{}", e))?,
+        base_url.clone(),
+        resolved.model.clone(),
+        Some(api_key.clone()),
     )
-    .with_memory(config.memory.clone());
+    .with_memory(config.features.memory.clone());
     
     let client = Arc::new(LlmClient::new(llm_config)?);
 
@@ -42,17 +47,16 @@ pub async fn create_agent_for_session(
     let state_store = Arc::new(std::sync::RwLock::new(StateStore::new()?));
 
     // Executor
-    let mut allowlist = CommandAllowlist::new();
-    allowlist.apply_config(&config.commands);
+    let allowlist = CommandAllowlist::new();
     let safety_checker = SafetyChecker::new();
     let executor = Arc::new(CommandExecutor::new(allowlist, safety_checker));
 
     // Categorizer
     let categorizer = Arc::new(MemoryCategorizer::new(client.clone(), store.clone()));
 
-    // Tools
-    let tools: Vec<Box<dyn Tool>> = vec![
-        Box::new(crate::agent::tools::shell::ShellTool::new(
+    // Tools - convert Box to Arc for the agent
+    let tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(crate::agent::tools::shell::ShellTool::new(
             executor,
             ctx.clone(),
             event_tx.clone(),
@@ -61,49 +65,76 @@ pub async fn create_agent_for_session(
             None,
             None // JobRegistry not available in Agent v1
         )),
-        Box::new(crate::agent::tools::web_search::WebSearchTool::new(
-            config.web_search.clone(), 
+        Arc::new(crate::agent::tools::web_search::WebSearchTool::new(
+            config.features.web_search.clone(), 
             event_tx.clone()
         )),
-        Box::new(crate::agent::tools::memory::MemoryTool::new(store.clone())),
-        Box::new(crate::agent::tools::crawl::CrawlTool::new(event_tx.clone())),
-        Box::new(crate::agent::tools::fs::FileReadTool),
-        Box::new(crate::agent::tools::fs::FileWriteTool),
-        Box::new(crate::agent::tools::git::GitStatusTool),
-        Box::new(crate::agent::tools::git::GitLogTool),
-        Box::new(crate::agent::tools::git::GitDiffTool),
-        Box::new(crate::agent::tools::state::StateTool::new(state_store.clone())),
-        Box::new(crate::agent::tools::system::SystemMonitorTool::new()),
-        Box::new(crate::agent::tools::terminal_sight::TerminalSightTool::new(event_tx.clone())),
-        Box::new(crate::agent::tools::wait::WaitTool),
+        Arc::new(crate::agent::tools::memory::MemoryTool::new(store.clone())),
+        Arc::new(crate::agent::tools::crawl::CrawlTool::new(event_tx.clone())),
+        Arc::new(crate::agent::tools::fs::FileReadTool),
+        Arc::new(crate::agent::tools::fs::FileWriteTool),
+        Arc::new(crate::agent::tools::git::GitStatusTool),
+        Arc::new(crate::agent::tools::git::GitLogTool),
+        Arc::new(crate::agent::tools::git::GitDiffTool),
+        Arc::new(crate::agent::tools::state::StateTool::new(state_store.clone())),
+        Arc::new(crate::agent::tools::system::SystemMonitorTool::new()),
+        Arc::new(crate::agent::tools::terminal_sight::TerminalSightTool::new(event_tx.clone())),
+        Arc::new(crate::agent::tools::wait::WaitTool),
     ];
 
-    let system_prompt = crate::config::prompt::build_system_prompt(&ctx, "default", Some("WebSocket Session")).await?;
 
-    Ok(Agent::new_with_iterations(
-        client,
-        tools,
-        system_prompt,
-        config.agent.max_iterations,
-        config.agent.version,
-        Some(store),
-        Some(categorizer),
-    ))
+    let system_prompt = crate::config::build_system_prompt(
+        &ctx,
+        "default",
+        Some("WebSocket Session"),
+        Some(&config.features.prompts)
+    ).await?;
+
+    // Determine agent version based on profile settings
+    let agent_version = if config.profiles.get(&config.profile).and_then(|p| p.agent.as_ref()).is_some() {
+        AgentVersion::V2
+    } else {
+        AgentVersion::V1
+    };
+
+    match agent_version {
+        AgentVersion::V2 => {
+            let agent = create_agent_v2_for_session(config, event_tx).await?;
+            Ok(crate::agent::factory::BuiltAgent::V2(agent))
+        }
+        AgentVersion::V1 => {
+            let agent = Agent::new_with_iterations(
+                client,
+                tools,
+                system_prompt,
+                resolved.agent.max_iterations,
+                agent_version,
+                Some(store),
+                Some(categorizer),
+                None, // job_registry
+            ).await;
+            Ok(crate::agent::factory::BuiltAgent::V1(agent))
+        }
+    }
 }
 
 pub async fn create_agent_v2_for_session(
     config: &Config,
     event_tx: mpsc::UnboundedSender<TuiEvent>,
 ) -> anyhow::Result<AgentV2> {
-    let endpoint_config = config.get_endpoint(None)?;
+    // Resolve configuration with profile overrides
+    let resolved = config.resolve_profile();
+    
+    let base_url = resolved.base_url.unwrap_or_else(|| resolved.provider.default_url());
+    let api_key = resolved.api_key.unwrap_or_default();
 
     let llm_config = LlmConfig::new(
-        endpoint_config.provider.parse().map_err(|e| anyhow::anyhow!("{}", e))?,
-        endpoint_config.base_url.clone(),
-        endpoint_config.model.clone(),
-        Some(endpoint_config.api_key.clone()),
+        format!("{:?}", resolved.provider).to_lowercase().parse().map_err(|e| anyhow::anyhow!("{}", e))?,
+        base_url.clone(),
+        resolved.model.clone(),
+        Some(api_key.clone()),
     )
-    .with_memory(config.memory.clone());
+    .with_memory(config.features.memory.clone());
     
     let client = Arc::new(LlmClient::new(llm_config)?);
 
@@ -122,8 +153,7 @@ pub async fn create_agent_v2_for_session(
     let state_store = Arc::new(std::sync::RwLock::new(StateStore::new()?));
 
     // Executor
-    let mut allowlist = CommandAllowlist::new();
-    allowlist.apply_config(&config.commands);
+    let allowlist = CommandAllowlist::new();
     let safety_checker = SafetyChecker::new();
     let executor = Arc::new(CommandExecutor::new(allowlist, safety_checker));
 
@@ -140,8 +170,8 @@ pub async fn create_agent_v2_for_session(
     let job_registry = crate::agent::v2::jobs::JobRegistry::new();
 
     // Tools for AgentV2 - includes the new Delegate tool
-    let tools: Vec<Box<dyn Tool>> = vec![
-        Box::new(crate::agent::tools::shell::ShellTool::new(
+    let tools: Vec<Arc<dyn Tool>> = vec![
+        Arc::new(crate::agent::tools::shell::ShellTool::new(
             executor,
             ctx.clone(),
             event_tx.clone(),
@@ -150,22 +180,22 @@ pub async fn create_agent_v2_for_session(
             None,
             Some(job_registry.clone()) // Share registry with ShellTool if needed
         )),
-        Box::new(crate::agent::tools::web_search::WebSearchTool::new(
-            config.web_search.clone(),
+        Arc::new(crate::agent::tools::web_search::WebSearchTool::new(
+            config.features.web_search.clone(),
             event_tx.clone()
         )),
-        Box::new(crate::agent::tools::memory::MemoryTool::new(store.clone())),
-        Box::new(crate::agent::tools::crawl::CrawlTool::new(event_tx.clone())),
-        Box::new(crate::agent::tools::fs::FileReadTool),
-        Box::new(crate::agent::tools::fs::FileWriteTool),
-        Box::new(crate::agent::tools::git::GitStatusTool),
-        Box::new(crate::agent::tools::git::GitLogTool),
-        Box::new(crate::agent::tools::git::GitDiffTool),
-        Box::new(crate::agent::tools::state::StateTool::new(state_store.clone())),
-        Box::new(crate::agent::tools::system::SystemMonitorTool::new()),
-        Box::new(crate::agent::tools::terminal_sight::TerminalSightTool::new(event_tx.clone())),
-        Box::new(crate::agent::tools::wait::WaitTool),
-        Box::new(crate::agent::tools::delegate::DelegateTool::new(
+        Arc::new(crate::agent::tools::memory::MemoryTool::new(store.clone())),
+        Arc::new(crate::agent::tools::crawl::CrawlTool::new(event_tx.clone())),
+        Arc::new(crate::agent::tools::fs::FileReadTool),
+        Arc::new(crate::agent::tools::fs::FileWriteTool),
+        Arc::new(crate::agent::tools::git::GitStatusTool),
+        Arc::new(crate::agent::tools::git::GitLogTool),
+        Arc::new(crate::agent::tools::git::GitDiffTool),
+        Arc::new(crate::agent::tools::state::StateTool::new(state_store.clone())),
+        Arc::new(crate::agent::tools::system::SystemMonitorTool::new()),
+        Arc::new(crate::agent::tools::terminal_sight::TerminalSightTool::new(event_tx.clone())),
+        Arc::new(crate::agent::tools::wait::WaitTool),
+        Arc::new(crate::agent::tools::delegate::DelegateTool::new(
             client.clone(),
             scribe.clone(),
             job_registry.clone(), // Share registry with DelegateTool
@@ -175,17 +205,24 @@ pub async fn create_agent_v2_for_session(
         )),
     ];
 
-    let system_prompt = crate::config::prompt::build_system_prompt(&ctx, "default", Some("WebSocket Session")).await?;
+
+    let system_prompt = crate::config::build_system_prompt(
+        &ctx,
+        "default",
+        Some("WebSocket Session"),
+        Some(&config.features.prompts)
+    ).await?;
 
     Ok(AgentV2::new_with_iterations(
         client,
         scribe,
         tools,
         system_prompt,
-        config.agent.max_iterations,
-        config.agent.version,
+        resolved.agent.max_iterations,
+        AgentVersion::V2,
         Some(store),
         Some(categorizer),
         Some(job_registry),
+        None, // capabilities_context is already included in system_prompt
     ))
 }

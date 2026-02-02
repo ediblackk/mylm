@@ -2,7 +2,7 @@ use anyhow::Result;
 use console::Style;
 use dialoguer::{Confirm, Password};
 use inquire::{Select as InquireSelect, Text};
-use mylm_core::config::Config;
+use mylm_core::config::{Config, ConfigUiExt, Provider, Profile};
 use serde_json::Value;
 
 /// Main hub choice enum
@@ -14,6 +14,7 @@ pub enum HubChoice {
     StartTui,
     QuickQuery,
     ManageSessions,
+    BackgroundJobs,
     Configuration,
     Exit,
 }
@@ -34,6 +35,7 @@ impl std::fmt::Display for HubChoice {
             HubChoice::QuickQuery => write!(f, "⚡ Quick Query"),
             HubChoice::Configuration => write!(f, "⚙️  Configuration"),
             HubChoice::ManageSessions => write!(f, "📂 Manage Sessions"),
+            HubChoice::BackgroundJobs => write!(f, "🕒 Background Jobs"),
             HubChoice::Exit => write!(f, "❌ Exit"),
         }
     }
@@ -50,13 +52,25 @@ pub enum SettingsMenuChoice {
     Back,
 }
 
+impl std::fmt::Display for SettingsMenuChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SettingsMenuChoice::ManageProfiles => write!(f, "📂 [1] Manage Profiles"),
+            SettingsMenuChoice::EndpointSetup => write!(f, "🔌 [2] Endpoint Setup"),
+            SettingsMenuChoice::ToggleTmuxAutostart => write!(f, "🔄 [3] Toggle Tmux Autostart"),
+            SettingsMenuChoice::WebSearch => write!(f, "🌐 [4] Web Search"),
+            SettingsMenuChoice::GeneralSettings => write!(f, "⚙️  [5] General Settings"),
+            SettingsMenuChoice::Back => write!(f, "⬅️  [6] Back"),
+        }
+    }
+}
+
 /// Web search configuration submenu choices
 #[derive(Debug, PartialEq)]
 pub enum WebSearchMenuChoice {
     ToggleEnabled,
     SetProvider,
     SetApiKey,
-    SetModel,
     Back,
 }
 
@@ -66,21 +80,7 @@ impl std::fmt::Display for WebSearchMenuChoice {
             WebSearchMenuChoice::ToggleEnabled => write!(f, "✅ Toggle Enabled"),
             WebSearchMenuChoice::SetProvider => write!(f, "🧭 Set Provider"),
             WebSearchMenuChoice::SetApiKey => write!(f, "🔑 Set API Key"),
-            WebSearchMenuChoice::SetModel => write!(f, "🧠 Set Model (Kimi only)"),
             WebSearchMenuChoice::Back => write!(f, "⬅️  Back"),
-        }
-    }
-}
-
-impl std::fmt::Display for SettingsMenuChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SettingsMenuChoice::ManageProfiles => write!(f, "📂 [1] Manage Profiles"),
-            SettingsMenuChoice::EndpointSetup => write!(f, "🔌 [2] Endpoint Setup"),
-            SettingsMenuChoice::ToggleTmuxAutostart => write!(f, "🔄 [3] Toggle Tmux Autostart"),
-            SettingsMenuChoice::WebSearch => write!(f, "🌐 [4] Web Search"),
-            SettingsMenuChoice::GeneralSettings => write!(f, "⚙️  [5] General Settings (Context, Memory, etc.)"),
-            SettingsMenuChoice::Back => write!(f, "⬅️  [6] Back"),
         }
     }
 }
@@ -100,33 +100,9 @@ impl std::fmt::Display for ProfileMenuChoice {
         match self {
             ProfileMenuChoice::SelectProfile => write!(f, "👤 [1] Select Profile"),
             ProfileMenuChoice::CreateProfile => write!(f, "➕ [2] Create New Profile"),
-            ProfileMenuChoice::EditProfile => write!(f, "✏️  [3] Edit Profile (Endpoint/Model/Prompt)"),
+            ProfileMenuChoice::EditProfile => write!(f, "✏️  [3] Edit Profile Overrides"),
             ProfileMenuChoice::DeleteProfile => write!(f, "🗑️  [4] Delete Profile"),
             ProfileMenuChoice::Back => write!(f, "⬅️  [5] Back"),
-        }
-    }
-}
-
-/// Endpoint management submenu choices
-#[derive(Debug, PartialEq)]
-pub enum EndpointMenuChoice {
-    SetActiveProfileEndpoint,
-    SetDefaultEndpoint,
-    CreateEndpoint,
-    EditEndpoint,
-    DeleteEndpoint,
-    Back,
-}
-
-impl std::fmt::Display for EndpointMenuChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EndpointMenuChoice::SetActiveProfileEndpoint => write!(f, "🎯 [1] Set Active Profile Endpoint"),
-            EndpointMenuChoice::SetDefaultEndpoint => write!(f, "🌍 [2] Set Global Default Endpoint (Fallback)"),
-            EndpointMenuChoice::CreateEndpoint => write!(f, "➕ [3] Create New Endpoint"),
-            EndpointMenuChoice::EditEndpoint => write!(f, "✏️  [4] Edit Endpoint (Provider/Key/URL)"),
-            EndpointMenuChoice::DeleteEndpoint => write!(f, "🗑️  [5] Delete Endpoint"),
-            EndpointMenuChoice::Back => write!(f, "⬅️  [6] Back"),
         }
     }
 }
@@ -164,6 +140,7 @@ pub async fn show_hub(config: &Config) -> Result<HubChoice> {
         HubChoice::StartTui,
         HubChoice::QuickQuery,
         HubChoice::ManageSessions,
+        HubChoice::BackgroundJobs,
         HubChoice::Configuration,
         HubChoice::Exit,
     ]);
@@ -204,12 +181,6 @@ pub fn show_profile_select(profiles: Vec<String>) -> Result<Option<String>> {
     }
 }
 
-fn inquire_default_index(options: &[String], current: Option<&str>) -> usize {
-    let Some(cur) = current else {
-        return 0;
-    };
-    options.iter().position(|x| x == cur).unwrap_or(0)
-}
 
 // ============================================================================
 // SETTINGS DASHBOARD - Main Configuration Menu
@@ -217,7 +188,7 @@ fn inquire_default_index(options: &[String], current: Option<&str>) -> usize {
 
 /// Main settings dashboard - presents a clean Menu System
 pub fn show_settings_dashboard(config: &Config) -> Result<SettingsMenuChoice> {
-    // Display current state (Profile + linked Endpoint info)
+    // Display current state
     display_current_config(config);
 
     let options = vec![
@@ -241,35 +212,28 @@ pub fn show_settings_dashboard(config: &Config) -> Result<SettingsMenuChoice> {
 }
 
 pub fn show_web_search_menu(config: &Config) -> Result<WebSearchMenuChoice> {
-    let enabled = if config.web_search.enabled { "On" } else { "Off" };
-    let provider = if config.web_search.provider.trim().is_empty() {
-        "(unset)"
-    } else {
-        config.web_search.provider.as_str()
+    let enabled = if config.features.web_search.enabled { "On" } else { "Off" };
+    let provider = match config.features.web_search.provider {
+        mylm_core::config::SearchProvider::Kimi => "Kimi",
+        mylm_core::config::SearchProvider::Serpapi => "SerpApi",
+        mylm_core::config::SearchProvider::Brave => "Brave",
     };
-    let key_status = if config.web_search.api_key.trim().is_empty() {
+    let key_status = if config.features.web_search.api_key.as_ref().is_none_or(|k| k.is_empty()) {
         "Not set"
     } else {
         "Set"
-    };
-    let model = if config.web_search.model.trim().is_empty() {
-        "(unset)"
-    } else {
-        config.web_search.model.as_str()
     };
 
     println!("\n🌐 Web Search Settings");
     println!("  Enabled:   {}", enabled);
     println!("  Provider:  {}", provider);
     println!("  API Key:   {}", key_status);
-    println!("  Model:     {}", model);
     println!();
 
     let options = vec![
         WebSearchMenuChoice::ToggleEnabled,
         WebSearchMenuChoice::SetProvider,
         WebSearchMenuChoice::SetApiKey,
-        WebSearchMenuChoice::SetModel,
         WebSearchMenuChoice::Back,
     ];
 
@@ -282,59 +246,39 @@ pub fn show_web_search_menu(config: &Config) -> Result<WebSearchMenuChoice> {
 
 /// Display current configuration summary
 fn display_current_config(config: &Config) {
-    let profile = config.get_active_profile();
-    let profile_name = &config.active_profile;
-
-    // Effective endpoint = profile-linked endpoint (if set), otherwise global default (fallback).
-    // Note: Config::get_endpoint(None) has additional fallback behavior (single endpoint convenience);
-    // for the UI, we label the intent explicitly.
-    let (effective_endpoint_name, effective_source_label) = if let Some(p) = profile {
-        if !p.endpoint.is_empty() {
-            (p.endpoint.clone(), "profile-linked")
-        } else if !config.default_endpoint.is_empty() {
-            (config.default_endpoint.clone(), "global default")
-        } else {
-            ("(none)".to_string(), "unconfigured")
-        }
-    } else if !config.default_endpoint.is_empty() {
-        (config.default_endpoint.clone(), "global default")
-    } else {
-        ("(none)".to_string(), "unconfigured")
-    };
+    let profile_name = &config.profile;
+    let endpoint_info = config.get_endpoint_info();
+    let effective_info = config.get_effective_endpoint_info();
+    let profile_info = config.get_active_profile_info();
 
     println!("\n📊 Current Configuration");
     println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
 
-    if let Some(p) = profile {
-        // Get the linked endpoint - if profile has no endpoint, fallback to default
-        let endpoint_info = config.get_endpoint(if p.endpoint.is_empty() { None } else { Some(&p.endpoint) }).ok();
-
-        println!("  Profile: {}", Style::new().green().bold().apply_to(&profile_name));
-        println!("  ├─ Active Profile Endpoint: {}", if p.endpoint.is_empty() { "(uses global default)" } else { &p.endpoint });
-        println!("  ├─ Global Default Endpoint: {}", if config.default_endpoint.is_empty() { "(none)" } else { &config.default_endpoint });
-        println!("  ├─ Effective Endpoint: {} ({})", effective_endpoint_name, effective_source_label);
-
-        if let Some(e) = endpoint_info {
-            println!("  │   ├─ Provider: {}", e.provider);
-            println!("  │   ├─ Base URL: {}", e.base_url);
-            println!("  │   ├─ Model: {}", e.model);
-            println!("  │   └─ API Key: {}",
-                if e.api_key.is_empty() || e.api_key == "none" {
-                    "❌ Not Set".to_string()
-                } else {
-                    "✅ Set".to_string()
-                }
-            );
-        } else {
-            println!("  │   └─ ⚠️  Endpoint not found!");
+    println!("  Active Profile: {}", Style::new().green().bold().apply_to(profile_name));
+    
+    if let Some(ref p) = profile_info {
+        if let Some(ref model) = p.model_override {
+            println!("  ├─ Model Override: {}", model);
         }
-
-        println!("  └─ Prompt: {}", p.prompt);
-    } else {
-        println!("  ⚠️  No profile selected!");
-        println!("  ├─ Global Default Endpoint: {}", if config.default_endpoint.is_empty() { "(none)" } else { &config.default_endpoint });
-        println!("  └─ Effective Endpoint: {} ({})", effective_endpoint_name, effective_source_label);
+        if let Some(iters) = p.max_iterations {
+            println!("  ├─ Max Iterations: {}", iters);
+        }
     }
+
+    println!("\n  Base Endpoint:");
+    println!("  ├─ Provider: {}", endpoint_info.provider);
+    println!("  ├─ Base URL: {}", endpoint_info.base_url);
+    println!("  ├─ Model: {}", endpoint_info.model);
+    println!("  ├─ API Key: {}", 
+        if endpoint_info.api_key_set { "✅ Set" } else { "❌ Not Set" }
+    );
+
+    println!("\n  Effective Configuration (Profile Applied):");
+    println!("  ├─ Model: {}", effective_info.model);
+    println!("  ├─ Provider: {}", effective_info.provider);
+    println!("  └─ API Key: {}", 
+        if effective_info.api_key_set { "✅ Set" } else { "❌ Not Set" }
+    );
 
     println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
     println!();
@@ -375,66 +319,65 @@ pub async fn handle_create_profile(config: &mut Config) -> Result<bool> {
     }
 
     // Check for duplicate
-    if config.profiles.iter().any(|p| p.name == name) {
+    if config.profiles.contains_key(&name) {
         println!("⚠️  Profile '{}' already exists.", name);
         return Ok(false);
     }
 
-    // Select endpoint
-    let endpoint = if config.endpoints.is_empty() {
-        if Confirm::new()
-            .with_prompt("No endpoints defined. Create one now?")
-            .default(true)
-            .interact()?
-        {
-            // Inline endpoint creation
-            // We need to release the mutable borrow to call handle_create_endpoint
-            // BUT handle_create_endpoint takes &mut Config.
-            // Since we are inside a function taking &mut Config, we can call it.
-            // However, we need to handle the return value and then re-check endpoints.
-            handle_create_endpoint(config).await?;
-            // Now try selecting again
-            select_endpoint(config)?
-        } else {
-             println!("⚠️  Creating profile without an endpoint. You must link one later.");
-             None
+    // Ask for model override
+    let model_choice = InquireSelect::new(
+        "Model override:",
+        vec!["Use base endpoint model", "Override with specific model", "Skip for now"]
+    ).prompt()?;
+
+    let model_override = match model_choice {
+        "Override with specific model" => {
+            let model = Text::new("Model name:").prompt()?;
+            if model.trim().is_empty() { None } else { Some(model) }
         }
-    } else {
-        select_endpoint(config)?
+        _ => None,
     };
 
-    let endpoint_name = endpoint.unwrap_or_default();
+    // Ask for max_iterations override
+    let iter_choice = InquireSelect::new(
+        "Max iterations override:",
+        vec!["Use default (10)", "Override with custom value", "Skip for now"]
+    ).prompt()?;
 
-    // Get model override (optional)
-    // If we have no endpoint, we can't fetch models, so manual entry only or skip
-    let model = if !endpoint_name.is_empty() {
-        select_or_enter_model(config, &endpoint_name)?
-    } else {
-        None
+    let max_iterations = match iter_choice {
+        "Override with custom value" => {
+            let iters: String = Text::new("Max iterations:").prompt()?;
+            iters.parse::<usize>().ok()
+        }
+        _ => None,
     };
 
-    // Get prompt
-    let prompt = Text::new("Prompt name (without .md extension):")
-        .with_default("default")
-        .prompt()?;
+    // Create profile with overrides
+    let mut profile = Profile::default();
+    
+    if model_override.is_some() || max_iterations.is_some() {
+        profile.endpoint = model_override.clone().map(|m| mylm_core::config::EndpointOverride {
+            model: Some(m),
+            api_key: None,
+        });
+        profile.agent = max_iterations.map(|i| mylm_core::config::AgentOverride {
+            max_iterations: Some(i),
+            main_model: None,
+            worker_model: None,
+        });
+    }
 
-    // Create and add profile
-    config.profiles.push(mylm_core::config::Profile {
-        name,
-        endpoint: endpoint_name,
-        prompt,
-        model,
-    });
+    config.profiles.insert(name.clone(), profile);
 
-    println!("✅ Profile created successfully!");
+    println!("✅ Profile '{}' created successfully!", name);
     config.save_to_default_location()?;
 
     Ok(true)
 }
 
-/// Handle profile editing (Endpoint/Model/Prompt)
+/// Handle profile editing
 pub fn handle_edit_profile(config: &mut Config) -> Result<bool> {
-    let profiles: Vec<String> = config.profiles.iter().map(|p| p.name.clone()).collect();
+    let profiles: Vec<String> = config.profile_names();
     if profiles.is_empty() {
         println!("⚠️  No profiles to edit.");
         return Ok(false);
@@ -443,34 +386,49 @@ pub fn handle_edit_profile(config: &mut Config) -> Result<bool> {
     let profile_name = InquireSelect::new("Select profile to edit:", profiles).prompt()?;
 
     // Edit options for profile
-    let edit_options = vec!["Endpoint", "Model Override", "Prompt", "Back"];
+    let edit_options = vec!["Model Override", "Max Iterations", "Back"];
     let edit_selection = InquireSelect::new("What to edit:", edit_options).prompt()?;
 
     match edit_selection {
-        "Endpoint" => {
-            let new_endpoint = select_endpoint(config)?;
-
-            if let Some(p) = config.profiles.iter_mut().find(|p| p.name == profile_name) {
-                p.endpoint = new_endpoint.unwrap_or_default();
-            }
-            println!("✅ Endpoint updated!");
-        }
         "Model Override" => {
-            let profile = config.profiles.iter().find(|p| p.name == profile_name).unwrap();
-            let new_model = select_or_enter_model(config, &profile.endpoint)?;
-
-            if let Some(p) = config.profiles.iter_mut().find(|p| p.name == profile_name) {
-                p.model = new_model;
-            }
-            println!("✅ Model updated!");
+            let current = config.get_profile_info(&profile_name)
+                .and_then(|p| p.model_override)
+                .unwrap_or_else(|| "(none)".to_string());
+            
+            println!("Current model override: {}", current);
+            
+            let new_model: String = Text::new("New model override (empty to clear):")
+                .with_initial_value(&current)
+                .prompt()?;
+            
+            let override_value = if new_model.trim().is_empty() || new_model == "(none)" {
+                None
+            } else {
+                Some(new_model)
+            };
+            
+            config.set_profile_model_override(&profile_name, override_value)?;
+            println!("✅ Model override updated!");
         }
-        "Prompt" => {
-            let new_prompt = Text::new("Prompt name (without .md extension):").prompt()?;
-
-            if let Some(p) = config.profiles.iter_mut().find(|p| p.name == profile_name) {
-                p.prompt = new_prompt;
-            }
-            println!("✅ Prompt updated!");
+        "Max Iterations" => {
+            let current = config.get_profile_info(&profile_name)
+                .and_then(|p| p.max_iterations.map(|i| i.to_string()))
+                .unwrap_or_else(|| "(default)".to_string());
+            
+            println!("Current max iterations: {}", current);
+            
+            let new_iters: String = Text::new("New max iterations (empty to clear):")
+                .with_initial_value(&current)
+                .prompt()?;
+            
+            let override_value = if new_iters.trim().is_empty() || new_iters == "(default)" {
+                None
+            } else {
+                new_iters.parse::<usize>().ok()
+            };
+            
+            config.set_profile_max_iterations(&profile_name, override_value)?;
+            println!("✅ Max iterations updated!");
         }
         _ => return Ok(false),
     }
@@ -481,7 +439,7 @@ pub fn handle_edit_profile(config: &mut Config) -> Result<bool> {
 
 /// Handle profile deletion
 pub fn handle_delete_profile(config: &mut Config) -> Result<bool> {
-    let profiles: Vec<String> = config.profiles.iter().map(|p| p.name.clone()).collect();
+    let profiles: Vec<String> = config.profile_names();
     if profiles.is_empty() {
         println!("⚠️  No profiles to delete.");
         return Ok(false);
@@ -490,7 +448,7 @@ pub fn handle_delete_profile(config: &mut Config) -> Result<bool> {
     let profile_name = InquireSelect::new("Select profile to delete:", profiles).prompt()?;
 
     // Cannot delete active profile
-    if profile_name == config.active_profile {
+    if profile_name == config.profile {
         println!("⚠️  Cannot delete the active profile. Switch to another profile first.");
         return Ok(false);
     }
@@ -500,9 +458,7 @@ pub fn handle_delete_profile(config: &mut Config) -> Result<bool> {
         .default(false)
         .interact()?
     {
-        if let Some(idx) = config.profiles.iter().position(|p| p.name == profile_name) {
-            config.profiles.remove(idx);
-        }
+        config.delete_profile(&profile_name)?;
         println!("✅ Profile deleted.");
         config.save_to_default_location()?;
     }
@@ -511,221 +467,108 @@ pub fn handle_delete_profile(config: &mut Config) -> Result<bool> {
 }
 
 // ============================================================================
-// ENDPOINT MANAGEMENT
+// ENDPOINT SETUP (V2 - Single Base Endpoint)
 // ============================================================================
 
-/// Show endpoint management submenu
-pub fn show_endpoints_menu(_config: &Config) -> Result<EndpointMenuChoice> {
+/// Handle base endpoint configuration (V2)
+pub async fn handle_setup_endpoint(config: &mut Config) -> Result<bool> {
+    let current = config.get_endpoint_info();
+    
+    println!("\n🔌 Endpoint Configuration");
+    println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
+    println!("Current settings:");
+    println!("  Provider: {}", current.provider);
+    println!("  Model: {}", current.model);
+    println!("  Base URL: {}", current.base_url);
+    println!("  API Key: {}", if current.api_key_set { "✅ Set" } else { "❌ Not Set" });
+    println!();
+
     let options = vec![
-        EndpointMenuChoice::SetActiveProfileEndpoint,
-        EndpointMenuChoice::SetDefaultEndpoint,
-        EndpointMenuChoice::CreateEndpoint,
-        EndpointMenuChoice::EditEndpoint,
-        EndpointMenuChoice::DeleteEndpoint,
-        EndpointMenuChoice::Back,
+        "Change Provider",
+        "Change Model",
+        "Change Base URL",
+        "Change API Key",
+        "Test Connection",
+        "Back",
     ];
 
-    let ans: Result<EndpointMenuChoice, _> = InquireSelect::new(
-        "Manage Endpoints",
-        options
-    ).prompt();
+    loop {
+        let choice = InquireSelect::new("Endpoint Setup:", options.clone()).prompt()?;
 
-    match ans {
-        Ok(choice) => Ok(choice),
-        Err(_) => Ok(EndpointMenuChoice::Back),
-    }
-}
-
-/// Handle endpoint creation (full details: Provider, API Key, URL, Model)
-pub async fn handle_create_endpoint(config: &mut Config) -> Result<bool> {
-    let name = Text::new("Endpoint name:").prompt()?;
-    if name.trim().is_empty() {
-        println!("⚠️  Endpoint name cannot be empty.");
-        return Ok(false);
-    }
-
-    if config.endpoints.iter().any(|e| e.name == name) {
-        println!("⚠️  Endpoint '{}' already exists.", name);
-        return Ok(false);
-    }
-
-    // Get provider
-    let (provider_id, provider_display) = select_provider()?;
-
-    // Get base URL
-    // Skip URL prompt for known providers where URL is fixed
-    let base_url = if ["OpenAI", "Google (Gemini)", "OpenRouter"].contains(&provider_display.as_str()) {
-        get_default_url(&provider_display)
-    } else {
-        Text::new("Base URL:")
-            .with_initial_value(&get_default_url(&provider_display))
-            .prompt()?
-    };
-
-    // Get API key
-    let api_key = if provider_display != "Ollama" {
-        Password::new()
-            .with_prompt("API Key")
-            .interact()?
-    } else {
-        "none".to_string()
-    };
-
-    // Get model
-    let method = InquireSelect::new("Model Selection Method:", vec!["Fetch from API", "Enter Manually"]).prompt()?;
-    
-    let model = if method == "Fetch from API" {
-        match fetch_models(&base_url, &api_key).await {
-            Ok(models) => {
-                InquireSelect::new("Select Model:", models).prompt()?
+        match choice {
+            "Change Provider" => {
+                let (provider_id, provider_display) = select_provider()?;
+                if let Ok(provider) = provider_id.parse::<Provider>() {
+                    // Auto-update base URL when provider changes
+                    let new_url = provider.default_url();
+                    config.endpoint.provider = provider;
+                    config.endpoint.base_url = Some(new_url);
+                    println!("✅ Provider updated to {}", provider_display);
+                    config.save_to_default_location()?;
+                }
             }
-            Err(e) => {
-                println!("⚠️  Failed to fetch models: {}. Falling back to manual entry.", e);
-                Text::new("Model name:").prompt()?
-            }
-        }
-    } else {
-        Text::new("Model name:").prompt()?
-    };
-
-    // Create endpoint
-    config.endpoints.push(mylm_core::config::endpoints::EndpointConfig {
-        name: name.clone(),
-        provider: provider_id,
-        base_url,
-        model,
-        api_key,
-        timeout_seconds: 60,
-        input_price_per_1m: 0.0,
-        output_price_per_1m: 0.0,
-        max_context_tokens: 32768,
-        condense_threshold: 0.8,
-    });
-
-    // If this is the first endpoint or no default is set, make it the default
-    if config.default_endpoint.is_empty() {
-        config.default_endpoint = name.clone();
-    }
-
-    println!("✅ Endpoint created successfully!");
-    config.save_to_default_location()?;
-
-    Ok(true)
-}
-
-/// Handle endpoint editing (Provider, API Key, URL, Model)
-pub async fn handle_edit_endpoint(config: &mut Config) -> Result<bool> {
-    let endpoints: Vec<String> = config.endpoints.iter().map(|e| e.name.clone()).collect();
-    if endpoints.is_empty() {
-        println!("⚠️  No endpoints to edit.");
-        return Ok(false);
-    }
-
-    let endpoint_name = InquireSelect::new("Select endpoint to edit:", endpoints).prompt()?;
-
-    // Edit options
-    let edit_options = vec!["Provider", "Base URL", "API Key", "Model", "Back"];
-    let edit_selection = InquireSelect::new("What to edit:", edit_options).prompt()?;
-
-    match edit_selection {
-        "Provider" => {
-            let (new_provider_id, new_provider_display) = select_provider()?;
-            if let Some(e) = config.endpoints.iter_mut().find(|ep| ep.name == endpoint_name) {
-                e.provider = new_provider_id;
+            "Change Model" => {
+                let method = InquireSelect::new("Model Selection:", vec!["Fetch from API", "Enter Manually"]).prompt()?;
                 
-                // Auto-update Base URL if switching to a known provider
-                if ["OpenAI", "Google (Gemini)", "OpenRouter"].contains(&new_provider_display.as_str()) {
-                     e.base_url = get_default_url(&new_provider_display);
-                     println!("ℹ️  Base URL automatically updated to {}", e.base_url);
-                }
+                let new_model = if method == "Fetch from API" && config.get_endpoint_info().api_key_set {
+                    let base_url = config.endpoint.base_url.clone()
+                        .unwrap_or_else(|| config.endpoint.provider.default_url());
+                    let api_key = config.endpoint.api_key.clone().unwrap_or_default();
+                    
+                    match fetch_models(&base_url, &api_key).await {
+                        Ok(models) => {
+                            InquireSelect::new("Select Model:", models).prompt()?
+                        }
+                        Err(e) => {
+                            println!("⚠️  Failed to fetch models: {}. Falling back to manual entry.", e);
+                            Text::new("Model name:").with_initial_value(&config.endpoint.model).prompt()?
+                        }
+                    }
+                } else {
+                    Text::new("Model name:").with_initial_value(&config.endpoint.model).prompt()?
+                };
+                
+                config.endpoint.model = new_model;
+                println!("✅ Model updated!");
+                config.save_to_default_location()?;
             }
-            println!("✅ Provider updated!");
-        }
-        "Base URL" => {
-            let current_url = config.endpoints.iter().find(|e| e.name == endpoint_name).map(|e| e.base_url.clone()).unwrap_or_default();
-            let new_url = Text::new("Base URL:")
-                .with_initial_value(&current_url)
-                .prompt()?;
-            if let Some(e) = config.endpoints.iter_mut().find(|ep| ep.name == endpoint_name) {
-                e.base_url = new_url;
+            "Change Base URL" => {
+                let current_url = config.endpoint.base_url.clone()
+                    .unwrap_or_else(|| config.endpoint.provider.default_url());
+                let new_url = Text::new("Base URL:")
+                    .with_initial_value(&current_url)
+                    .prompt()?;
+                config.endpoint.base_url = Some(new_url);
+                println!("✅ Base URL updated!");
+                config.save_to_default_location()?;
             }
-            println!("✅ Base URL updated!");
-        }
-        "API Key" => {
-            let new_key = Password::new()
-                .with_prompt("API Key (leave empty to keep existing)")
-                .allow_empty_password(true)
-                .interact()?;
-
-            if !new_key.is_empty() {
-                if let Some(e) = config.endpoints.iter_mut().find(|ep| ep.name == endpoint_name) {
-                    e.api_key = new_key;
-                }
+            "Change API Key" => {
+                let new_key = Password::new()
+                    .with_prompt("API Key (leave empty to clear)")
+                    .allow_empty_password(true)
+                    .interact()?;
+                
+                config.endpoint.api_key = if new_key.is_empty() { None } else { Some(new_key) };
+                println!("✅ API Key updated!");
+                config.save_to_default_location()?;
             }
-            println!("✅ API Key updated!");
-        }
-        "Model" => {
-            let method = InquireSelect::new("Model Selection Method:", vec!["Fetch from API", "Enter Manually"]).prompt()?;
-            
-            let new_model = if method == "Fetch from API" {
-                // We need the endpoint's current config to fetch
-                let endpoint = config.endpoints.iter().find(|e| e.name == endpoint_name).unwrap();
-                match fetch_models(&endpoint.base_url, &endpoint.api_key).await {
-                    Ok(models) => InquireSelect::new("Select Model:", models).prompt()?,
+            "Test Connection" => {
+                let base_url = config.endpoint.base_url.clone()
+                    .unwrap_or_else(|| config.endpoint.provider.default_url());
+                let api_key = config.endpoint.api_key.clone().unwrap_or_default();
+                
+                println!("🔄 Testing connection to {}...", base_url);
+                match fetch_models(&base_url, &api_key).await {
+                    Ok(models) => {
+                        println!("✅ Connection successful! Found {} models.", models.len());
+                    }
                     Err(e) => {
-                        println!("⚠️  Failed to fetch models: {}. Falling back to manual entry.", e);
-                        Text::new("Model name:").prompt()?
+                        println!("❌ Connection failed: {}", e);
                     }
                 }
-            } else {
-                Text::new("Model name:").prompt()?
-            };
-            
-            if let Some(e) = config.endpoints.iter_mut().find(|ep| ep.name == endpoint_name) {
-                e.model = new_model;
             }
-            println!("✅ Model updated!");
+            _ => break,
         }
-        _ => return Ok(false),
-    }
-
-    config.save_to_default_location()?;
-    Ok(true)
-}
-
-/// Handle endpoint deletion
-pub fn handle_delete_endpoint(config: &mut Config) -> Result<bool> {
-    let endpoints: Vec<String> = config.endpoints.iter().map(|e| e.name.clone()).collect();
-    if endpoints.is_empty() {
-        println!("⚠️  No endpoints to delete.");
-        return Ok(false);
-    }
-
-    let endpoint_name = InquireSelect::new("Select endpoint to delete:", endpoints).prompt()?;
-
-    // Check if any profile uses this endpoint
-    let usage: Vec<&str> = config.profiles
-        .iter()
-        .filter(|p| p.endpoint == endpoint_name)
-        .map(|p| p.name.as_str())
-        .collect();
-
-    if !usage.is_empty() {
-        println!("⚠️  Endpoint '{}' is used by profiles: {:?}", endpoint_name, usage);
-        println!("   Delete those profiles first, or re-link them to another endpoint.");
-        return Ok(false);
-    }
-
-    if Confirm::new()
-        .with_prompt(format!("Delete endpoint '{}'?", endpoint_name))
-        .default(false)
-        .interact()?
-    {
-        if let Some(idx) = config.endpoints.iter().position(|e| e.name == endpoint_name) {
-            config.endpoints.remove(idx);
-        }
-        println!("✅ Endpoint deleted.");
-        config.save_to_default_location()?;
     }
 
     Ok(true)
@@ -735,77 +578,18 @@ pub fn handle_delete_endpoint(config: &mut Config) -> Result<bool> {
 // HELPER FUNCTIONS
 // ============================================================================
 
-/// Select an endpoint from available endpoints
-pub fn select_endpoint(config: &Config) -> Result<Option<String>> {
-    let mut endpoints: Vec<String> = config.endpoints.iter().map(|e| e.name.clone()).collect();
-
-    if endpoints.is_empty() {
-        return Ok(None);
-    }
-    
-    // Add option to skip linking
-    endpoints.push("(Skip / Link Later)".to_string());
-
-    // Preselect effective endpoint if possible: active profile endpoint, else global default.
-    let current = config
-        .get_active_profile()
-        .map(|p| p.endpoint.as_str())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            if config.default_endpoint.is_empty() {
-                None
-            } else {
-                Some(config.default_endpoint.as_str())
-            }
-        });
-
-    let default_idx = inquire_default_index(&endpoints, current);
-    let endpoint = InquireSelect::new("Select endpoint:", endpoints)
-        .with_starting_cursor(default_idx)
-        .prompt()?;
-    
-    if endpoint == "(Skip / Link Later)" {
-        Ok(None)
-    } else {
-        Ok(Some(endpoint))
-    }
-}
-
-/// Select or enter a model for the given endpoint
-fn select_or_enter_model(_config: &Config, _endpoint_name: &str) -> Result<Option<String>> {
-    let model_options = vec!["Use endpoint default", "Enter model manually"];
-    let selection = InquireSelect::new("Model:", model_options).prompt()?;
-
-    if selection == "Use endpoint default" {
-        Ok(None)
-    } else {
-        let model = Text::new("Model name:").prompt()?;
-        Ok(Some(model))
-    }
-}
-
 /// Select LLM provider
 fn select_provider() -> Result<(String, String)> {
-    let providers = vec!["OpenAI", "Google (Gemini)", "Ollama", "OpenRouter", "Custom"];
+    let providers = vec!["OpenAI", "Google (Gemini)", "Ollama", "OpenRouter", "Kimi (Moonshot)", "Custom"];
     let selection = InquireSelect::new("Select provider:", providers).prompt()?;
 
     match selection {
         "OpenAI" => Ok(("openai".to_string(), "OpenAI".to_string())),
         "Google (Gemini)" => Ok(("google".to_string(), "Google (Gemini)".to_string())),
-        "Ollama" => Ok(("openai".to_string(), "Ollama".to_string())), // Ollama uses OpenAI-compatible API
+        "Ollama" => Ok(("ollama".to_string(), "Ollama".to_string())),
         "OpenRouter" => Ok(("openrouter".to_string(), "OpenRouter".to_string())),
-        _ => Ok(("openai".to_string(), "Custom".to_string())),
-    }
-}
-
-/// Get default URL for a provider
-fn get_default_url(provider_display_name: &str) -> String {
-    match provider_display_name {
-        "OpenAI" => "https://api.openai.com/v1".to_string(),
-        "Google (Gemini)" => "https://generativelanguage.googleapis.com/v1".to_string(),
-        "Ollama" => "http://localhost:11434/v1".to_string(),
-        "OpenRouter" => "https://openrouter.ai/api/v1".to_string(),
-        _ => "".to_string(),
+        "Kimi (Moonshot)" => Ok(("kimi".to_string(), "Kimi (Moonshot)".to_string())),
+        _ => Ok(("custom".to_string(), "Custom".to_string())),
     }
 }
 
@@ -891,21 +675,13 @@ async fn print_banner(config: &Config) {
     println!();
 
     // Compact Provider/Context Info
-    let profile = config.get_active_profile();
-    // Use the safe fallback we added to get_endpoint or just try get_endpoint(None)
-    // We already made get_endpoint return Result.
-    let endpoint = config.get_endpoint(None).ok();
+    let effective = config.get_effective_endpoint_info();
+    let profile_name = &config.profile;
 
-    let profile_name = if config.active_profile.is_empty() {
-        "None"
+    let llm_info = if config.is_initialized() {
+        format!("{} @ {} ({})", effective.model, effective.provider, profile_name)
     } else {
-        &config.active_profile
-    };
-
-    let llm_info = match (profile, endpoint) {
-        (Some(_), Some(e)) => format!("{} ({} / {})", e.name, e.provider, e.model),
-        (Some(p), None) => format!("Profile: {} (Missing Endpoint: '{}')", p.name, if p.endpoint.is_empty() { "Default" } else { &p.endpoint }),
-        _ => "Not Configured".to_string(),
+        "Not Configured".to_string()
     };
 
     let ctx = mylm_core::context::TerminalContext::collect_sync();
@@ -919,7 +695,7 @@ async fn print_banner(config: &Config) {
 
     println!("  {} [{}] | {} [{}]",
         dim.apply_to("Profile:"), blue.apply_to(profile_name),
-        dim.apply_to("Endpoint:"), green.apply_to(llm_info)
+        dim.apply_to("Model:"), green.apply_to(llm_info)
     );
     println!("  {} [{}] | {} [{}] | {} [{}]",
         dim.apply_to("Context:"), cyan.apply_to(cwd),

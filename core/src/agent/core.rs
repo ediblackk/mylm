@@ -1,5 +1,6 @@
 //! Agent Core Implementation
 use crate::agent::tool::{Tool, ToolKind};
+use crate::agent::toolcall_log;
 use crate::llm::{chat::{ChatMessage, ChatRequest, MessageRole}, LlmClient, TokenUsage};
 use crate::memory::MemoryCategorizer;
 use crate::terminal::app::TuiEvent;
@@ -9,6 +10,16 @@ use serde_json;
 use std::sync::Arc;
 use std::collections::HashSet;
 use regex::Regex;
+use tokio::sync::Mutex;
+
+/// Truncate a string for logging purposes (to prevent huge log entries)
+fn truncate_for_log(s: &str, max_len: usize) -> String {
+    if s.len() > max_len {
+        format!("{}... [truncated {} chars]", &s[..max_len], s.len() - max_len)
+    } else {
+        s.to_string()
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShortKeyAction {
@@ -217,6 +228,8 @@ pub struct Agent {
     pub system_prompt_prefix: String,
     pub memory_store: Option<Arc<crate::memory::store::VectorStore>>,
     pub categorizer: Option<Arc<MemoryCategorizer>>,
+    pub scribe: Option<Arc<crate::memory::scribe::Scribe>>,
+    pub job_registry: crate::agent::v2::jobs::JobRegistry,
     pub session_id: String,
     pub version: crate::config::AgentVersion,
     
@@ -233,25 +246,40 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new_with_iterations(
+    pub async fn new_with_iterations(
         client: Arc<LlmClient>,
-        tools: Vec<Box<dyn Tool>>,
+        tools: Vec<Arc<dyn Tool>>,
         system_prompt_prefix: String,
         max_iterations: usize,
         version: crate::config::AgentVersion,
         memory_store: Option<Arc<crate::memory::store::VectorStore>>,
         categorizer: Option<Arc<MemoryCategorizer>>,
+        job_registry: Option<crate::agent::v2::jobs::JobRegistry>,
     ) -> Self {
         let tool_registry = crate::agent::ToolRegistry::new();
         
-        // Register tools synchronously for now (in real usage, this would be async)
-        let rt = tokio::runtime::Handle::current();
         for tool in tools {
-            let _tool_name = tool.name().to_string();
-            let _ = rt.block_on(tool_registry.register_tool(tool));
+            let _ = tool_registry.register_tool_arc(tool).await;
         }
 
         let session_id = chrono::Utc::now().timestamp_millis().to_string();
+        let job_registry = job_registry.unwrap_or_default();
+        
+        // Initialize Scribe for V2 if store is available
+        let scribe = if version == crate::config::AgentVersion::V2 {
+            if let Some(store) = &memory_store {
+                let journal = Arc::new(Mutex::new(crate::memory::journal::Journal::new().unwrap()));
+                Some(Arc::new(crate::memory::scribe::Scribe::new(
+                    journal,
+                    store.clone(),
+                    client.clone()
+                )))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         Self {
             llm_client: client,
@@ -260,6 +288,8 @@ impl Agent {
             system_prompt_prefix,
             categorizer,
             memory_store,
+            scribe,
+            job_registry,
             session_id,
             history: Vec::new(),
             iteration_count: 0,
@@ -278,7 +308,7 @@ impl Agent {
     }
 
     /// Reset the agent's state for a new task.
-    pub fn reset(&mut self, history: Vec<ChatMessage>) {
+    pub async fn reset(&mut self, history: Vec<ChatMessage>) {
         self.history = history;
         self.iteration_count = 0;
         self.total_usage = TokenUsage::default();
@@ -289,20 +319,13 @@ impl Agent {
 
         // Ensure system prompt is present
         if self.history.is_empty() || self.history[0].role != MessageRole::System {
-            self.history.insert(0, ChatMessage::system(self.generate_system_prompt()));
+            let prompt = self.generate_system_prompt().await;
+            self.history.insert(0, ChatMessage::system(prompt));
         }
     }
 
     /// Perform a single step in the agentic loop.
     pub async fn step(&mut self, observation: Option<String>) -> Result<AgentDecision, Box<dyn StdError + Send + Sync>> {
-        // 0. Version Switch
-        if self.version == crate::config::AgentVersion::V2 {
-            return Ok(AgentDecision::Message(
-                "V2 Agent Loop is active (Placeholder). To use full V2 capabilities, ensure 'mylm-v2' is installed correctly.".to_string(),
-                self.total_usage.clone()
-            ));
-        }
-
         // 1. Hard Iteration Limit Check
         //
         // IMPORTANT:
@@ -359,8 +382,7 @@ impl Agent {
         
         // Provide tool definitions if supported
         let mut chat_tools = Vec::new();
-        let rt = tokio::runtime::Handle::current();
-        let tool_definitions = rt.block_on(self.tool_registry.get_tool_definitions());
+        let tool_definitions = self.tool_registry.get_tool_definitions().await;
         chat_tools.extend(tool_definitions);
         if !chat_tools.is_empty() {
             request = request.with_tools(chat_tools);
@@ -370,6 +392,24 @@ impl Agent {
         let content = response.content();
 
         crate::debug_log!("LLM Response: {}", content);
+
+        // Structured debug log (JSONL) - mirrors AgentV2 behavior
+        // Captures raw content + native tool_calls for post-mortem parsing/tool-call debugging.
+        let tool_calls_json = response.choices
+            .first()
+            .and_then(|c| c.message.tool_calls.as_ref())
+            .map(|tcs| serde_json::to_value(tcs).unwrap_or(serde_json::Value::Null))
+            .unwrap_or(serde_json::Value::Null);
+        toolcall_log::append_jsonl_owned(serde_json::json!({
+            "kind": "llm_response",
+            "session_id": self.session_id,
+            "iteration": self.iteration_count,
+            "provider": format!("{}", self.llm_client.provider()),
+            "model": self.llm_client.model(),
+            "finish_reason": response.choices.first().and_then(|c| c.finish_reason.clone()),
+            "content": truncate_for_log(&content, 4000),
+            "tool_calls": tool_calls_json,
+        }));
 
         if let Some(usage) = &response.usage {
             self.total_usage.prompt_tokens += usage.prompt_tokens;
@@ -395,8 +435,13 @@ impl Agent {
                 ));
             }
 
-            if let Some(tool_name) = sk_action.action {
-                let tool_name = tool_name.trim();
+            if let Some(raw_tool_name) = sk_action.action {
+                let tool_name_str = crate::agent::tool_registry::normalize_tool_name(&raw_tool_name);
+                // We must clone/to_string here because tool_name_str is borrowed from raw_tool_name
+                // or is a slice of it, but subsequent code expects a String or uses it in ways
+                // that require ownership/lifetime extension.
+                let tool_name = tool_name_str.to_string();
+
                 let args = sk_action
                     .input
                     .map(|v| {
@@ -410,7 +455,7 @@ impl Agent {
 
                 // Repetition Check
                 if let Some((last_tool, last_args)) = &self.last_tool_call {
-                    if last_tool == tool_name && last_args == &args {
+                    if last_tool == &tool_name && last_args == &args {
                         self.repetition_count += 1;
                         if self.repetition_count >= 3 {
                             return Ok(AgentDecision::Error(format!(
@@ -422,21 +467,29 @@ impl Agent {
                         self.repetition_count = 0;
                     }
                 }
-                self.last_tool_call = Some((tool_name.to_string(), args.clone()));
+                self.last_tool_call = Some((tool_name.clone(), args.clone()));
 
-                let rt = tokio::runtime::Handle::current();
-                let kind = rt.block_on(self.tool_registry.get_tool(tool_name))
-                    .map(|t| t.kind())
+                let kind = self.tool_registry.get_tool_kind(&tool_name).await
                     .unwrap_or(ToolKind::Internal);
 
                 // Add full assistant content to history
                 self.history.push(ChatMessage::assistant(content.clone()));
 
                 let action = AgentDecision::Action {
-                    tool: tool_name.to_string(),
-                    args,
+                    tool: tool_name.clone(),
+                    args: args.clone(),
                     kind,
                 };
+
+                // Log the tool decision
+                toolcall_log::append_jsonl_owned(serde_json::json!({
+                    "kind": "agent_decision",
+                    "session_id": self.session_id,
+                    "iteration": self.iteration_count,
+                    "decision": "tool_call_short_key",
+                    "tool": tool_name,
+                    "args": truncate_for_log(&args, 4000),
+                }));
 
                 self.pending_decision = Some(action);
                 return Ok(AgentDecision::Message(
@@ -461,8 +514,10 @@ impl Agent {
                 // Safely extract the first (and now only) tool call details
                 let (tool_name, args, tool_id) = {
                     let tool_call = &message.tool_calls.as_ref().expect("tool_calls should be present")[0];
+                    let raw_name = &tool_call.function.name;
+                    let normalized = crate::agent::tool_registry::normalize_tool_name(raw_name).to_string();
                     (
-                        tool_call.function.name.trim().to_string(),
+                        normalized,
                         tool_call.function.arguments.to_string(),
                         tool_call.id.clone()
                     )
@@ -472,6 +527,16 @@ impl Agent {
                 self.pending_tool_call_id = Some(tool_id);
 
                 crate::info_log!("Parsed Action (Tool Call): {} with args: {}", tool_name, args);
+
+                // Log the native tool call decision
+                toolcall_log::append_jsonl_owned(serde_json::json!({
+                    "kind": "agent_decision",
+                    "session_id": self.session_id,
+                    "iteration": self.iteration_count,
+                    "decision": "tool_call_native",
+                    "tool": tool_name,
+                    "args": truncate_for_log(&args, 4000),
+                }));
                 
                 // Repetition Check
                 if let Some((last_tool, last_args)) = &self.last_tool_call {
@@ -486,9 +551,7 @@ impl Agent {
                 }
                 self.last_tool_call = Some((tool_name.clone(), args.clone()));
 
-                let rt = tokio::runtime::Handle::current();
-                let kind = rt.block_on(self.tool_registry.get_tool(&tool_name))
-                    .map(|t| t.kind())
+                let kind = self.tool_registry.get_tool_kind(&tool_name).await
                     .unwrap_or(ToolKind::Internal);
                 self.history.push(message);
 
@@ -518,7 +581,8 @@ impl Agent {
         let action_input_match = action_input_re.captures(&content);
 
         if action_match.is_some() || action_input_match.is_some() {
-            let tool_name = action_match.as_ref().map(|c| c[1].trim().to_string());
+            let tool_name = action_match.as_ref()
+                .map(|c| crate::agent::tool_registry::normalize_tool_name(&c[1]).to_string());
             
             let args = action_input_match.as_ref().map(|caps| {
                 let mut val = caps[1].trim().to_string();
@@ -549,11 +613,19 @@ impl Agent {
                 return Ok(AgentDecision::Message(content, self.total_usage.clone()));
             }
 
-            let rt = tokio::runtime::Handle::current();
-            let kind = rt.block_on(self.tool_registry.get_tool(&tool_name))
-                .map(|t| t.kind())
+            let kind = self.tool_registry.get_tool_kind(&tool_name).await
                 .unwrap_or(ToolKind::Internal);
             self.history.push(ChatMessage::assistant(content.clone()));
+            
+            // Log the ReAct tool decision
+            toolcall_log::append_jsonl_owned(serde_json::json!({
+                "kind": "agent_decision",
+                "session_id": self.session_id,
+                "iteration": self.iteration_count,
+                "decision": "tool_call_react",
+                "tool": tool_name,
+                "args": truncate_for_log(&args, 4000),
+            }));
             
             let action_decision = AgentDecision::Action {
                 tool: tool_name,
@@ -580,12 +652,25 @@ impl Agent {
                     error_msg.push_str(" Missing 'Action Input:' tag.");
                 }
                 crate::error_log!("Malformed action detected: {}", error_msg);
+                toolcall_log::append_jsonl_owned(serde_json::json!({
+                    "kind": "parse_error",
+                    "session_id": self.session_id,
+                    "iteration": self.iteration_count,
+                    "parser": "react",
+                    "message": error_msg,
+                }));
                 return Ok(AgentDecision::MalformedAction(error_msg));
             }
         }
 
         // 4. Final Answer or just a message
         self.history.push(ChatMessage::assistant(content.clone()));
+        toolcall_log::append_jsonl_owned(serde_json::json!({
+            "kind": "agent_decision",
+            "session_id": self.session_id,
+            "iteration": self.iteration_count,
+            "decision": "message",
+        }));
         Ok(AgentDecision::Message(content, self.total_usage.clone()))
     }
 
@@ -622,6 +707,90 @@ impl Agent {
         max_driver_loops: usize,
         mut approval_rx: Option<tokio::sync::mpsc::Receiver<bool>>,
     ) -> Result<(String, TokenUsage), Box<dyn StdError + Send + Sync>> {
+        if self.version == crate::config::AgentVersion::V2 {
+             // 1. Initialize V2 Dependencies
+            let store = self.memory_store.clone().ok_or("Memory store required for V2")?;
+            let categorizer = self.categorizer.clone();
+            let job_registry = self.job_registry.clone();
+            let scribe = self.scribe.clone().ok_or("Scribe required for V2")?;
+            
+            // 2. Convert Tools
+            let tools_list = self.tool_registry.get_all_tools().await;
+            
+            // 3. Create AgentV2
+            let mut agent_v2 = crate::agent::v2::AgentV2::new_with_iterations(
+                self.llm_client.clone(),
+                scribe,
+                tools_list,
+                self.system_prompt_prefix.clone(),
+                self.max_iterations,
+                self.version,
+                Some(store),
+                categorizer,
+                Some(job_registry),
+                None, // capabilities_context
+            );
+
+            // 4. Bridge Channels
+            let (v2_event_tx, mut v2_event_rx) = tokio::sync::mpsc::unbounded_channel::<crate::agent::event::RuntimeEvent>();
+            let (interrupt_tx, interrupt_rx) = tokio::sync::mpsc::channel(1);
+            let interrupt_flag_clone = interrupt_flag.clone();
+            
+            // Interrupt Watcher Task
+            tokio::spawn(async move {
+                loop {
+                    if interrupt_flag_clone.load(std::sync::atomic::Ordering::SeqCst) {
+                        let _ = interrupt_tx.send(()).await;
+                        break;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
+            });
+
+            // Event Translator Task
+            let tui_tx = event_tx.clone();
+            tokio::spawn(async move {
+                while let Some(event) = v2_event_rx.recv().await {
+                    match event {
+                        crate::agent::event::RuntimeEvent::StatusUpdate { message } => {
+                            let _ = tui_tx.send(TuiEvent::StatusUpdate(message));
+                        }
+                        crate::agent::event::RuntimeEvent::AgentResponse { content, usage } => {
+                            let _ = tui_tx.send(TuiEvent::AgentResponse(content, usage));
+                        }
+                        crate::agent::event::RuntimeEvent::InternalObservation { data } => {
+                            let _ = tui_tx.send(TuiEvent::InternalObservation(data));
+                        }
+                        crate::agent::event::RuntimeEvent::SuggestCommand { command } => {
+                            let _ = tui_tx.send(TuiEvent::SuggestCommand(command));
+                        }
+                        crate::agent::event::RuntimeEvent::ExecuteTerminalCommand { command, tx } => {
+                            let _ = tui_tx.send(TuiEvent::ExecuteTerminalCommand(command, tx));
+                        }
+                        crate::agent::event::RuntimeEvent::GetTerminalScreen { tx } => {
+                             let _ = tui_tx.send(TuiEvent::GetTerminalScreen(tx));
+                        }
+                        _ => {} // Ignore internal protocol events
+                    }
+                }
+            });
+
+            // 5. Run V2
+            let approval_rx_to_pass = if let Some(rx) = approval_rx.take() {
+                rx
+            } else {
+                let (_, rx) = tokio::sync::mpsc::channel(1);
+                rx
+            };
+            
+            return agent_v2.run_event_driven(
+                history,
+                v2_event_tx,
+                interrupt_rx,
+                approval_rx_to_pass
+            ).await;
+        }
+
         // 1. Memory Context Injection (if enabled)
         if self.llm_client.config().memory.auto_context {
             if let Some(store) = &self.memory_store {
@@ -640,7 +809,7 @@ impl Agent {
             }
         }
 
-        self.reset(history);
+        self.reset(history).await;
         
         let mut last_observation = None;
         let mut retry_count = 0;
@@ -912,18 +1081,15 @@ impl Agent {
     }
 
     /// Generate the system prompt with available tools and ReAct instructions.
-    fn generate_system_prompt(&self) -> String {
-        use crate::config::prompt::{get_memory_protocol, get_react_protocol};
+    async fn generate_system_prompt(&self) -> String {
+        use crate::config::{get_memory_protocol, get_react_protocol};
 
         let mut tools_desc = String::new();
-        let rt = tokio::runtime::Handle::current();
-        let tool_names = rt.block_on(self.tool_registry.get_tool_names());
         
-        // For each tool name, get the tool and add its description
-        for tool_name in tool_names {
-            if let Some(tool) = rt.block_on(self.tool_registry.get_tool(&tool_name)) {
-                tools_desc.push_str(&format!("- {}: {}\n  Usage: {}\n", tool.name(), tool.description(), tool.usage()));
-            }
+        // Get all tools as Arc<dyn Tool> and generate descriptions
+        let tools = self.tool_registry.get_all_tools().await;
+        for tool in tools {
+            tools_desc.push_str(&format!("- {}: {}\n  Usage: {}\n", tool.name(), tool.description(), tool.usage()));
         }
 
         format!(

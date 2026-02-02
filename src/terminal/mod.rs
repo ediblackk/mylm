@@ -12,21 +12,22 @@ use mylm_core::agent::{Agent, Tool};
 use mylm_core::agent::tools::{
     ShellTool, MemoryTool, WebSearchTool, CrawlTool, FileReadTool, FileWriteTool,
     GitStatusTool, GitLogTool, GitDiffTool, StateTool, SystemMonitorTool,
+    DelegateTool, WaitTool, TerminalSightTool,
 };
 use mylm_core::executor::CommandExecutor;
 use mylm_core::executor::allowlist::CommandAllowlist;
 use mylm_core::executor::safety::SafetyChecker;
-use mylm_core::config::Config;
-use mylm_core::config::prompt::build_system_prompt;
+use mylm_core::config::{Config, ConfigUiExt, build_system_prompt};
 use mylm_core::context::TerminalContext;
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{self, Event as CrosstermEvent, KeyCode, KeyModifiers, EnableBracketedPaste, DisableBracketedPaste},
+    event::{self, Event as CrosstermEvent, KeyCode, KeyModifiers, MouseEventKind, EnableBracketedPaste, DisableBracketedPaste, EnableMouseCapture, DisableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{io, time::Duration};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use std::sync::atomic::Ordering;
 
@@ -34,43 +35,30 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     let size = terminal.size()?;
 
-    // Setup LLM Client (using default endpoint)
+    // Setup LLM Client (using resolved config with profile)
     let config = Config::load()?;
-    let endpoint_config = config.get_endpoint(None)?;
-    // Context limit override:
-    // - None => use endpoint/model max
-    // - Some(n) => use n
-    let effective_context_limit = config
-        .context_limit
-        .unwrap_or(endpoint_config.max_context_tokens);
-
-    // DEBUG LOG
-    // println!(
-    //     "DEBUG: config.context_limit={:?}, endpoint.max={}, effective={}",
-    //     config.context_limit,
-    //     endpoint_config.max_context_tokens,
-    //     effective_context_limit
-    // );
-
+    let resolved = config.resolve_profile();
+    
+    let base_url = resolved.base_url.unwrap_or_else(|| resolved.provider.default_url());
+    let api_key = resolved.api_key.unwrap_or_default();
+    
+    // V2 uses fixed context limits - no per-endpoint override
     let llm_config = LlmConfig::new(
-        endpoint_config.provider.parse().map_err(|e| anyhow::anyhow!("{}", e))?,
-        endpoint_config.base_url.clone(),
-        endpoint_config.model.clone(),
-        Some(endpoint_config.api_key.clone()),
+        format!("{:?}", resolved.provider).to_lowercase().parse().map_err(|e| anyhow::anyhow!("{}", e))?,
+        base_url.clone(),
+        resolved.model.clone(),
+        Some(api_key.clone()),
     )
-    .with_pricing(endpoint_config.input_price_per_1m, endpoint_config.output_price_per_1m)
-    .with_context_management(effective_context_limit, endpoint_config.condense_threshold)
-    .with_memory(config.memory.clone());
+    .with_memory(config.features.memory.clone());
     let llm_client = std::sync::Arc::new(LlmClient::new(llm_config)?);
 
     // Setup Agent dependencies
-    let mut allowlist = CommandAllowlist::new();
-    allowlist.apply_config(&config.commands);
+    let allowlist = CommandAllowlist::new();
     let executor = std::sync::Arc::new(CommandExecutor::new(
         allowlist,
         SafetyChecker::new(),
@@ -98,45 +86,65 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
     let state_store = std::sync::Arc::new(std::sync::RwLock::new(mylm_core::state::StateStore::new()?));
 
     // Build hierarchical system prompt
-    let prompt_name = config.get_active_profile()
-        .map(|p| p.prompt.as_str())
-        .unwrap_or("default");
-    let system_prompt = build_system_prompt(&context, prompt_name, Some("TUI (Interactive Mode)")).await?;
+    // V2 doesn't have per-profile prompts, use profile name or "default"
+    let prompt_name = "default";
+    let system_prompt = build_system_prompt(&context, prompt_name, Some("TUI (Interactive Mode)"), None).await?;
 
     // Channel for events
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<TuiEvent>();
 
-    // Setup Tools
-    let mut tools: Vec<Box<dyn Tool>> = Vec::new();
-    let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone(), Some(store.clone()), Some(categorizer.clone()), None, None);
+    // Setup Tools - using Arc for shared ownership
+    let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+    
+    // We need a job registry for the agent and tools
+    let job_registry = mylm_core::agent::v2::jobs::JobRegistry::new();
+
+    // Create a temporary Scribe for tools that need it during initialization
+    // The Agent will create its own internal Scribe, but we need one for DelegateTool now.
+    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(mylm_core::memory::journal::Journal::new().unwrap()));
+    let scribe = std::sync::Arc::new(mylm_core::memory::scribe::Scribe::new(journal, store.clone(), llm_client.clone()));
+
+    let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone(), Some(store.clone()), Some(categorizer.clone()), None, Some(job_registry.clone()));
     let memory_tool = MemoryTool::new(store.clone());
-    let web_search_tool = WebSearchTool::new(config.web_search.clone(), event_tx.clone());
+    let web_search_tool = WebSearchTool::new(config.features.web_search.clone(), event_tx.clone());
     let crawl_tool = CrawlTool::new(event_tx.clone());
     let state_tool = StateTool::new(state_store.clone());
     let system_tool = SystemMonitorTool::new();
+    let delegate_tool = DelegateTool::new(llm_client.clone(), scribe.clone(), job_registry.clone(), Some(store.clone()), Some(categorizer.clone()), None);
+    let wait_tool = WaitTool;
+    let terminal_sight_tool = TerminalSightTool::new(event_tx.clone());
     
-    tools.push(Box::new(shell_tool) as Box<dyn Tool>);
-    tools.push(Box::new(memory_tool) as Box<dyn Tool>);
-    tools.push(Box::new(web_search_tool) as Box<dyn Tool>);
-    tools.push(Box::new(crawl_tool) as Box<dyn Tool>);
-    tools.push(Box::new(state_tool) as Box<dyn Tool>);
-    tools.push(Box::new(system_tool) as Box<dyn Tool>);
-    tools.push(Box::new(FileReadTool) as Box<dyn Tool>);
-    tools.push(Box::new(FileWriteTool) as Box<dyn Tool>);
-    tools.push(Box::new(GitStatusTool) as Box<dyn Tool>);
-    tools.push(Box::new(GitLogTool) as Box<dyn Tool>);
-    tools.push(Box::new(GitDiffTool) as Box<dyn Tool>);
+    tools.push(Arc::new(shell_tool));
+    tools.push(Arc::new(memory_tool));
+    tools.push(Arc::new(web_search_tool));
+    tools.push(Arc::new(crawl_tool));
+    tools.push(Arc::new(state_tool));
+    tools.push(Arc::new(system_tool));
+    tools.push(Arc::new(delegate_tool));
+    tools.push(Arc::new(wait_tool));
+    tools.push(Arc::new(terminal_sight_tool));
+    tools.push(Arc::new(FileReadTool));
+    tools.push(Arc::new(FileWriteTool));
+    tools.push(Arc::new(GitStatusTool));
+    tools.push(Arc::new(GitLogTool));
+    tools.push(Arc::new(GitDiffTool));
 
     // Create Agent
+    // Get max_iterations from profile override or use default
+    let max_iterations = config.get_active_profile_info()
+        .and_then(|p| p.max_iterations)
+        .unwrap_or(10);
+    
     let agent = Agent::new_with_iterations(
         llm_client,
         tools,
         system_prompt,
-        config.agent.max_iterations,
-        config.agent.version,
+        max_iterations,
+        mylm_core::config::AgentVersion::V2,
         Some(store.clone()),
-        Some(categorizer.clone())
-    );
+        Some(categorizer.clone()),
+        Some(job_registry)
+    ).await;
 
     // Setup PTY with context CWD
     let (pty_manager, mut pty_rx) = spawn_pty(context.cwd.clone())?;
@@ -171,9 +179,9 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
             app.process_terminal_data(divider.as_bytes());
         } else {
             // Fallback: If no tmux scrollback, at least show some context info so it's not empty
-            let header = format!("\x1b[1;33m[mylm context fallback - tmux session not detected]\x1b[0m\n");
+            let header = "\x1b[1;33m[mylm context fallback - tmux session not detected]\x1b[0m\n".to_string();
             let cwd_info = format!("\x1b[2mCurrent Directory: {}\x1b[0m\n", ctx.current_dir_str);
-            let history_header = format!("\x1b[2mRecent History:\x1b[0m\n");
+            let history_header = "\x1b[2mRecent History:\x1b[0m\n".to_string();
             
             app.process_terminal_data(header.as_bytes());
             app.process_terminal_data(cwd_info.as_bytes());
@@ -261,7 +269,8 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        DisableMouseCapture
     )?;
     terminal.show_cursor()?;
 
@@ -281,6 +290,10 @@ async fn run_loop(
     store: std::sync::Arc<mylm_core::memory::VectorStore>,
     state_store: std::sync::Arc<std::sync::RwLock<mylm_core::state::StateStore>>,
 ) -> io::Result<()> {
+    static ANSI_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = ANSI_RE.get_or_init(|| regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap());
+    let mut pending_copy_chord = false;
+
     loop {
         terminal.draw(|f| render(f, app))?;
 
@@ -290,10 +303,10 @@ async fn run_loop(
                     let mut data_to_process = data.clone();
                     
                     // 1. Handle Echo Suppression (at start of command)
-                    // We look for the "stty -echo;" signature which indicates our wrapper is being echoed.
+                    // We look for the "stty -echo" signature which indicates our wrapper is being echoed.
                     if !app.pending_echo_suppression.is_empty() {
                         let data_str = String::from_utf8_lossy(&data_to_process);
-                        if let Some(pos) = data_str.find("stty -echo;") {
+                        if let Some(pos) = data_str.find("stty -echo") {
                             // Found the wrapper start! Discard everything in this packet up to the next newline.
                             app.pending_echo_suppression.clear();
                             
@@ -384,10 +397,9 @@ async fn run_loop(
                             // We only take the top 'newlines' lines
                             let screen_contents = screen.contents();
                             let lines: Vec<&str> = screen_contents.split('\n').collect();
-                            for i in 0..newlines.min(lines.len()) {
-                                let line = lines[i].to_string();
+                            for line in lines.iter().take(newlines.min(lines.len())) {
                                 if !line.trim().is_empty() {
-                                    app.terminal_history.push(line);
+                                    app.terminal_history.push(line.to_string());
                                 }
                             }
                             
@@ -415,7 +427,6 @@ async fn run_loop(
                                 
                                 let raw_output = app.command_output_buffer[..pos].to_string();
                                 // Strip ANSI escape codes for cleaner LLM input
-                                let re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
                                 let final_output = re.replace_all(&raw_output, "").to_string();
 
                                 if let Some(tx) = app.pending_command_tx.take() {
@@ -482,71 +493,75 @@ async fn run_loop(
                 TuiEvent::ConfigUpdate(new_config) => {
                     app.config = new_config.clone();
                     
-                    if let Ok(endpoint_config) = new_config.get_endpoint(None) {
-                        let effective_context_limit = new_config
-                            .context_limit
-                            .unwrap_or(endpoint_config.max_context_tokens);
+                    // Resolve configuration with active profile
+                    let resolved = new_config.resolve_profile();
+                    let base_url = resolved.base_url.unwrap_or_else(|| resolved.provider.default_url());
+                    let api_key = resolved.api_key.unwrap_or_default();
+                    let effective_context_limit = 128000_usize;
 
-                        let llm_config = LlmConfig::new(
-                            endpoint_config.provider.parse().unwrap_or(mylm_core::llm::LlmProvider::OpenAiCompatible),
-                            endpoint_config.base_url.clone(),
-                            endpoint_config.model.clone(),
-                            Some(endpoint_config.api_key.clone()),
-                        )
-                        .with_pricing(endpoint_config.input_price_per_1m, endpoint_config.output_price_per_1m)
-                        .with_context_management(effective_context_limit, endpoint_config.condense_threshold)
-                        .with_memory(new_config.memory.clone());
+                    let llm_config = LlmConfig::new(
+                        format!("{:?}", resolved.provider).to_lowercase().parse().unwrap_or(mylm_core::llm::LlmProvider::OpenAiCompatible),
+                        base_url.clone(),
+                        resolved.model.clone(),
+                        Some(api_key.clone()),
+                    )
+                    .with_memory(new_config.features.memory.clone());
+                    
+                    if let Ok(llm_client) = LlmClient::new(llm_config) {
+                        app.input_price = 0.0; // V2 doesn't track pricing
+                        app.output_price = 0.0;
+                        app.session_monitor.set_max_context(effective_context_limit as u32);
                         
-                        if let Ok(llm_client) = LlmClient::new(llm_config) {
-                            app.input_price = endpoint_config.input_price_per_1m;
-                            app.output_price = endpoint_config.output_price_per_1m;
-                            app.session_monitor.set_max_context(effective_context_limit as u32);
+                        let llm_client = std::sync::Arc::new(llm_client);
+                        
+                        let prompt_name = "default"; // V2 doesn't have per-profile prompts
+                        let context = TerminalContext::collect().await;
+                        if let Ok(system_prompt) = build_system_prompt(&context, prompt_name, Some("TUI (Interactive Mode)"), None).await {
+                            let mut agent = app.agent.lock().await;
+                            agent.llm_client = llm_client.clone();
+                            agent.system_prompt_prefix = system_prompt;
                             
-                            let llm_client = std::sync::Arc::new(llm_client);
+                            let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
+                            let agent_session_id = agent.session_id.clone();
+                            let categorizer = agent.categorizer.as_ref().cloned();
+                            let job_registry = agent.job_registry.clone();
+                            let scribe = agent.scribe.as_ref().cloned().unwrap(); // Should exist for V2
+
+                            // Re-create executor (V2 doesn't have command config)
+                            let allowlist = CommandAllowlist::new();
+                            let updated_executor = std::sync::Arc::new(CommandExecutor::new(
+                                allowlist,
+                                mylm_core::executor::safety::SafetyChecker::new(),
+                            ));
+
+                            let shell_tool = ShellTool::new(updated_executor, context.clone(), event_tx.clone(), Some(store.clone()), categorizer.clone(), Some(agent_session_id), Some(job_registry.clone()));
+                            let memory_tool = MemoryTool::new(store.clone());
+                            let web_search_tool = WebSearchTool::new(new_config.features.web_search.clone(), event_tx.clone());
+                            let crawl_tool = CrawlTool::new(event_tx.clone());
+                            let state_tool = StateTool::new(state_store.clone());
+                            let system_tool = SystemMonitorTool::new();
+                            let delegate_tool = DelegateTool::new(llm_client.clone(), scribe.clone(), job_registry.clone(), Some(store.clone()), categorizer.clone(), None);
+                            let wait_tool = WaitTool;
+                            let terminal_sight_tool = TerminalSightTool::new(event_tx.clone());
                             
-                            let prompt_name = new_config.get_active_profile().map(|p| p.prompt.as_str()).unwrap_or("default");
-                            let context = TerminalContext::collect().await;
-                            if let Ok(system_prompt) = build_system_prompt(&context, prompt_name, Some("TUI (Interactive Mode)")).await {
-                                let mut agent = app.agent.lock().await;
-                                agent.llm_client = llm_client;
-                                agent.system_prompt_prefix = system_prompt;
-                                
-                                let mut tools: Vec<Box<dyn Tool>> = Vec::new();
-                                let agent_session_id = agent.session_id.clone();
-                                let categorizer = agent.categorizer.as_ref().cloned();
+                            tools.push(Arc::new(shell_tool));
+                            tools.push(Arc::new(memory_tool));
+                            tools.push(Arc::new(web_search_tool));
+                            tools.push(Arc::new(crawl_tool));
+                            tools.push(Arc::new(state_tool));
+                            tools.push(Arc::new(system_tool));
+                            tools.push(Arc::new(delegate_tool));
+                            tools.push(Arc::new(wait_tool));
+                            tools.push(Arc::new(terminal_sight_tool));
+                            tools.push(Arc::new(FileReadTool));
+                            tools.push(Arc::new(FileWriteTool));
+                            tools.push(Arc::new(GitStatusTool));
+                            tools.push(Arc::new(GitLogTool));
+                            tools.push(Arc::new(GitDiffTool));
 
-                                // Re-create executor with updated allowlist from config
-                                let mut allowlist = CommandAllowlist::new();
-                                allowlist.apply_config(&new_config.commands);
-                                let updated_executor = std::sync::Arc::new(CommandExecutor::new(
-                                    allowlist,
-                                    mylm_core::executor::safety::SafetyChecker::new(),
-                                ));
-
-                                let shell_tool = ShellTool::new(updated_executor, context.clone(), event_tx.clone(), Some(store.clone()), categorizer, Some(agent_session_id), None);
-                                let memory_tool = MemoryTool::new(store.clone());
-                                let web_search_tool = WebSearchTool::new(new_config.web_search.clone(), event_tx.clone());
-                                let crawl_tool = CrawlTool::new(event_tx.clone());
-                                let state_tool = StateTool::new(state_store.clone());
-                                let system_tool = SystemMonitorTool::new();
-                                
-                                tools.push(Box::new(shell_tool) as Box<dyn Tool>);
-                                tools.push(Box::new(memory_tool) as Box<dyn Tool>);
-                                tools.push(Box::new(web_search_tool) as Box<dyn Tool>);
-                                tools.push(Box::new(crawl_tool) as Box<dyn Tool>);
-                                tools.push(Box::new(state_tool) as Box<dyn Tool>);
-                                tools.push(Box::new(system_tool) as Box<dyn Tool>);
-                                tools.push(Box::new(FileReadTool) as Box<dyn Tool>);
-                                tools.push(Box::new(FileWriteTool) as Box<dyn Tool>);
-                                tools.push(Box::new(GitStatusTool) as Box<dyn Tool>);
-                                tools.push(Box::new(GitLogTool) as Box<dyn Tool>);
-                                tools.push(Box::new(GitDiffTool) as Box<dyn Tool>);
-
-                                // Register tools in the new tool registry
-                                let rt = tokio::runtime::Handle::current();
-                                for tool in tools {
-                                    let _ = rt.block_on(agent.tool_registry.register_tool(tool));
-                                }
+                            // Register tools in the new tool registry
+                            for tool in tools {
+                                let _ = agent.tool_registry.register_tool_arc(tool).await;
                             }
                         }
                     }
@@ -570,7 +585,8 @@ async fn run_loop(
                     // We obfuscate the marker ("_MYLM_" "EOF") to prevent the shell echo from triggering the detector
                     // We also use stty -echo to prevent the command itself from being echoed (if suppression fails),
                     // which keeps the output clean and prevents false positives if the command itself contains the marker.
-                    let wrapped_cmd = format!("stty -echo; {{ {}; }} ; echo _MYLM_\"\"EOF_$?; stty echo\r", cmd.trim());
+                    // We check if stdin is a TTY before calling stty to avoid errors in non-interactive environments.
+                    let wrapped_cmd = format!("([ -t 0 ] && stty -echo) 2>/dev/null; {{ {}; }} ; echo '_MYLM_EOF_'$?; ([ -t 0 ] && stty echo) 2>/dev/null\r", cmd.trim());
                     
                     // Set up echo suppression
                     // We expect the shell to echo exactly what we type
@@ -630,6 +646,13 @@ async fn run_loop(
                             // Global Help View Toggle (F1)
                             if key.code == KeyCode::F(1) {
                                 app.show_help_view = !app.show_help_view;
+                                // Reset other view states to prevent selection leaking
+                                if app.show_help_view {
+                                    app.show_memory_view = false;
+                                    app.memory_graph_scroll = 0;
+                                    app.show_job_detail = false;
+                                    app.job_scroll = 0;
+                                }
                                 continue;
                             }
 
@@ -642,7 +665,11 @@ async fn run_loop(
                             // Global Memory View Toggle (F3)
                             if key.code == KeyCode::F(3) {
                                 app.show_memory_view = !app.show_memory_view;
+                                // Reset view states when toggling to prevent selection leaking
                                 if app.show_memory_view {
+                                    app.show_help_view = false;
+                                    app.show_job_detail = false;
+                                    app.job_scroll = 0;
                                     let store_clone = store.clone();
                                     let event_tx_clone = event_tx.clone();
                                     // Use last user message or "project" as query
@@ -659,6 +686,44 @@ async fn run_loop(
                                     });
                                 }
                                 continue;
+                            }
+
+                            // Global Jobs Panel Toggle (F4 only)
+                            if key.code == KeyCode::F(4) {
+                                app.show_jobs_panel = !app.show_jobs_panel;
+                                // Initialize selection if panel is opened and we have jobs
+                                if app.show_jobs_panel {
+                                    let jobs = app.job_registry.list_active_jobs();
+                                    if !jobs.is_empty() && app.selected_job_index.is_none() {
+                                        app.selected_job_index = Some(0);
+                                    }
+                                } else {
+                                    // Clear selection when closing panel to prevent leaking
+                                    app.selected_job_index = None;
+                                    app.job_scroll = 0;
+                                }
+                                continue;
+                            }
+
+                            // Global Terminal Toggle (Ctrl+Shift+T)
+                            if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) {
+                                app.toggle_terminal_visibility();
+                                continue;
+                            }
+
+                            // Global Chat Width Adjustment (Ctrl+Shift+Left/Right)
+                            if key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) {
+                                match key.code {
+                                    KeyCode::Left => {
+                                        app.adjust_chat_width(-5);
+                                        continue;
+                                    }
+                                    KeyCode::Right => {
+                                        app.adjust_chat_width(5);
+                                        continue;
+                                    }
+                                    _ => {}
+                                }
                             }
 
                             match app.focus {
@@ -711,11 +776,70 @@ async fn run_loop(
                                     }
                                 }
                                 Focus::Chat => {
+                                    // Job Panel navigation (when visible)
+                                    if app.show_jobs_panel {
+                                        match key.code {
+                                            KeyCode::Char('q') if app.show_job_detail => {
+                                                app.show_job_detail = false;
+                                                app.job_scroll = 0;
+                                                continue;
+                                            }
+                                            KeyCode::Esc if app.show_job_detail => {
+                                                app.show_job_detail = false;
+                                                app.job_scroll = 0;
+                                                continue;
+                                            }
+                                            KeyCode::Esc if app.show_jobs_panel => {
+                                                app.show_jobs_panel = false;
+                                                app.selected_job_index = None;
+                                                app.job_scroll = 0;
+                                                continue;
+                                            }
+                                            KeyCode::Up => {
+                                                if app.show_job_detail {
+                                                    app.job_scroll = app.job_scroll.saturating_sub(1);
+                                                } else {
+                                                    let jobs = app.job_registry.list_active_jobs();
+                                                    if let Some(idx) = app.selected_job_index {
+                                                        app.selected_job_index = Some(idx.saturating_sub(1));
+                                                    } else if !jobs.is_empty() {
+                                                        app.selected_job_index = Some(0);
+                                                    }
+                                                }
+                                                continue;
+                                            }
+                                            KeyCode::Down => {
+                                                if app.show_job_detail {
+                                                    app.job_scroll = app.job_scroll.saturating_add(1);
+                                                } else {
+                                                    let jobs = app.job_registry.list_active_jobs();
+                                                    if let Some(idx) = app.selected_job_index {
+                                                        if idx + 1 < jobs.len() {
+                                                            app.selected_job_index = Some(idx + 1);
+                                                        }
+                                                    } else if !jobs.is_empty() {
+                                                        app.selected_job_index = Some(0);
+                                                    }
+                                                }
+                                                continue;
+                                            }
+                                            KeyCode::Enter => {
+                                                if !app.show_job_detail && app.selected_job_index.is_some() {
+                                                    app.show_job_detail = true;
+                                                    app.job_scroll = 0;
+                                                }
+                                                continue;
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+
                                     // Control shortcuts - only active when Chat is focused
                                     if key.modifiers.contains(KeyModifiers::CONTROL) {
                                         match key.code {
                                             KeyCode::Char('y') => {
                                                 app.copy_last_ai_response_to_clipboard();
+                                                pending_copy_chord = true;
                                                 let _ = terminal.clear();
                                                 continue;
                                             }
@@ -772,6 +896,17 @@ async fn run_loop(
                                             }
                                             _ => {}
                                         }
+                                    }
+
+                                    // Handle copy chord (Ctrl+Y then U)
+                                    if pending_copy_chord {
+                                        pending_copy_chord = false;
+                                        if key.code == KeyCode::Char('u') || key.code == KeyCode::Char('U') {
+                                            app.copy_visible_conversation_to_clipboard();
+                                            let _ = terminal.clear();
+                                            continue;
+                                        }
+                                        // If not 'u', fall through to normal handling
                                     }
 
                                     if app.state == AppState::Idle || app.state == AppState::WaitingForUser {
@@ -913,14 +1048,58 @@ async fn run_loop(
                                 }
                             }
                         }
+                        CrosstermEvent::Mouse(mouse_event) => {
+                            // Mouse support - click to focus, wheel to scroll, drag to select
+                            match mouse_event.kind {
+                                MouseEventKind::Down(_) => {
+                                    // Clear any previous selection and start new one
+                                    app.clear_selection();
+                                    
+                                    // Determine which pane was clicked and set focus
+                                    // Terminal is on the left (when visible), Chat on the right
+                                    let terminal_width = (terminal.size().map(|s| s.width).unwrap_or(80) as f32 *
+                                        if app.show_terminal { 0.7 } else { 0.0 }) as u16;
+                                    
+                                    if app.show_terminal && mouse_event.column < terminal_width {
+                                        app.focus = Focus::Terminal;
+                                        app.start_selection(mouse_event.column, mouse_event.row, Focus::Terminal);
+                                    } else {
+                                        app.focus = Focus::Chat;
+                                        app.start_selection(mouse_event.column, mouse_event.row, Focus::Chat);
+                                    }
+                                }
+                                MouseEventKind::Drag(_) => {
+                                    // Update selection on drag
+                                    app.update_selection(mouse_event.column, mouse_event.row);
+                                }
+                                MouseEventKind::Up(_) => {
+                                    // End selection and copy to clipboard on release
+                                    if let Some(selected_text) = app.end_selection() {
+                                        if !selected_text.is_empty() {
+                                            // Copy to clipboard using internal method
+                                            app.copy_text_to_clipboard(selected_text);
+                                        }
+                                    }
+                                }
+                                MouseEventKind::ScrollUp => {
+                                    match app.focus {
+                                        Focus::Terminal => app.scroll_terminal_up(),
+                                        Focus::Chat => app.scroll_chat_up(),
+                                    }
+                                }
+                                MouseEventKind::ScrollDown => {
+                                    match app.focus {
+                                        Focus::Terminal => app.scroll_terminal_down(),
+                                        Focus::Chat => app.scroll_chat_down(),
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                         _ => {}
                     }
                 }
             }
-        }
-
-        if app.should_quit {
-            return Ok(());
         }
     }
 }

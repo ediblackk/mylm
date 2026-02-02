@@ -8,8 +8,8 @@ use clap::Parser;
 use console::Style;
 use std::sync::Arc;
 
-use crate::cli::{Cli, Commands, MemoryCommand, ConfigCommand, EditCommand, hub::HubChoice, SessionCommand};
-use mylm_core::config::Config;
+use crate::cli::{Cli, Commands, MemoryCommand, ConfigCommand, EditCommand, hub::HubChoice, SessionCommand, DaemonCommand};
+use mylm_core::config::{Config, ConfigUiExt};
 use mylm_core::context::TerminalContext;
 use mylm_core::llm::{LlmClient, LlmConfig};
 use mylm_core::output::OutputFormatter;
@@ -56,21 +56,21 @@ async fn main() -> Result<()> {
     // Load configuration
     let mut config = Config::load().context("Failed to load configuration")?;
 
-    // Onboarding: Check for fresh install
-    if config.endpoints.is_empty() && config.profiles.is_empty() && !cli.version {
+    // Onboarding: Check for fresh install - skip if any command is specified
+    if !config.is_initialized() && config.profiles.is_empty() && !cli.version && cli.command.is_none() {
         println!("\n👋 Welcome to mylm! It looks like this is a fresh install.");
         println!("🚀 Let's get you set up.");
         
-        // Launch onboarding wizard (simplified version: create endpoint -> create profile)
+        // Launch onboarding wizard (simplified version: configure endpoint -> create profile)
         if dialoguer::Confirm::new()
             .with_prompt("Would you like to configure an LLM endpoint now?")
             .default(true)
             .interact()?
         {
-             crate::cli::hub::handle_create_endpoint(&mut config).await?;
+             crate::cli::hub::handle_setup_endpoint(&mut config).await?;
              
-             if !config.endpoints.is_empty() {
-                 println!("\n✨ Endpoint created! Now let's create a profile to use it.");
+             if config.is_initialized() {
+                 println!("\n✨ Endpoint configured! Now let's create a profile to use it.");
                  if dialoguer::Confirm::new()
                     .with_prompt("Create a profile now?")
                     .default(true)
@@ -109,22 +109,24 @@ async fn main() -> Result<()> {
             dry_run: _,
         }) => {
             let ctx = TerminalContext::collect().await;
-            let endpoint_config = match config.get_endpoint(cli.endpoint.as_deref()) {
-                Ok(ep) => ep,
-                Err(_) => {
-                    println!("❌ No active endpoint configured.");
-                    println!("   Run 'mylm' to open the configuration hub and set up an endpoint.");
-                    return Ok(());
-                }
-            };
+            let resolved = config.resolve_profile();
+            
+            let base_url = resolved.base_url.unwrap_or_else(|| resolved.provider.default_url());
+            let api_key = resolved.api_key.unwrap_or_default();
+            
+            if api_key.is_empty() {
+                println!("❌ No API key configured.");
+                println!("   Run 'mylm' to open the configuration hub and set up an endpoint.");
+                return Ok(());
+            }
 
             let llm_config = LlmConfig::new(
-                endpoint_config.provider.parse().map_err(|e| anyhow::anyhow!("{}", e))?,
-                endpoint_config.base_url.clone(),
-                endpoint_config.model.clone(),
-                Some(endpoint_config.api_key.clone()),
+                format!("{:?}", resolved.provider).to_lowercase().parse().map_err(|e| anyhow::anyhow!("{}", e))?,
+                base_url,
+                resolved.model.clone(),
+                Some(api_key),
             )
-            .with_memory(config.memory.clone());
+            .with_memory(config.features.memory.clone());
             let client = LlmClient::new(llm_config)?;
 
             let prompt = format!(
@@ -160,7 +162,21 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
         }
 
         Some(Commands::Endpoints) => {
-            formatter.print_endpoints(&config.endpoints);
+            // In V2, there's only one base endpoint
+            let endpoint_info = config.get_endpoint_info();
+            println!("\n📊 Endpoint Configuration");
+            println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
+            println!("  Provider: {}", endpoint_info.provider);
+            println!("  Base URL: {}", endpoint_info.base_url);
+            println!("  Model: {}", endpoint_info.model);
+            println!("  API Key: {}", if endpoint_info.api_key_set { "✅ Set" } else { "❌ Not Set" });
+            println!("  Timeout: {}s", endpoint_info.timeout_seconds);
+            
+            // Show active profile and effective config
+            let effective = config.get_effective_endpoint_info();
+            println!("\n  Active Profile: {}", config.profile);
+            println!("  Effective Model: {}", effective.model);
+            println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
         }
 
         Some(Commands::Setup { warmup }) => {
@@ -168,8 +184,8 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
                 mylm_core::memory::VectorStore::warmup().await?;
             } else {
                 handle_settings_dashboard(&mut config).await?;
-                // Only warm up if we have endpoints
-                if !config.endpoints.is_empty() {
+                // Only warm up if we have a configured endpoint
+                if config.is_initialized() {
                     mylm_core::memory::VectorStore::warmup().await?;
                 }
             }
@@ -211,7 +227,7 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
                 .join("memory");
             
             std::fs::create_dir_all(&data_dir)?;
-            let store = mylm_core::memory::store::VectorStore::new(data_dir.to_str().unwrap()).await?;
+            let store = mylm_core::memory::store::VectorStore::new(&data_dir.to_string_lossy()).await?;
 
             match cmd {
                 MemoryCommand::Add { content } => {
@@ -236,42 +252,34 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
         Some(Commands::Config { cmd }) => {
             match cmd {
                 Some(ConfigCommand::Select) => {
-                    let profiles: Vec<String> = config.profiles.iter().map(|p| p.name.clone()).collect();
-                    let ans = inquire::Select::new("Select Active Profile", profiles).prompt()?;
-                    config.active_profile = ans;
-                    config.save_to_default_location()?;
-                    println!("Active profile set to {}", config.active_profile);
+                    let profiles: Vec<String> = config.profile_names();
+                    if profiles.is_empty() {
+                        println!("No profiles available. Create one first.");
+                    } else {
+                        let ans = inquire::Select::new("Select Active Profile", profiles).prompt()?;
+                        config.set_active_profile(&ans)?;
+                        config.save_to_default_location()?;
+                        println!("Active profile set to {}", config.profile);
+                    }
                 }
                 Some(ConfigCommand::New) => {
                     let name = inquire::Text::new("New profile name:").prompt()?;
                     if !name.trim().is_empty() {
-                        config.profiles.push(mylm_core::config::Profile {
-                            name: name.clone(),
-                            endpoint: config.default_endpoint.clone(),
-                            prompt: "default".to_string(),
-                            model: None,
-                        });
-                        config.active_profile = name;
+                        config.create_profile(&name)?;
+                        config.set_active_profile(&name)?;
                         handle_settings_dashboard(&mut config).await?;
                     }
                 }
-                Some(ConfigCommand::Edit { cmd: edit_cmd }) => {
-                    match edit_cmd {
-                        Some(EditCommand::Prompt) => {
-                            let profile = config.get_active_profile()
-                                .map(|p| p.prompt.clone())
-                                .unwrap_or_else(|| "default".to_string());
-                            let path = mylm_core::config::prompt::get_prompts_dir().join(format!("{}.md", profile));
-                            let _ = mylm_core::config::prompt::load_prompt(&profile)?;
-                            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
-                            std::process::Command::new(editor).arg(path).status()?;
-                        }
-                        None => {
-                            handle_settings_dashboard(&mut config).await?;
-                        }
-                    }
+                Some(ConfigCommand::Edit { cmd: Some(EditCommand::Prompt) }) => {
+                    let profile = config.get_active_profile_info()
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| "default".to_string());
+                    let path = mylm_core::config::get_prompts_dir().join(format!("{}.md", profile));
+                    let _ = mylm_core::config::load_prompt(&profile)?;
+                    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
+                    std::process::Command::new(editor).arg(path).status()?;
                 }
-                None => {
+                Some(ConfigCommand::Edit { cmd: None }) | None => {
                     handle_settings_dashboard(&mut config).await?;
                 }
             }
@@ -283,6 +291,18 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
 
         Some(Commands::Server { port }) => {
             server::start_server(*port).await?;
+        }
+
+        Some(Commands::Jobs(_)) => {
+            println!("Not implemented");
+        }
+
+        Some(Commands::Daemon(args)) => {
+            match args.cmd {
+                DaemonCommand::Run => crate::cli::daemon::handle_daemon_run().await?,
+                DaemonCommand::Start => crate::cli::daemon::handle_daemon_start()?,
+                DaemonCommand::Stop => crate::cli::daemon::handle_daemon_stop()?,
+            }
         }
 
         None => {
@@ -339,6 +359,10 @@ async fn handle_hub(config: &mut Config, formatter: &OutputFormatter, initial_co
                 if !query.trim().is_empty() {
                     handle_one_shot(&Cli::parse(), &query, config, formatter).await?;
                 }
+            }
+
+            HubChoice::BackgroundJobs => {
+                crate::cli::jobs::handle_jobs_dashboard(config).await?;
             }
             HubChoice::Configuration => {
                 handle_settings_dashboard(config).await?;
@@ -452,42 +476,16 @@ async fn handle_session_command(cmd: &SessionCommand, _config: &Config) -> Resul
 
 /// Handle the unified settings dashboard - Menu System
 async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
-    // Normalize basic invariants on entry so the menu behaves predictably.
-    // (No destructive changes; we only auto-fix obvious broken pointers.)
-    if !config.profiles.is_empty() {
-        let active_missing = config.active_profile.trim().is_empty()
-            || !config.profiles.iter().any(|p| p.name == config.active_profile);
-        if active_missing {
-            config.active_profile = config.profiles[0].name.clone();
-            config.save_to_default_location()?;
-        }
-    }
-    if !config.endpoints.is_empty() {
-        let default_missing = config.default_endpoint.trim().is_empty()
-            || !config.endpoints.iter().any(|e| e.name == config.default_endpoint);
-        if default_missing {
-            config.default_endpoint = config.endpoints[0].name.clone();
-            config.save_to_default_location()?;
-        }
+    // Ensure we have at least one profile if none exist
+    if config.profiles.is_empty() {
+        config.create_profile("default")?;
+        config.set_active_profile("default")?;
     }
 
-    // Repair active profile endpoint link if it points to a missing endpoint.
-    if let Some(active) = config.get_active_profile().map(|p| p.name.clone()) {
-        let mut needs_repair = false;
-        if let Some(p) = config.profiles.iter().find(|p| p.name == active) {
-            let current_endpoint = p.endpoint.clone();
-            if !current_endpoint.trim().is_empty()
-                && !config.endpoints.iter().any(|e| e.name == current_endpoint)
-            {
-                needs_repair = true;
-            }
-        }
-        if needs_repair {
-            // Clear to fallback rather than forcing a choice here.
-            if let Some(p) = config.profiles.iter_mut().find(|p| p.name == active) {
-                p.endpoint.clear();
-            }
-            config.save_to_default_location()?;
+    // Ensure active profile is valid
+    if !config.profiles.contains_key(&config.profile) {
+        if let Some(first) = config.profile_names().first() {
+            config.profile = first.clone();
         }
     }
 
@@ -501,11 +499,11 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
 
                     match action {
                         crate::cli::hub::ProfileMenuChoice::SelectProfile => {
-                            let profiles: Vec<String> = config.profiles.iter().map(|p| p.name.clone()).collect();
+                            let profiles: Vec<String> = config.profile_names();
                             if let Some(ans) = crate::cli::hub::show_profile_select(profiles)? {
-                                config.active_profile = ans;
+                                config.set_active_profile(&ans)?;
                                 config.save_to_default_location()?;
-                                println!("✅ Active profile set to: {}", config.active_profile);
+                                println!("✅ Active profile set to: {}", config.profile);
                             }
                         }
                         crate::cli::hub::ProfileMenuChoice::CreateProfile => {
@@ -523,59 +521,7 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
             }
 
             crate::cli::hub::SettingsMenuChoice::EndpointSetup => {
-                loop {
-                    let action = crate::cli::hub::show_endpoints_menu(config)?;
-
-                    match action {
-                        crate::cli::hub::EndpointMenuChoice::SetActiveProfileEndpoint => {
-                            let active_profile_name = config.active_profile.clone();
-                            if active_profile_name.trim().is_empty() {
-                                println!("⚠️  No active profile selected. Select a profile first.");
-                                continue;
-                            }
-
-                            let selection = crate::cli::hub::select_endpoint(config)?;
-                            // Apply mutation first, then save after the mutable borrow ends.
-                            let mut new_endpoint_value: Option<String> = None;
-                            let mut updated = false;
-                            if let Some(p) = config.profiles.iter_mut().find(|p| p.name == active_profile_name) {
-                                // None means: clear profile endpoint => fallback to global default
-                                p.endpoint = selection.unwrap_or_default();
-                                new_endpoint_value = Some(p.endpoint.clone());
-                                updated = true;
-                            }
-
-                            if !updated {
-                                println!("⚠️  Active profile not found. Please re-select a profile.");
-                                continue;
-                            }
-
-                            config.save_to_default_location()?;
-                            if new_endpoint_value.as_deref().unwrap_or("").is_empty() {
-                                println!("✅ Active profile endpoint cleared (now using global default endpoint fallback).");
-                            } else {
-                                println!("✅ Active profile endpoint set to: {}", new_endpoint_value.unwrap());
-                            }
-                        }
-                        crate::cli::hub::EndpointMenuChoice::SetDefaultEndpoint => {
-                            if let Some(endpoint) = crate::cli::hub::select_endpoint(config)? {
-                                config.default_endpoint = endpoint;
-                                config.save_to_default_location()?;
-                                println!("✅ Global default endpoint (fallback) set to: {}", config.default_endpoint);
-                            }
-                        }
-                        crate::cli::hub::EndpointMenuChoice::CreateEndpoint => {
-                            crate::cli::hub::handle_create_endpoint(config).await?;
-                        }
-                        crate::cli::hub::EndpointMenuChoice::EditEndpoint => {
-                            crate::cli::hub::handle_edit_endpoint(config).await?;
-                        }
-                        crate::cli::hub::EndpointMenuChoice::DeleteEndpoint => {
-                            crate::cli::hub::handle_delete_endpoint(config)?;
-                        }
-                        crate::cli::hub::EndpointMenuChoice::Back => break,
-                    }
-                }
+                crate::cli::hub::handle_setup_endpoint(config).await?;
             }
 
             crate::cli::hub::SettingsMenuChoice::ToggleTmuxAutostart => {
@@ -590,7 +536,7 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
 
                     match action {
                         crate::cli::hub::WebSearchMenuChoice::ToggleEnabled => {
-                            config.web_search.enabled = !config.web_search.enabled;
+                            config.features.web_search.enabled = !config.features.web_search.enabled;
                             config.save_to_default_location()?;
                         }
                         crate::cli::hub::WebSearchMenuChoice::SetProvider => {
@@ -599,7 +545,11 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                                 "Kimi (Moonshot AI)".to_string(),
                                 "SerpAPI (Google/Bing/etc.)".to_string(),
                             ];
-                            let current = config.web_search.provider.as_str();
+                            let current = match config.features.web_search.provider {
+                                mylm_core::config::SearchProvider::Kimi => "kimi",
+                                mylm_core::config::SearchProvider::Serpapi => "serpapi",
+                                mylm_core::config::SearchProvider::Brave => "brave",
+                            };
                             let default_idx = match current {
                                 "kimi" => 1,
                                 "serpapi" => 2,
@@ -611,22 +561,15 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
 
                             match choice.as_str() {
                                 "Kimi (Moonshot AI)" => {
-                                    config.web_search.enabled = true;
-                                    config.web_search.provider = "kimi".to_string();
-                                    if config.web_search.model.trim().is_empty() {
-                                        config.web_search.model = "kimi-k2-turbo-preview".to_string();
-                                    }
+                                    config.features.web_search.enabled = true;
+                                    config.features.web_search.provider = mylm_core::config::SearchProvider::Kimi;
                                 }
                                 "SerpAPI (Google/Bing/etc.)" => {
-                                    config.web_search.enabled = true;
-                                    config.web_search.provider = "serpapi".to_string();
-                                    // SerpAPI has no model
-                                    config.web_search.model.clear();
+                                    config.features.web_search.enabled = true;
+                                    config.features.web_search.provider = mylm_core::config::SearchProvider::Serpapi;
                                 }
                                 _ => {
-                                    config.web_search.enabled = false;
-                                    config.web_search.provider.clear();
-                                    config.web_search.model.clear();
+                                    config.features.web_search.enabled = false;
                                 }
                             }
 
@@ -638,38 +581,28 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                                 .allow_empty_password(true)
                                 .interact()?;
                             if !key.trim().is_empty() {
-                                config.web_search.api_key = key;
+                                config.features.web_search.api_key = Some(key);
                                 config.save_to_default_location()?;
                             }
                         }
-                        crate::cli::hub::WebSearchMenuChoice::SetModel => {
-                            if config.web_search.provider != "kimi" {
-                                println!("ℹ️  Model is only used for Kimi web search. Select Kimi as provider first.");
-                                continue;
-                            }
-                            let current = if config.web_search.model.trim().is_empty() {
-                                "kimi-k2-turbo-preview".to_string()
-                            } else {
-                                config.web_search.model.clone()
-                            };
-                            let model = inquire::Text::new("Kimi model name:")
-                                .with_initial_value(&current)
-                                .prompt()?;
-                            if !model.trim().is_empty() {
-                                config.web_search.model = model;
-                                config.save_to_default_location()?;
-                            }
-                        }
+
                         crate::cli::hub::WebSearchMenuChoice::Back => break,
                     }
                 }
             }
 
             crate::cli::hub::SettingsMenuChoice::GeneralSettings => {
-                if let Err(e) = config.edit_general() {
-                     println!("❌ Error editing general settings: {}", e);
-                }
-                config.save_to_default_location()?;
+                println!("\n⚙️  General Settings");
+                println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
+                println!("ℹ️  General settings are managed through specific menus in V2:");
+                println!("  - Use 'Manage Profiles' to set models and iteration limits.");
+                println!("  - Use 'Endpoint Setup' to configure API keys and base URLs.");
+                println!("  - Use 'Web Search' to configure search providers.");
+                println!("\n  Current Version: v{}-{}", env!("CARGO_PKG_VERSION"), env!("BUILD_NUMBER"));
+                println!("  Data Directory: {:?}", dirs::data_dir().map(|d| d.join("mylm")));
+                println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
+                
+                let _ = inquire::Select::new("", vec!["Back"]).prompt()?;
             }
 
             crate::cli::hub::SettingsMenuChoice::Back => break,
@@ -691,42 +624,35 @@ async fn handle_one_shot(
     // Collect terminal context
     let ctx = TerminalContext::collect().await;
 
-    // Determine which endpoint to use
-    let endpoint_config = match config.get_endpoint(cli.endpoint.as_deref()) {
-        Ok(ep) => ep,
-        Err(_) => {
-            println!("❌ No active endpoint configured.");
-            println!("   Run 'mylm' to open the configuration hub and set up an endpoint.");
-            return Ok(());
-        }
-    };
-
-    // Get effective model (profile override or endpoint default)
-    let effective_model = if let Some(profile) = config.get_active_profile() {
-        config.get_effective_model(profile)?
-    } else {
-        endpoint_config.model.clone()
-    };
+    // Resolve configuration for active profile
+    let resolved = config.resolve_profile();
+    
+    let base_url = resolved.base_url.unwrap_or_else(|| resolved.provider.default_url());
+    let api_key = resolved.api_key.unwrap_or_default();
+    
+    if api_key.is_empty() {
+        println!("❌ No API key configured.");
+        println!("   Run 'mylm' to open the configuration hub and set up an endpoint.");
+        return Ok(());
+    }
 
     // Create LLM client
-    let llm_config = LlmConfig::new(
-        endpoint_config.provider.parse().map_err(|e| anyhow::anyhow!("{}", e))?,
-        endpoint_config.base_url.clone(),
-        effective_model,
-        Some(endpoint_config.api_key.clone()),
-    )
-    .with_memory(config.memory.clone());
+            let llm_config = LlmConfig::new(
+                format!("{:?}", resolved.provider).to_lowercase().parse().map_err(|e| anyhow::anyhow!("{}", e))?,
+                base_url,
+                resolved.model.clone(),
+                Some(api_key),
+            )
+            .with_memory(config.features.memory.clone());
     let client = Arc::new(LlmClient::new(llm_config)?);
 
     // Build hierarchical system prompt
-    let prompt_name = config.get_active_profile()
-        .map(|p| p.prompt.as_str())
-        .unwrap_or("default");
-    let system_prompt = mylm_core::config::prompt::build_system_prompt(&ctx, prompt_name, Some("CLI (Single Query)")).await?;
+    let system_prompt = mylm_core::config::build_system_prompt(&ctx, "default", Some("CLI (Single Query)"), None).await?;
 
-    println!("{} Querying {}...",
+    println!("{} Querying {} with model {}...",
         blue.apply_to("🤖"),
-        green.apply_to(&endpoint_config.name)
+        green.apply_to(format!("{:?}", resolved.provider).to_lowercase()),
+        green.apply_to(&resolved.model)
     );
 
     // Initialize dependencies for tools
@@ -775,38 +701,51 @@ async fn handle_one_shot(
         .join("mylm")
         .join("memory");
     std::fs::create_dir_all(&data_dir)?;
-    let store = Arc::new(mylm_core::memory::VectorStore::new(data_dir.to_str().unwrap()).await?);
+    let store = Arc::new(mylm_core::memory::VectorStore::new(&data_dir.to_string_lossy()).await?);
 
     // Initialize state store
     let state_store = Arc::new(std::sync::RwLock::new(mylm_core::state::StateStore::new()?));
 
     // Load tools
-    let tools: Vec<Box<dyn mylm_core::agent::Tool>> = vec![
-        Box::new(mylm_core::agent::tools::shell::ShellTool::new(executor, ctx.clone(), event_tx.clone(), Some(store.clone()), Some(Arc::new(mylm_core::memory::MemoryCategorizer::new(client.clone(), store.clone()))), None, None)) as Box<dyn mylm_core::agent::Tool>,
-        Box::new(mylm_core::agent::tools::web_search::WebSearchTool::new(config.web_search.clone(), event_tx.clone())) as Box<dyn mylm_core::agent::Tool>,
-        Box::new(mylm_core::agent::tools::memory::MemoryTool::new(store.clone())) as Box<dyn mylm_core::agent::Tool>,
-        Box::new(mylm_core::agent::tools::crawl::CrawlTool::new(event_tx.clone())) as Box<dyn mylm_core::agent::Tool>,
-        Box::new(mylm_core::agent::tools::fs::FileReadTool) as Box<dyn mylm_core::agent::Tool>,
-        Box::new(mylm_core::agent::tools::fs::FileWriteTool) as Box<dyn mylm_core::agent::Tool>,
-        Box::new(mylm_core::agent::tools::git::GitStatusTool) as Box<dyn mylm_core::agent::Tool>,
-        Box::new(mylm_core::agent::tools::git::GitLogTool) as Box<dyn mylm_core::agent::Tool>,
-        Box::new(mylm_core::agent::tools::git::GitDiffTool) as Box<dyn mylm_core::agent::Tool>,
-        Box::new(mylm_core::agent::tools::state::StateTool::new(state_store.clone())) as Box<dyn mylm_core::agent::Tool>,
-        Box::new(mylm_core::agent::tools::system::SystemMonitorTool::new()) as Box<dyn mylm_core::agent::Tool>,
-        Box::new(mylm_core::agent::tools::terminal_sight::TerminalSightTool::new(event_tx.clone())) as Box<dyn mylm_core::agent::Tool>,
-        Box::new(mylm_core::agent::tools::wait::WaitTool) as Box<dyn mylm_core::agent::Tool>,
+    let job_registry = mylm_core::agent::v2::jobs::JobRegistry::new();
+    let scribe = Arc::new(mylm_core::memory::scribe::Scribe::new(
+        Arc::new(tokio::sync::Mutex::new(mylm_core::memory::journal::Journal::new().unwrap())),
+        store.clone(),
+        client.clone()
+    ));
+
+    let tools: Vec<Arc<dyn mylm_core::agent::Tool>> = vec![
+        Arc::new(mylm_core::agent::tools::shell::ShellTool::new(executor, ctx.clone(), event_tx.clone(), Some(store.clone()), Some(Arc::new(mylm_core::memory::MemoryCategorizer::new(client.clone(), store.clone()))), None, Some(job_registry.clone()))),
+        Arc::new(mylm_core::agent::tools::web_search::WebSearchTool::new(config.features.web_search.clone(), event_tx.clone())),
+        Arc::new(mylm_core::agent::tools::memory::MemoryTool::new(store.clone())),
+        Arc::new(mylm_core::agent::tools::crawl::CrawlTool::new(event_tx.clone())),
+        Arc::new(mylm_core::agent::tools::fs::FileReadTool),
+        Arc::new(mylm_core::agent::tools::fs::FileWriteTool),
+        Arc::new(mylm_core::agent::tools::git::GitStatusTool),
+        Arc::new(mylm_core::agent::tools::git::GitLogTool),
+        Arc::new(mylm_core::agent::tools::git::GitDiffTool),
+        Arc::new(mylm_core::agent::tools::state::StateTool::new(state_store.clone())),
+        Arc::new(mylm_core::agent::tools::system::SystemMonitorTool::new()),
+        Arc::new(mylm_core::agent::tools::terminal_sight::TerminalSightTool::new(event_tx.clone())),
+        Arc::new(mylm_core::agent::tools::wait::WaitTool),
+        Arc::new(mylm_core::agent::tools::delegate::DelegateTool::new(client.clone(), scribe, job_registry.clone(), Some(store.clone()), Some(Arc::new(mylm_core::memory::MemoryCategorizer::new(client.clone(), store.clone()))), None)),
     ];
+
+    let max_iterations = config.get_active_profile_info()
+        .and_then(|p| p.max_iterations)
+        .unwrap_or(10);
 
     let categorizer = Arc::new(mylm_core::memory::categorizer::MemoryCategorizer::new(client.clone(), store.clone()));
     let mut agent = mylm_core::agent::Agent::new_with_iterations(
         client,
         tools,
         system_prompt,
-        config.agent.max_iterations,
-        config.agent.version,
+        max_iterations,
+        mylm_core::config::AgentVersion::V2,
         Some(store),
-        Some(categorizer)
-    );
+        Some(categorizer),
+        Some(job_registry),
+    ).await;
     
     let messages = vec![
         mylm_core::llm::chat::ChatMessage::user(query.to_string()),
@@ -815,7 +754,7 @@ async fn handle_one_shot(
     // Dummy interrupt flag for one-shot
     let interrupt_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    match agent.run(messages, event_tx, interrupt_flag, auto_approve, config.agent.max_driver_loops, None).await {
+    match agent.run(messages, event_tx, interrupt_flag, auto_approve, 30, None).await {
         Ok((response, _usage)) => {
             // Stop the log task
             log_handle.abort();
@@ -838,7 +777,6 @@ async fn handle_one_shot(
 }
 
 /// Fast check for updates by comparing local HEAD with origin/main
-/// This is intended to be called during splash screen or before TUI start
 fn check_for_updates_fast() -> bool {
     // Check if we are in a git repo
     if !std::path::Path::new(".git").exists() {
@@ -846,8 +784,6 @@ fn check_for_updates_fast() -> bool {
     }
 
     // Try to fetch in background with a timeout
-    // In a real scenario, we might want to do this more robustly
-    // For now, we assume origin/main exists
     let output = Command::new("git")
         .args(["rev-parse", "HEAD", "origin/main"])
         .output();
@@ -901,7 +837,6 @@ async fn show_splash_screen() -> Result<()> {
     println!("\r{} [====================] ====", blue.apply_to("==== LOADING MYLM HUB"));
     
     // Wait for fetch to complete (it should be fast, but we don't want to block too long if it hangs)
-    // Actually, thread::spawn doesn't have a timeout easily, but git fetch --quiet usually finishes in < 1s
     let _ = fetch_handle.join();
     
     Ok(())

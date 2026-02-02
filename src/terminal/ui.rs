@@ -1,11 +1,12 @@
 use crate::terminal::app::{App, Focus, AppState};
 use mylm_core::llm::chat::MessageRole;
+use mylm_core::agent::v2::jobs::JobStatus;
 use std::sync::atomic::Ordering;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style, Modifier},
     text::{Line, Span},
-    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Wrap, Clear},
     Frame,
 };
 use tui_term::widget::PseudoTerminal;
@@ -17,27 +18,57 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let stats_rows = (stats_len as f32 / width as f32).ceil() as u16;
     let top_bar_height = 1 + stats_rows.max(1);
 
+    // Job panel height (fixed at 6 rows when visible, 0 when hidden)
+    let job_panel_height = if app.show_jobs_panel { 6u16 } else { 0u16 };
+
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(top_bar_height), Constraint::Min(0)])
+        .constraints([
+            Constraint::Length(top_bar_height),
+            Constraint::Min(0),
+            Constraint::Length(job_panel_height),
+        ])
         .split(frame.area());
 
     render_top_bar(frame, app, main_layout[0], top_bar_height);
 
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-        .split(main_layout[1]);
-
-    if app.show_memory_view {
+    // Check if job detail view should be shown
+    if app.show_job_detail {
+        render_job_detail(frame, app, main_layout[1]);
+    } else if app.show_memory_view {
         render_memory_view(frame, app, main_layout[1]);
     } else {
-        if app.show_help_view {
-            render_help_view(frame, app, chunks[0]);
+        // Dynamic layout based on terminal visibility and chat width
+        let chunks = if app.show_terminal {
+            let chat_pct = app.chat_width_percent;
+            let term_pct = 100u16.saturating_sub(chat_pct);
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(term_pct), Constraint::Percentage(chat_pct)])
+                .split(main_layout[1])
         } else {
-            render_terminal(frame, app, chunks[0]);
+            // Terminal hidden, chat takes full width
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(0), Constraint::Percentage(100)])
+                .split(main_layout[1])
+        };
+
+        if app.show_terminal {
+            if app.show_help_view {
+                render_help_view(frame, app, chunks[0]);
+            } else {
+                render_terminal(frame, app, chunks[0]);
+            }
         }
-        render_chat(frame, app, chunks[1]);
+        // Chat is always rendered in the second chunk (or full width if terminal hidden)
+        let chat_area = if app.show_terminal { chunks[1] } else { chunks[1] };
+        render_chat(frame, app, chat_area);
+    }
+
+    // Render job panel at bottom if visible
+    if app.show_jobs_panel {
+        render_jobs_panel(frame, app, main_layout[2]);
     }
 
     if app.state == AppState::ConfirmExit || app.state == AppState::NamingSession {
@@ -82,11 +113,12 @@ fn render_memory_view(frame: &mut Frame, app: &mut App, area: Rect) {
         .highlight_style(Style::default().add_modifier(Modifier::BOLD).bg(Color::DarkGray))
         .highlight_symbol("> ");
 
-    // We use memory_graph_scroll to select which item is highlighted
+    // Clamp scroll to valid bounds and select highlighted item
     let mut list_state = ratatui::widgets::ListState::default();
     if !app.memory_graph.nodes.is_empty() {
-        let idx = app.memory_graph_scroll % app.memory_graph.nodes.len();
-        list_state.select(Some(idx));
+        let max_scroll = app.memory_graph.nodes.len().saturating_sub(1);
+        app.memory_graph_scroll = app.memory_graph_scroll.clamp(0, max_scroll);
+        list_state.select(Some(app.memory_graph_scroll));
     }
 
     frame.render_stateful_widget(list, chunks[0], &mut list_state);
@@ -98,7 +130,7 @@ fn render_memory_view(frame: &mut Frame, app: &mut App, area: Rect) {
         .border_style(Style::default().fg(Color::Cyan));
 
     if !app.memory_graph.nodes.is_empty() {
-        let idx = app.memory_graph_scroll % app.memory_graph.nodes.len();
+        let idx = app.memory_graph_scroll.clamp(0, app.memory_graph.nodes.len().saturating_sub(1));
         let node = &app.memory_graph.nodes[idx];
         
         let mut detail_lines = Vec::new();
@@ -150,100 +182,116 @@ fn render_help_view(frame: &mut Frame, _app: &mut App, area: Rect) {
         .title(" [ myLM Keyboard Shortcuts Guide ] ")
         .border_style(Style::default().fg(Color::Yellow));
 
-    let mut items = Vec::new();
-    
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(" GLOBAL SHORTCUTS ", Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD))
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("  F1          ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::raw(" Toggle this Help Guide"),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("  F2          ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::raw(" Switch Focus between Terminal and AI Chat"),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("  F3          ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::raw(" Toggle Memory Relationship Graph"),
-    ])));
-    items.push(ListItem::new(Line::from("")));
+    let items = vec![
+        ListItem::new(Line::from(vec![
+            Span::styled(" GLOBAL SHORTCUTS ", Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD))
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  F1          ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" Toggle this Help Guide"),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  F2          ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" Switch Focus between Terminal and AI Chat"),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  F3          ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" Toggle Memory Relationship Graph"),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  F4          ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" Toggle Background Jobs Panel"),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  Ctrl+Shift+T", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" Toggle Terminal Visibility"),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  Ctrl+Shift+←", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" Decrease Chat Width"),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  Ctrl+Shift+→", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" Increase Chat Width"),
+        ])),
+        ListItem::new(Line::from("")),
 
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(" AI CHAT SHORTCUTS (When Focused) ", Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD))
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("  Enter       ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw(" Submit message to AI"),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("  Ctrl+C      ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-        Span::raw(" Abort current AI task"),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("  Ctrl+Y      ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw(" Copy last AI response to clipboard"),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("  Ctrl+B      ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw(" Copy visible terminal buffer to clipboard"),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("  Ctrl+V      ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw(" Toggle Verbose Mode (Show command outputs/thoughts)"),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("  Ctrl+T      ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw(" Toggle showing AI Thoughts"),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("  Ctrl+A      ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw(" Toggle Auto-Approve (Always) / Home (while Idle/Waiting)"),
-    ])));
-    items.push(ListItem::new(Line::from("")));
+        ListItem::new(Line::from(vec![
+            Span::styled(" AI CHAT SHORTCUTS (When Focused) ", Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD))
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  Enter       ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" Submit message to AI"),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  Ctrl+C      ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::raw(" Abort current AI task"),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  Ctrl+Y      ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" Copy last AI response (then U: copy conversation)"),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  Ctrl+B      ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" Copy visible terminal buffer to clipboard"),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  Ctrl+V      ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" Toggle Verbose Mode (Show command outputs/thoughts)"),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  Ctrl+T      ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" Toggle showing AI Thoughts"),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  Ctrl+A      ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(" Toggle Auto-Approve (Always) / Home (while Idle/Waiting)"),
+        ])),
+        ListItem::new(Line::from("")),
 
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(" READLINE INPUT (While Idle) ", Style::default().bg(Color::DarkGray).fg(Color::White).add_modifier(Modifier::BOLD))
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("  Ctrl+A / Home  ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Span::raw(" Move cursor to start of line"),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("  Ctrl+E / End   ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Span::raw(" Move cursor to end of line"),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("  Ctrl+K         ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Span::raw(" Kill (delete) text from cursor to end of line"),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("  Ctrl+U         ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Span::raw(" Kill (delete) text from cursor to start of line"),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("  Arrows         ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Span::raw(" Navigate cursor and chat history"),
-    ])));
-    items.push(ListItem::new(Line::from("")));
+        ListItem::new(Line::from(vec![
+            Span::styled(" READLINE INPUT (While Idle) ", Style::default().bg(Color::DarkGray).fg(Color::White).add_modifier(Modifier::BOLD))
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  Ctrl+A / Home  ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::raw(" Move cursor to start of line"),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  Ctrl+E / End   ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::raw(" Move cursor to end of line"),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  Ctrl+K         ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::raw(" Kill (delete) text from cursor to end of line"),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  Ctrl+U         ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::raw(" Kill (delete) text from cursor to start of line"),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  Arrows         ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::raw(" Navigate cursor and chat history"),
+        ])),
+        ListItem::new(Line::from("")),
 
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(" TERMINAL SHORTCUTS (When Focused) ", Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD))
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::raw("  Direct Input is passed to the shell. Use "),
-        Span::styled("F2", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::raw(" to return to AI Chat."),
-    ])));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled("  PgUp / PgDn    ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Span::raw(" Scroll terminal history"),
-    ])));
-    items.push(ListItem::new(Line::from("")));
+        ListItem::new(Line::from(vec![
+            Span::styled(" TERMINAL SHORTCUTS (When Focused) ", Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD))
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::raw("  Direct Input is passed to the shell. Use "),
+            Span::styled("F2", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw(" to return to AI Chat."),
+        ])),
+        ListItem::new(Line::from(vec![
+            Span::styled("  PgUp / PgDn    ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::raw(" Scroll terminal history"),
+        ])),
+        ListItem::new(Line::from("")),
 
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(" Note: Most shortcuts are editable in config/settings. Most Chat shortcuts require Chat focus. ", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC))
-    ])));
+        ListItem::new(Line::from(vec![
+            Span::styled(" Note: Most shortcuts are editable in config/settings. Most Chat shortcuts require Chat focus. ", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC))
+        ])),
+    ];
 
     let list = List::new(items).block(block);
     frame.render_widget(list, area);
@@ -253,9 +301,9 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
     let stats = app.session_monitor.get_stats();
     let duration = app.session_monitor.format_duration();
 
-    let active_profile = app.config.active_profile.clone();
-    let profile_data = app.config.get_active_profile();
-    let prompt_name = profile_data.map(|p| p.prompt.as_str()).unwrap_or("?");
+    // V2: use profile field (just the name) - no separate prompt field
+    let active_profile = app.config.profile.clone();
+    let prompt_name = "default"; // V2 doesn't have per-profile prompts
 
     let (verbose_text, verbose_color) = if app.verbose_mode {
         (" [VERBOSE: ON (Ctrl+v)] ", Color::Magenta)
@@ -307,7 +355,14 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
         Span::styled(" [F1: Help] ", Style::default().fg(if app.show_help_view { Color::Green } else { Color::Yellow }).add_modifier(Modifier::BOLD)),
         Span::styled(" [F2: Focus] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::styled(" [F3: Memory] ", Style::default().fg(if app.show_memory_view { Color::Green } else { Color::Yellow }).add_modifier(Modifier::BOLD)),
+        Span::styled(" [F4: Jobs] ", Style::default().fg(if app.show_jobs_panel { Color::Green } else { Color::Yellow }).add_modifier(Modifier::BOLD)),
         Span::styled(" [Esc: Exit] ", Style::default().fg(if app.focus == Focus::Chat { Color::Yellow } else { Color::DarkGray }).add_modifier(Modifier::BOLD)),
+        if !app.show_terminal {
+            Span::styled(" [⚠️ TERMINAL HIDDEN - Ctrl+Shift+T] ", Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD))
+        } else {
+            Span::raw("")
+        },
+        Span::styled(format!(" [Chat: {}%] ", app.chat_width_percent), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
 
         // Agent State
         Span::raw(" | "),
@@ -441,9 +496,10 @@ fn render_terminal(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let total_lines = all_lines.len();
     let max_scroll = total_lines.saturating_sub(height);
-    let effective_scroll = app.terminal_scroll.min(max_scroll);
+    // Clamp scroll to valid bounds
+    app.terminal_scroll = app.terminal_scroll.clamp(0, max_scroll);
     
-    let start_idx = total_lines.saturating_sub(effective_scroll).saturating_sub(height);
+    let start_idx = total_lines.saturating_sub(app.terminal_scroll).saturating_sub(height);
     let end_idx = (start_idx + height).min(total_lines);
     
     let mut list_items = Vec::new();
@@ -717,12 +773,15 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     }
     app.last_total_chat_lines = Some(total_lines);
     
+    // Calculate max scroll based on current content
+    let max_scroll = total_lines.saturating_sub(height);
+    
+    // Always clamp scroll to valid bounds first
+    app.chat_scroll = app.chat_scroll.clamp(0, max_scroll);
+    
     let start_index = if app.chat_auto_scroll {
         total_lines.saturating_sub(height)
     } else {
-        // Clamp scroll to valid range
-        let max_scroll = total_lines.saturating_sub(height);
-        app.chat_scroll = app.chat_scroll.clamp(0, max_scroll);
         max_scroll.saturating_sub(app.chat_scroll)
     };
     
@@ -825,7 +884,7 @@ pub fn find_idx_from_coords(text: &str, target_x: u16, target_y: u16, width: usi
     for i in 0..=char_count {
         let (x, y) = calculate_input_cursor_pos(text, i, width);
         if y == target_y {
-            let dist = (x as i32 - target_x as i32).abs() as u32;
+            let dist = (x as i32 - target_x as i32).unsigned_abs();
             if dist <= min_dist {
                 min_dist = dist;
                 best_idx = i;
@@ -1003,4 +1062,192 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+fn render_jobs_panel(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Get all jobs from the registry
+    let jobs = app.job_registry.list_active_jobs();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Background Jobs (F4: toggle, ↑↓: navigate, Enter: details, q/Esc: close) ")
+        .border_style(if !jobs.is_empty() {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        });
+
+    if jobs.is_empty() {
+        let empty_text = Paragraph::new("No active background jobs")
+            .block(block)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(empty_text, area);
+        return;
+    }
+
+    let mut items = Vec::new();
+    for (idx, job) in jobs.iter().enumerate() {
+        let short_id = &job.id[..8.min(job.id.len())];
+        let status_str = match job.status {
+            JobStatus::Running => "● Running",
+            JobStatus::Completed => "✓ Done",
+            JobStatus::Failed => "✗ Failed",
+        };
+        let status_color = match job.status {
+            JobStatus::Running => Color::Yellow,
+            JobStatus::Completed => Color::Green,
+            JobStatus::Failed => Color::Red,
+        };
+
+        // Truncate description to fit
+        let max_desc_len = area.width.saturating_sub(25) as usize;
+        let desc = if job.description.len() > max_desc_len {
+            format!("{}...", &job.description[..max_desc_len.saturating_sub(3)])
+        } else {
+            job.description.clone()
+        };
+
+        let is_selected = app.selected_job_index == Some(idx);
+        let prefix = if is_selected { "► " } else { "  " };
+
+        let line = Line::from(vec![
+            Span::raw(prefix),
+            Span::styled(format!("#{}", short_id), Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
+            Span::styled(status_str, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+            Span::raw(desc),
+        ]);
+
+        items.push(ListItem::new(line));
+    }
+
+    let list = List::new(items)
+        .block(block);
+
+    frame.render_widget(list, area);
+}
+
+fn render_job_detail(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Clear the area and render a popup-like view
+    frame.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Job Details (Esc/q: close, ↑↓: scroll) ")
+        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+
+    let inner_area = block.inner(area);
+    frame.render_widget(block, area);
+
+    // Get all jobs and find the selected one
+    let jobs = app.job_registry.list_active_jobs();
+    let content = if let Some(selected_idx) = app.selected_job_index {
+        if let Some(job) = jobs.get(selected_idx) {
+            let mut lines = Vec::new();
+
+            // Job ID
+            lines.push(Line::from(vec![
+                Span::styled("Job ID: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(&job.id),
+            ]));
+
+            // Tool name
+            lines.push(Line::from(vec![
+                Span::styled("Tool: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(&job.tool_name),
+            ]));
+
+            // Status
+            let (status_text, status_color) = match job.status {
+                JobStatus::Running => ("Running", Color::Yellow),
+                JobStatus::Completed => ("Completed", Color::Green),
+                JobStatus::Failed => ("Failed", Color::Red),
+            };
+            lines.push(Line::from(vec![
+                Span::styled("Status: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(status_text, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+            ]));
+
+            // Started at
+            lines.push(Line::from(vec![
+                Span::styled("Started: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(job.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+            ]));
+
+            // Finished at (if applicable)
+            if let Some(finished) = job.finished_at {
+                lines.push(Line::from(vec![
+                    Span::styled("Finished: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::raw(finished.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+                ]));
+            }
+
+            lines.push(Line::from(""));
+
+            // Description
+            lines.push(Line::from(vec![
+                Span::styled("Description:", Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED)),
+            ]));
+            for line in job.description.lines() {
+                lines.push(Line::from(line));
+            }
+
+            // Output
+            if !job.output.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("Output:", Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED)),
+                ]));
+                for line in job.output.lines() {
+                    lines.push(Line::from(line));
+                }
+            }
+
+            // Error
+            if let Some(ref error) = job.error {
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("Error:", Style::default().fg(Color::Red).add_modifier(Modifier::UNDERLINED)),
+                ]));
+                for line in error.lines() {
+                    lines.push(Line::from(Span::styled(line, Style::default().fg(Color::Red))));
+                }
+            }
+
+            // Result
+            if let Some(ref result) = job.result {
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("Result:", Style::default().fg(Color::Green).add_modifier(Modifier::UNDERLINED)),
+                ]));
+                let result_str = serde_json::to_string_pretty(result).unwrap_or_default();
+                let result_lines: Vec<String> = result_str.lines().map(|s| s.to_string()).collect();
+                for line in result_lines {
+                    lines.push(Line::from(Span::styled(line, Style::default().fg(Color::Green))));
+                }
+            }
+
+            lines
+        } else {
+            vec![Line::from("No job selected")]
+        }
+    } else {
+        vec![Line::from("No job selected")]
+    };
+
+    // Apply scrolling
+    let visible_height = inner_area.height as usize;
+    let total_lines = content.len();
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    app.job_scroll = app.job_scroll.min(max_scroll);
+
+    let start_idx = app.job_scroll;
+    let end_idx = (start_idx + visible_height).min(total_lines);
+    let visible_content: Vec<Line> = content[start_idx..end_idx].to_vec();
+
+    let paragraph = Paragraph::new(visible_content)
+        .wrap(Wrap { trim: true });
+
+    frame.render_widget(paragraph, inner_area);
 }

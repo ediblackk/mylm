@@ -1,13 +1,18 @@
 # mylm — Terminal AI, done right
+
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Terminal AI](https://img.shields.io/badge/Terminal-AI-blue.svg)](#)
 
-**mylm (My Language Model)** is a high-performance **Terminal AI Assistant** built for developers who actually spend their day in the CLI. 
+> **What does "mylm" mean?** Honestly? It came to me in a fever dream at 3 AM. 
+> Could be **My Learning Machine**. Or **My Language Model**. Or **My Little Minion** if you're feeling whimsical. 
+> The acronym expanded to fit the vibe. What matters is what it *does*.
+
+**mylm** is a high-performance **Terminal AI Assistant** built for anyone who wants to leverage the power of large language models.
 
 ![mylm Dashboard](assets/hero.png)
 
-It’s not a fancy chatbot wrapper or a toy script. `mylm` is an **agentic terminal companion** that understands your system, reasons through tasks, and bridges natural language with actual shell execution.
+`mylm` is an **agentic terminal companion** that understands your system, reasons through tasks, and bridges natural language with actual shell execution. It maintains conversational memory, executes commands, searches the web, and can delegate long-running tasks to background workers—all through a clean terminal interface.
 
 You install it as the `ai` command, and it fits right into your workflow instead of getting in the way.
 
@@ -15,15 +20,15 @@ You install it as the `ai` command, and it fits right into your workflow instead
 
 ## What makes it different?
 
-Most "AI CLI tools" are just thin API frontends: stateless, slow, and blind to your environment. `mylm` treats the terminal as a first-class citizen.
+Built in **Rust** for speed and efficiency, `mylm` remains lightweight while being versatile enough to handle everything from quick queries to complex multi-step tasks. It maintains persistent memory across sessions, captures rich context from your environment, and can execute commands, read files, search the web, and delegate work to specialized background agents.
 
 ### ⚡ Pop Terminal & Context (`ai pop`)
 This is the "killer feature." `ai pop` grabs your current `tmux` pane history, running processes, and env vars, and drops them into an AI session. You don't have to copy-paste errors; the AI is already looking at them.
 
-### 🫧 Clean UI & Smart Reflow
+### � Clean UI & Smart Reflow
 Commands run in the background so they don't clutter your chat, but the AI still sees every bit of output. The TUI (powered by `ratatui`) handles window resizing perfectly without breaking the layout.
 
-### 🧠 Agentic Loop (Think-Plan-Execute)
+### � Agentic Loop (Think-Plan-Execute)
 In interactive mode, the AI doesn't just talk. It uses a ReAct loop to:
 1.  **Reason** about your request.
 2.  **Plan** a multi-step solution.
@@ -38,7 +43,7 @@ In interactive mode, the AI doesn't just talk. It uses a ReAct loop to:
 *   Execution history.
 
 ### 🌐 Live Web Search & Crawling
-Built-in tools for real-time searching and crawling. No more stale training data—if there’s a new library update, `mylm` can find the docs.
+Built-in tools for real-time searching and crawling. No more stale training data—if there's a new library update, `mylm` can find the docs.
 
 ### 🔁 Multi-Provider Support
 One interface for everything:
@@ -98,8 +103,13 @@ ai "how do I tar a directory excluding .git?"
 ### 4. Interactive Mode (`ai interactive`)
 Starts a fresh session focused on the current directory but without capturing the previous command output.
 
+---
+
 ## Configuration
+
 Settings are in `~/.config/mylm/mylm.yaml`. You can edit prompts, switch models, and manage API keys directly in the UI.
+
+---
 
 ## Troubleshooting
 
@@ -118,10 +128,19 @@ This often happens if the API key is missing or invalid. Run `ai` and select **C
 *   Ensure you are using a modern terminal emulator (Alacritty, iTerm2, Kitty, Windows Terminal).
 *   Try resizing the window to force a redraw.
 
-## Roadmap
-*   **V2 Cognitive Engine**: Transitioning to a multi-layered worker architecture.
-*   Background task queues.
-*   Master-agent orchestration.
+---
+
+## What's Cooking (Roadmap)
+
+Here's what we're actually building right now (not vaporware, just work-in-progress):
+
+- **🧠 V2 Cognitive Engine** — A multi-layered worker architecture that lets agents delegate tasks to specialized sub-agents. Think: master orchestrator + worker bees.
+- **📋 Background Job Queues** — Fire off long-running AI tasks and check back later. No more watching the terminal like a Netflix loading screen.
+- **🤝 Master-Agent Orchestration** — Smarter coordination between agents so they don't step on each other's toes.
+
+*This section will shrink as we ship. Check back often—or better yet, contribute!*
+
+---
 
 ## Contributing
 
@@ -130,9 +149,13 @@ We love contributions! Please see our [CONTRIBUTING.md](CONTRIBUTING.md) for det
 ---
 
 ## Acknowledgements
+
 Built on the shoulders of giants: **Rust, Linux, Git, ratatui, tokio, lancedb**, and the amazing research from **Google, Anthropic, OpenAI, Meta, and the Open Source AI community.**
+
+Also, a special thanks to whoever invented coffee. You know who you are.
 
 ---
 
 ## Keywords
+
 Terminal AI, CLI LLM, Rust AI tool, Local LLM assistant, Ollama CLI, OpenAI terminal, Anthropic Claude CLI, Gemini terminal, Developer productivity, Command-line AI, tmux AI, Agentic Loop, ReAct Agent.

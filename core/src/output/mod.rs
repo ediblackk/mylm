@@ -4,7 +4,7 @@
 //! and system status using colored output.
 //! test debug
 use crate::context::TerminalContext;
-use crate::config::endpoints::EndpointConfig;
+// ConfigV2Ext removed - using native V2 API directly
 use crate::llm::ChatResponse;
 use console::Style;
 
@@ -19,9 +19,8 @@ pub struct OutputFormatter {
     bold: Style,
 }
 
-impl OutputFormatter {
-    /// Create a new formatter
-    pub fn new() -> Self {
+impl Default for OutputFormatter {
+    fn default() -> Self {
         Self {
             blue: Style::new().blue(),
             green: Style::new().green(),
@@ -29,6 +28,13 @@ impl OutputFormatter {
             red: Style::new().red(),
             bold: Style::new().bold(),
         }
+    }
+}
+
+impl OutputFormatter {
+    /// Create a new formatter
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Print the AI response
@@ -78,15 +84,15 @@ impl OutputFormatter {
     }
 
     /// Print available endpoints
-    pub fn print_endpoints(&self, endpoints: &[EndpointConfig]) {
+    pub fn print_endpoints(&self, config: &crate::config::Config) {
         println!();
-        println!("{}", self.bold.apply_to("Available Endpoints:"));
-        for endpoint in endpoints {
-            println!("- {}: {} ({})", 
-                self.green.apply_to(&endpoint.name),
-                endpoint.model,
-                endpoint.base_url
-            );
+        println!("{}", self.bold.apply_to("Current Configuration:"));
+        let resolved = config.resolve_profile();
+        println!("- Profile: {}", self.green.apply_to(&config.profile));
+        println!("- Provider: {:?}", resolved.provider);
+        println!("- Model: {}", resolved.model);
+        if let Some(base_url) = &resolved.base_url {
+            println!("- Base URL: {}", base_url);
         }
     }
 

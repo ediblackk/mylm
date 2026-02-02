@@ -1,0 +1,19 @@
+profile = "fast"
+
+[endpoint]
+provider = "openai"
+model = "gpt-4o"
+timeout_secs = 30
+
+[profiles]
+
+[features.web_search]
+enabled = false
+provider = "serpapi"
+max_results = 5
+
+[features.memory]
+enabled = true
+auto_record = true
+auto_context = true
+max_context_memories = 10

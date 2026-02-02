@@ -1,6 +1,7 @@
 //! Agent V2 Core Implementation
 use crate::llm::{LlmClient, chat::{ChatMessage, ChatRequest, MessageRole}, TokenUsage};
 use crate::agent::tool::{Tool, ToolKind, ToolOutput};
+use crate::agent::toolcall_log;
 use crate::agent::v2::jobs::{JobRegistry, JobStatus};
 use crate::agent::event::RuntimeEvent;
 use crate::agent::v2::recovery::{RecoveryWorker, RecoveryContext};
@@ -16,7 +17,7 @@ use regex::Regex;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShortKeyAction {
-    #[serde(rename = "t")]
+    #[serde(rename = "t", default)]
     pub thought: String,
     #[serde(rename = "a")]
     pub action: Option<String>,
@@ -24,6 +25,19 @@ pub struct ShortKeyAction {
     pub input: Option<serde_json::Value>,
     #[serde(rename = "f")]
     pub final_answer: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShortKeyAction;
+
+    #[test]
+    fn short_key_action_parses_without_thought() {
+        let v: ShortKeyAction = serde_json::from_str(r#"{"f":"test"}"#)
+            .expect("ShortKeyAction should parse without 't'");
+        assert_eq!(v.thought, "");
+        assert_eq!(v.final_answer.as_deref(), Some("test"));
+    }
 }
 
 /// Try to parse one or more [`ShortKeyAction`] from arbitrary model output.
@@ -295,23 +309,27 @@ pub struct AgentV2 {
     pub max_steps: usize,                 // Current step limit (can be increased)
     pub heartbeat_interval: std::time::Duration, // How often to poll for job updates
     pub safety_timeout: std::time::Duration,     // Maximum duration for autonomous run
+
+    /// Optional capabilities context to inject into system prompt
+    pub capabilities_context: Option<String>,
 }
 
 impl AgentV2 {
     pub fn new_with_iterations(
         client: Arc<LlmClient>,
         scribe: Arc<Scribe>,
-        tools: Vec<Box<dyn Tool>>,
+        tools: Vec<Arc<dyn Tool>>,
         system_prompt_prefix: String,
         max_iterations: usize,
         version: crate::config::AgentVersion,
         memory_store: Option<Arc<crate::memory::store::VectorStore>>,
         categorizer: Option<Arc<MemoryCategorizer>>,
         job_registry: Option<JobRegistry>,
+        capabilities_context: Option<String>,
     ) -> Self {
         let mut tool_map = HashMap::new();
         for tool in tools {
-            tool_map.insert(tool.name().to_string(), Arc::from(tool));
+            tool_map.insert(tool.name().to_string(), tool);
         }
 
         let session_id = chrono::Utc::now().timestamp_millis().to_string();
@@ -341,6 +359,7 @@ impl AgentV2 {
             max_steps: max_iterations, // Initial step limit
             heartbeat_interval: std::time::Duration::from_secs(5), // 5 second heartbeat
             safety_timeout: std::time::Duration::from_secs(300), // 5 minute safety timeout
+            capabilities_context,
         }
     }
 
@@ -384,6 +403,14 @@ impl AgentV2 {
     }
 
     /// Reset the agent's state for a new task.
+    ///
+    /// This function:
+    /// 1. Resets iteration counters and state
+    /// 2. Generates and injects the system prompt with capabilities
+    /// 3. Injects recent journal entries (hot memory) into the context
+    /// 4. Ensures the model knows it should proactively use memory tools
+    ///
+    /// NOTE: To also inject hot memory context, call `inject_hot_memory()` after this.
     pub fn reset(&mut self, history: Vec<ChatMessage>) {
         self.history = history;
         self.iteration_count = 0;
@@ -395,10 +422,71 @@ impl AgentV2 {
         self.pending_tool_call_id = None;
         self.max_steps = self.budget; // Reset step limit to budget
 
-        // Ensure system prompt is present
+        // Ensure system prompt is present with capability awareness
         if self.history.is_empty() || self.history[0].role != MessageRole::System {
             self.history.insert(0, ChatMessage::system(self.generate_system_prompt()));
         }
+    }
+
+    /// Inject hot memory (recent journal entries) into the conversation context.
+    ///
+    /// This should be called after `reset()` to add recent activity awareness.
+    /// Call this before starting the agent loop to ensure the model knows about
+    /// recent interactions and can reference them proactively.
+    pub async fn inject_hot_memory(&mut self, limit: usize) {
+        // Inject hot memory (recent journal entries) into context
+        // This ensures the model is aware of recent activity and can use memory proactively
+        if let Ok(hot_memory_context) = self.get_hot_memory_context(limit).await {
+            if !hot_memory_context.is_empty() {
+                // Insert hot memory after system prompt but before user messages
+                let hot_memory_msg = ChatMessage::system(format!(
+                    "## Recent Activity (Hot Memory)\n{}\n\nUse this context and proactively search memory for relevant information when needed.",
+                    hot_memory_context
+                ));
+                if self.history.len() > 1 {
+                    self.history.insert(1, hot_memory_msg);
+                } else {
+                    self.history.push(hot_memory_msg);
+                }
+            }
+        }
+    }
+
+    /// Reset the agent and immediately inject hot memory context.
+    ///
+    /// This is a convenience method that combines `reset()` and `inject_hot_memory()`.
+    pub async fn reset_with_memory(&mut self, history: Vec<ChatMessage>, limit: usize) {
+        self.reset(history);
+        self.inject_hot_memory(limit).await;
+    }
+
+    /// Get recent journal entries (hot memory) as context
+    ///
+    /// Fetches the last N entries from the journal to provide
+    /// immediate context about recent activity.
+    async fn get_hot_memory_context(&self, limit: usize) -> Result<String, Box<dyn StdError + Send + Sync>> {
+        let journal = self.scribe.journal();
+        let journal_guard = journal.lock().await;
+        let entries = journal_guard.entries();
+        
+        if entries.is_empty() {
+            return Ok(String::new());
+        }
+        
+        // Get the last N entries
+        let start = entries.len().saturating_sub(limit);
+        let recent_entries = &entries[start..];
+        
+        let mut context = String::new();
+        for entry in recent_entries {
+            context.push_str(&format!("- [{}] {}: {}\n", 
+                entry.timestamp, 
+                entry.entry_type,
+                entry.content.lines().next().unwrap_or(&entry.content) // First line only
+            ));
+        }
+        
+        Ok(context)
     }
 
     /// Perform a single step in the agentic loop.
@@ -473,6 +561,24 @@ impl AgentV2 {
         let response = self.llm_client.chat(&request).await?;
         let content = response.content();
 
+        // Structured debug log (JSONL)
+        // Captures raw content + native tool_calls for post-mortem parsing/tool-call debugging.
+        let tool_calls_json = response.choices
+            .first()
+            .and_then(|c| c.message.tool_calls.as_ref())
+            .map(|tcs| serde_json::to_value(tcs).unwrap_or(serde_json::Value::Null))
+            .unwrap_or(serde_json::Value::Null);
+        toolcall_log::append_jsonl_owned(serde_json::json!({
+            "kind": "llm_response",
+            "session_id": self.session_id,
+            "iteration": self.iteration_count,
+            "provider": format!("{}", self.llm_client.provider()),
+            "model": self.llm_client.model(),
+            "finish_reason": response.choices.first().and_then(|c| c.finish_reason.clone()),
+            "content": truncate_for_log(&content, 4000),
+            "tool_calls": tool_calls_json,
+        }));
+
         // Log the thought/response
         let _ = self.scribe.observe(InteractionType::Thought, &content).await;
 
@@ -494,6 +600,13 @@ impl AgentV2 {
                 short_key_actions = Some(actions);
             }
             Err(e) if is_short_key_likely => {
+                toolcall_log::append_jsonl_owned(serde_json::json!({
+                    "kind": "parse_error",
+                    "session_id": self.session_id,
+                    "iteration": self.iteration_count,
+                    "parser": "short_key",
+                    "message": e.message,
+                }));
                 self.parse_failure_count += 1;
                 if self.parse_failure_count > 1 {
                     crate::info_log!("Repeated Short-Key failure (attempt {}), triggering RecoveryWorker...", self.parse_failure_count);
@@ -522,6 +635,12 @@ impl AgentV2 {
                             short_key_actions = Some(recovered_actions);
                         }
                         Err(rec_err) => {
+                            toolcall_log::append_jsonl_owned(serde_json::json!({
+                                "kind": "recovery_failed",
+                                "session_id": self.session_id,
+                                "iteration": self.iteration_count,
+                                "error": format!("{rec_err}"),
+                            }));
                             crate::error_log!("Recovery failed: {:?}", rec_err);
                             if let Some(tx) = &self.event_tx {
                                 let _ = tx.send(RuntimeEvent::StatusUpdate {
@@ -557,13 +676,22 @@ impl AgentV2 {
             let tool_actions: Vec<_> = actions.into_iter().filter(|a| a.action.is_some()).collect();
             if tool_actions.is_empty() {
                 self.history.push(ChatMessage::assistant(content.clone()));
+                toolcall_log::append_jsonl_owned(serde_json::json!({
+                    "kind": "agent_decision",
+                    "session_id": self.session_id,
+                    "iteration": self.iteration_count,
+                    "decision": "message",
+                }));
                 return Ok(AgentDecision::Message(content, self.total_usage.clone()));
             }
 
             // Convert ShortKeyAction to AgentRequest
             let mut agent_requests = Vec::new();
             for (idx, sk) in tool_actions.into_iter().enumerate() {
-                let tool_name = sk.action.unwrap();
+                let raw_tool_name = sk.action.unwrap();
+                // Normalize the tool name here
+                let tool_name = crate::agent::tool_registry::normalize_tool_name(&raw_tool_name).to_string();
+                
                 let input = sk.input.unwrap_or(serde_json::Value::Null);
                 agent_requests.push(AgentRequest {
                     id: Some(format!("call_{}_{}", self.iteration_count, idx)),
@@ -615,13 +743,51 @@ impl AgentV2 {
                 }
                 let (tool_name, args, tool_id) = {
                     let tool_call = &message.tool_calls.as_ref().unwrap()[0];
-                    (tool_call.function.name.trim().to_string(), tool_call.function.arguments.to_string(), tool_call.id.clone())
+                    // Normalize the tool name here
+                    let normalized_name = crate::agent::tool_registry::normalize_tool_name(&tool_call.function.name).to_string();
+                    (normalized_name, tool_call.function.arguments.to_string(), tool_call.id.clone())
                 };
+                
+                // Recoverable Error for Unknown Tools
+                if !self.tools.contains_key(&tool_name) {
+                    let available_tools: Vec<_> = self.tools.keys().cloned().collect();
+                    let observation = format!(
+                        "TOOL_ERROR(name_not_found, requested='{}', available={:?})",
+                        tool_name, available_tools
+                    );
+                    
+                    self.history.push(message);
+                    self.history.push(ChatMessage::tool(tool_id, tool_name.clone(), observation.clone()));
+                    
+                    // Log the error
+                    toolcall_log::append_jsonl_owned(serde_json::json!({
+                        "kind": "tool_error",
+                        "session_id": self.session_id,
+                        "iteration": self.iteration_count,
+                        "error": "name_not_found",
+                        "tool": tool_name
+                    }));
+                    
+                    // Return a message so the agent loop continues and sees the observation
+                    return Ok(AgentDecision::Message(
+                        format!("I attempted to call tool '{}' but it was not found. I will try again with a valid tool.", tool_name),
+                        self.total_usage.clone()
+                    ));
+                }
+
                 self.pending_tool_call_id = Some(tool_id);
                 self.last_tool_call = Some((tool_name.clone(), args.clone()));
                 let kind = self.tools.get(&tool_name).map(|t| t.kind()).unwrap_or(ToolKind::Internal);
                 self.history.push(message);
                 let action = AgentDecision::Action { tool: tool_name, args, kind };
+                toolcall_log::append_jsonl_owned(serde_json::json!({
+                    "kind": "agent_decision",
+                    "session_id": self.session_id,
+                    "iteration": self.iteration_count,
+                    "decision": "tool_call_native",
+                    "tool": self.last_tool_call.as_ref().map(|(n, _)| n.clone()),
+                    "args": self.last_tool_call.as_ref().map(|(_, a)| truncate_for_log(a, 4000)),
+                }));
                 if !content.trim().is_empty() {
                     self.pending_decision = Some(action);
                     return Ok(AgentDecision::Message(content, self.total_usage.clone()));
@@ -636,7 +802,9 @@ impl AgentV2 {
         let action_match = action_re.captures(&content);
         let action_input_match = action_input_re.captures(&content);
 
-        if let (Some(tool_name), Some(args)) = (action_match.as_ref().map(|c| c[1].trim().to_string()), action_input_match.as_ref().map(|c| c[1].trim().to_string())) {
+        if let (Some(raw_tool_name), Some(args)) = (action_match.as_ref().map(|c| c[1].trim().to_string()), action_input_match.as_ref().map(|c| c[1].trim().to_string())) {
+            // Normalize the tool name here
+            let tool_name = crate::agent::tool_registry::normalize_tool_name(&raw_tool_name).to_string();
             self.last_tool_call = Some((tool_name.clone(), args.clone()));
             if content.contains("Final Answer:") {
                 self.history.push(ChatMessage::assistant(content.clone()));
@@ -657,6 +825,12 @@ impl AgentV2 {
 
         // 4. Final Answer or just a message
         self.history.push(ChatMessage::assistant(content.clone()));
+        toolcall_log::append_jsonl_owned(serde_json::json!({
+            "kind": "agent_decision",
+            "session_id": self.session_id,
+            "iteration": self.iteration_count,
+            "decision": "message",
+        }));
         Ok(AgentDecision::Message(content, self.total_usage.clone()))
     }
 
@@ -790,6 +964,7 @@ impl AgentV2 {
         }
 
         self.reset(history);
+        self.inject_hot_memory(5).await;
         
         let mut last_observation = None;
         let mut retry_count = 0;
@@ -1082,6 +1257,11 @@ impl AgentV2 {
             tools_desc.push_str(&format!("- {}: {}\n  Usage: {}\n", tool.name(), tool.description(), tool.usage()));
         }
 
+        // Include capabilities context if available
+        let capabilities_section = self.capabilities_context.as_ref()
+            .map(|ctx| format!("\n\n{}\n", ctx))
+            .unwrap_or_default();
+
         format!(
             "{}\n\n\
             # Available Tools\n\
@@ -1089,7 +1269,7 @@ impl AgentV2 {
             # Response Format: Short-Key JSON Protocol\n\
             You MUST respond using the Short-Key JSON protocol. This format minimizes token usage and ensures structural integrity.\n\n\
             ## Schema\n\
-            - `t`: Thought. Your internal reasoning and next steps.\n\
+            - `t`: Thought. Your internal reasoning and next steps (optional; may be omitted for a direct final answer).\n\
             - `a`: Action. The name of the tool to execute (optional if providing final answer).\n\
             - `i`: Input. The arguments for the tool in strict JSON format (optional).\n\
             - `f`: Final Answer. Your final response to the user (optional).\n\n\
@@ -1108,12 +1288,13 @@ impl AgentV2 {
             ```\n\n\
             ### Final Answer\n\
             ```json\n\
-            {{\"t\": \"I have completed the task.\", \"f\": \"The project has been successfully initialized.\"}}\n\
+            {{\"f\": \"The project has been successfully initialized.\"}}\n\
             ```\n\n\
             IMPORTANT: Always wrap your JSON in a code block or return it as the raw response. Ensure all tool inputs are valid JSON objects.\n\n\
-            Begin!",
+            Begin!{}",
             self.system_prompt_prefix,
-            tools_desc
+            tools_desc,
+            capabilities_section
         )
     }
 
@@ -1159,8 +1340,9 @@ impl AgentV2 {
         mut interrupt_rx: tokio::sync::mpsc::Receiver<()>,
         mut approval_rx: tokio::sync::mpsc::Receiver<bool>,
     ) -> Result<(String, TokenUsage), Box<dyn StdError + Send + Sync>> {
-        // Reset state for new task
+        // Reset state for new task and inject hot memory
         self.reset(history);
+        self.inject_hot_memory(5).await;
         
         let start_time = std::time::Instant::now();
         let heartbeat_interval = self.heartbeat_interval;
@@ -1327,4 +1509,13 @@ impl AgentV2 {
             }
         }
     }
+}
+
+fn truncate_for_log(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_string();
+    }
+    let mut out = s[..max_len].to_string();
+    out.push('…');
+    out
 }

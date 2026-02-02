@@ -143,7 +143,7 @@ impl TerminalContext {
                     let (size, modified, mode) = if let Some(m) = metadata {
                         let size = m.len();
                         let modified: DateTime<Local> = m.modified()
-                            .map(|t| DateTime::from(t))
+                            .map(DateTime::from)
                             .unwrap_or_else(|_| DateTime::from(std::time::SystemTime::UNIX_EPOCH));
                         let mode = m.mode();
                         (size, modified.format("%b %d %H:%M").to_string(), mode)
@@ -238,7 +238,7 @@ impl TerminalContext {
     /// Get running processes
     fn get_processes() -> Result<Vec<ProcessInfo>> {
         let output = Command::new("ps")
-            .args(&["aux", "--no-headers"])
+            .args(["aux", "--no-headers"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()
@@ -272,7 +272,7 @@ impl TerminalContext {
     /// Get network connections
     fn get_network_connections() -> Result<Vec<NetworkInfo>> {
         let output = Command::new("ss")
-            .args(&["-tuln", "-p"])
+            .args(["-tuln", "-p"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()
@@ -318,7 +318,7 @@ impl TerminalContext {
         }
 
         let output = Command::new("tmux")
-            .args(&["capture-pane", "-p", "-S", "-300", "-e", "-J"])
+            .args(["capture-pane", "-p", "-S", "-300", "-e", "-J"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()

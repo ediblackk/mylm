@@ -1,8 +1,29 @@
 //! CLI argument parsing using clap 4.x derive macros
 
+pub mod daemon;
 pub mod hub;
+pub mod jobs;
 
 use clap::{Parser, Subcommand};
+
+#[derive(clap::Args, Debug)]
+pub struct JobsArgs {}
+
+#[derive(clap::Args, Debug)]
+pub struct DaemonArgs {
+    #[command(subcommand)]
+    pub cmd: DaemonCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DaemonCommand {
+    /// Run the daemon in the foreground
+    Run,
+    /// Start the daemon in the background
+    Start,
+    /// Stop the running daemon
+    Stop,
+}
 
 /// A globally available, high-performance terminal AI assistant
 ///
@@ -114,6 +135,12 @@ pub enum Commands {
         #[arg(short, long, default_value_t = 41901)]
         port: u16,
     },
+
+    /// Background jobs CLI (placeholder)
+    Jobs(JobsArgs),
+
+    /// Background jobs daemon (placeholder)
+    Daemon(DaemonArgs),
 }
 
 #[derive(Subcommand, Debug)]

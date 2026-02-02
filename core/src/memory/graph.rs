@@ -19,16 +19,14 @@ impl MemoryGraph {
         let memories = store.search_memory(query, limit).await?;
         let mut nodes = Vec::new();
 
-        for i in 0..memories.len() {
+        for (i, current) in memories.iter().enumerate() {
             let mut connections = Vec::new();
-            let current = &memories[i];
             
             // Heuristic: Connect if they share tags or keywords in content
             // For now, let's use a simple keyword overlap or just connect adjacent in search results (as a sequence)
             // Or better: connect if they share the same category_id
-            for j in 0..memories.len() {
+            for (j, other) in memories.iter().enumerate() {
                 if i == j { continue; }
-                let other = &memories[j];
                 
                 let shared_category = current.category_id.is_some() 
                     && current.category_id == other.category_id;

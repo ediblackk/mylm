@@ -25,6 +25,8 @@ pub enum ClientMessage {
         profile: String,
         #[serde(default)]
         enable_terminal: bool,
+        #[serde(default)]
+        config: Option<serde_json::Value>,
     },
     ListSessions,
     #[serde(alias = "GET_PROJECT_INFO")]
@@ -52,6 +54,10 @@ pub enum ClientMessage {
         scope: String,
         patch: serde_json::Value,
     },
+    GetServerConfig,
+    UpdateServerConfig {
+        config: serde_json::Value,
+    },
     TerminalInput {
         session_id: Uuid,
         data: String, // base64
@@ -60,6 +66,20 @@ pub enum ClientMessage {
         session_id: Uuid,
         cols: u16,
         rows: u16,
+    },
+    #[serde(alias = "GET_WORKFLOWS")]
+    GetWorkflows,
+    #[serde(alias = "SYNC_WORKFLOWS")]
+    SyncWorkflows {
+        workflows: Vec<Workflow>,
+        stages: Vec<Stage>,
+    },
+    Ping,
+    GetSystemInfo,
+    TestConnection {
+        provider: String,
+        base_url: Option<String>,
+        api_key: String,
     },
 }
 
@@ -91,6 +111,8 @@ pub enum ServerEvent {
     ProjectInfo {
         root_path: String,
         files: Vec<FileInfo>,
+        #[serde(default)]
+        stats: Option<ProjectStats>,
     },
     SessionCreated {
         session_id: Uuid,
@@ -149,6 +171,18 @@ pub enum ServerEvent {
         text: String,
         cursor: CursorPos,
     },
+    StatusUpdate {
+        session_id: Uuid,
+        status: String,
+    },
+    TypingIndicator {
+        session_id: Uuid,
+        is_typing: bool,
+    },
+    JobsUpdate {
+        session_id: Uuid,
+        jobs: Vec<serde_json::Value>,
+    },
     Config {
         config: serde_json::Value,
     },
@@ -158,6 +192,21 @@ pub enum ServerEvent {
     },
     Error {
         code: String,
+        message: String,
+    },
+    Workflows {
+        workflows: Vec<Workflow>,
+        stages: Vec<Stage>,
+    },
+    SystemInfo {
+        info: SystemInfo,
+    },
+    CreateSessionAck {
+        session_id: Uuid,
+    },
+    Pong,
+    ConnectionTestResult {
+        ok: bool,
         message: String,
     },
 }
@@ -185,6 +234,13 @@ pub struct ToolResponse {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProjectStats {
+    pub file_count: u32,
+    pub total_size: u64,
+    pub loc: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ServerInfo {
     pub name: String,
     pub version: String,
@@ -201,6 +257,8 @@ pub struct Capabilities {
 pub struct SessionSummary {
     pub session_id: Uuid,
     pub title: String,
+    pub status: String,
+    pub created_at: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -215,4 +273,37 @@ pub struct FileInfo {
 pub struct CursorPos {
     pub x: u16,
     pub y: u16,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Workflow {
+    pub id: String,
+    pub title: String,
+    pub description: Option<String>,
+    #[serde(rename = "stageIds")]
+    pub stage_ids: Vec<String>,
+    #[serde(rename = "createdAt")]
+    pub created_at: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Stage {
+    pub id: String,
+    #[serde(rename = "workflowId")]
+    pub workflow_id: String,
+    pub title: String,
+    pub description: Option<String>,
+    #[serde(rename = "taskIds")]
+    pub task_ids: Vec<String>,
+    pub order: i32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SystemInfo {
+    pub config_path: String,
+    pub data_path: String,
+    pub memory_db_path: String,
+    pub sessions_path: String,
+    pub workflows_path: String,
+    pub version: String,
 }

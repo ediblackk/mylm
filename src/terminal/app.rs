@@ -1,15 +1,18 @@
 use crate::terminal::pty::PtyManager;
+use mylm_core::config::ConfigUiExt;
 use mylm_core::memory::graph::MemoryGraph;
 use mylm_core::executor::{CommandExecutor, allowlist::CommandAllowlist, safety::SafetyChecker};
-use mylm_core::llm::chat::ChatMessage;
+use mylm_core::llm::chat::{ChatMessage, MessageRole};
 use mylm_core::llm::TokenUsage;
 use mylm_core::agent::{Agent, AgentDecision, ToolKind};
+use mylm_core::agent::v2::jobs::JobRegistry;
 use crate::terminal::session::SessionMonitor;
 use mylm_core::context::pack::ContextBuilder;
 use vt100::Parser;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
+use std::io::{self, Write};
 use tokio::sync::Mutex;
 
 use tokio::sync::mpsc;
@@ -85,20 +88,37 @@ pub struct App {
     pub last_total_chat_lines: Option<usize>,
     pub show_help_view: bool,
     pub update_available: bool,
-    pub clipboard: Option<arboard::Clipboard>,
     pub exit_name_input: String,
+    // Job Panel state
+    pub show_jobs_panel: bool,
+    pub selected_job_index: Option<usize>,
+    pub job_registry: JobRegistry,
+    pub show_job_detail: bool,
+    pub job_scroll: usize,
+    // UI Layout state
+    pub chat_width_percent: u16,
+    pub show_terminal: bool,
+    // Mouse selection state
+    pub selection_start: Option<(u16, u16)>, // (x, y) in screen coordinates
+    pub selection_end: Option<(u16, u16)>,
+    pub selection_pane: Option<Focus>, // which pane the selection started in
+    pub is_selecting: bool,
+    pub clipboard: Option<arboard::Clipboard>,
 }
 
 impl App {
     pub fn new(pty_manager: PtyManager, agent: Agent, config: mylm_core::config::Config) -> Self {
-        let max_ctx = agent.llm_client.config().max_context_tokens;
-        let input_price = agent.llm_client.config().input_price_per_1m;
-        let output_price = agent.llm_client.config().output_price_per_1m;
+        // In V2, context limits and prices are not stored in config
+        // Use sensible defaults
+        let max_ctx = 128000_usize;
+        let input_price = 0.0;
+        let output_price = 0.0;
         
         let mut session_monitor = SessionMonitor::new();
         session_monitor.set_max_context(max_ctx as u32);
-        let verbose_mode = config.verbose_mode;
-        let auto_approve = Arc::new(AtomicBool::new(config.commands.allow_execution));
+        let verbose_mode = false; // V2 doesn't have verbose_mode config
+        let auto_approve = Arc::new(AtomicBool::new(false)); // V2 doesn't have allow_execution config
+        let clipboard = arboard::Clipboard::new().ok();
 
         let session_id = agent.session_id.clone();
 
@@ -146,8 +166,22 @@ impl App {
             last_total_chat_lines: None,
             show_help_view: false,
             update_available: false,
-            clipboard: arboard::Clipboard::new().ok(),
             exit_name_input: String::new(),
+            // Job Panel state
+            show_jobs_panel: false,
+            selected_job_index: None,
+            job_registry: JobRegistry::new(),
+            show_job_detail: false,
+            job_scroll: 0,
+            // UI Layout state
+            chat_width_percent: 30,
+            show_terminal: true,
+            // Mouse selection state
+            selection_start: None,
+            selection_end: None,
+            selection_pane: None,
+            is_selecting: false,
+            clipboard,
         }
     }
 
@@ -281,7 +315,8 @@ impl App {
             temp_parser.process(&self.raw_buffer);
             let terminal_content = temp_parser.screen().contents();
 
-            let builder = ContextBuilder::new(self.config.context_profile);
+            // V2 doesn't have context_profile, use Balanced as default
+            let builder = ContextBuilder::new(mylm_core::config::ContextProfile::Balanced);
             let mut final_message = input.clone();
 
             // 1. Terminal Pack
@@ -304,7 +339,8 @@ impl App {
             let event_tx_clone = event_tx.clone();
             let interrupt_flag = self.interrupt_flag.clone();
             let auto_approve = self.auto_approve.clone();
-            let max_driver_loops = self.config.agent.max_driver_loops;
+            // V2 doesn't have max_driver_loops, use default
+            let max_driver_loops = 30;
             interrupt_flag.store(false, Ordering::SeqCst);
 
             let task = tokio::spawn(async move {
@@ -321,7 +357,7 @@ impl App {
                         history
                     };
 
-                    agent_lock.reset(final_history);
+                    agent_lock.reset(final_history).await;
                 }
                 
                 run_agent_loop(
@@ -355,7 +391,7 @@ impl App {
             // Try to recover terminal state if we were capturing
             if self.capturing_command_output {
                 let _ = self.pty_manager.write_all(&[3, 13]); // Ctrl+C, Enter
-                let _ = self.pty_manager.write_all(b"stty echo\r");
+                let _ = self.pty_manager.write_all(b"([ -t 0 ] && stty echo) 2>/dev/null\r");
             }
         }
         self.capturing_command_output = false;
@@ -369,13 +405,14 @@ impl App {
         match cmd {
             "/profile" => {
                 if parts.len() < 2 {
+                    let profiles: Vec<String> = self.config.profile_names();
                     self.chat_history.push(ChatMessage::assistant("Usage: /profile <name>\nAvailable profiles: ".to_string() +
-                        &self.config.profiles.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")));
+                        &profiles.join(", ")));
                     return;
                 }
                 let name = parts[1];
-                if self.config.profiles.iter().any(|p| p.name == name) {
-                    self.config.active_profile = name.to_string();
+                if self.config.profiles.contains_key(name) {
+                    self.config.profile = name.to_string();
                     let _ = event_tx.send(TuiEvent::ConfigUpdate(self.config.clone()));
                     self.chat_history.push(ChatMessage::assistant(format!("Switched to profile: {}", name)));
                 } else {
@@ -384,30 +421,37 @@ impl App {
             }
             "/config" => {
                 if parts.len() < 3 {
-                    self.chat_history.push(ChatMessage::assistant("Usage: /config <key> <value>\nKeys: model, endpoint, prompt".to_string()));
+                    self.chat_history.push(ChatMessage::assistant("Usage: /config <key> <value>\nKeys: model, max_iterations".to_string()));
                     return;
                 }
                 let key = parts[1];
                 let value = parts[2];
                 
                 let mut updated = false;
-                let active_profile_name = self.config.active_profile.clone();
-                if let Some(profile) = self.config.profiles.iter_mut().find(|p| p.name == active_profile_name) {
-                    match key {
-                        "model" => {
-                            self.chat_history.push(ChatMessage::assistant("Model editing via /config is pending better endpoint management. Use /profile to switch.".to_string()));
-                        }
-                        "endpoint" => {
-                            profile.endpoint = value.to_string();
+                let active_profile_name = self.config.profile.clone();
+                
+                match key {
+                    "model" => {
+                        // Set model override for active profile
+                        if let Err(e) = self.config.set_profile_model_override(&active_profile_name, Some(value.to_string())) {
+                            self.chat_history.push(ChatMessage::assistant(format!("Error: {}", e)));
+                        } else {
                             updated = true;
                         }
-                        "prompt" => {
-                            profile.prompt = value.to_string();
-                            updated = true;
+                    }
+                    "max_iterations" => {
+                        if let Ok(iters) = value.parse::<usize>() {
+                            if let Err(e) = self.config.set_profile_max_iterations(&active_profile_name, Some(iters)) {
+                                self.chat_history.push(ChatMessage::assistant(format!("Error: {}", e)));
+                            } else {
+                                updated = true;
+                            }
+                        } else {
+                            self.chat_history.push(ChatMessage::assistant("max_iterations must be a number".to_string()));
                         }
-                        _ => {
-                            self.chat_history.push(ChatMessage::assistant(format!("Unknown config key: {}", key)));
-                        }
+                    }
+                    _ => {
+                        self.chat_history.push(ChatMessage::assistant(format!("Unknown config key: {}", key)));
                     }
                 }
                 
@@ -427,16 +471,14 @@ impl App {
                 let agent = self.agent.clone();
                 let event_tx_clone = event_tx.clone();
                 let interrupt_flag = self.interrupt_flag.clone();
-                let cmd_config = self.config.commands.clone();
                 interrupt_flag.store(false, Ordering::SeqCst);
 
                 let auto_approve = self.auto_approve.clone();
-                let max_driver_loops = self.config.agent.max_driver_loops;
+                let max_driver_loops = 30; // V2 doesn't have max_driver_loops
                 let task = tokio::spawn(async move {
                     // Manual execution via /exec
                     // Safety check
-                    let mut allowlist = CommandAllowlist::new();
-                    allowlist.apply_config(&cmd_config);
+                    let allowlist = CommandAllowlist::new();
                     let executor = CommandExecutor::new(allowlist, SafetyChecker::new());
                     let last_obs = if let Err(e) = executor.check_safety(&command) {
                         let err_msg = format!("Error: Safety Check Failed: {}", e);
@@ -487,45 +529,42 @@ impl App {
             "/model" => {
                 if parts.len() < 2 {
                     // Show current model info
-                    let active_profile = self.config.active_profile.clone();
-                    if let Some(profile) = self.config.profiles.iter().find(|p| p.name == active_profile) {
-                        let effective_model = self.config.get_effective_model(profile)
-                            .unwrap_or_else(|_| "unknown".to_string());
-                        let endpoint = self.config.get_endpoint(Some(&profile.endpoint))
-                            .ok()
-                            .map(|e| e.model.clone())
-                            .unwrap_or_else(|| "unknown".to_string());
-                        let model_source = if profile.model.is_some() {
-                            "profile override"
-                        } else {
-                            "endpoint default"
-                        };
-                        self.chat_history.push(ChatMessage::assistant(
-                            format!("Current model: {} ({} via {})\nEndpoint default: {}\n\nUsage: /model <model-name> to set profile model override, or /model clear to use endpoint default.",
-                                effective_model, model_source, active_profile, endpoint)
-                        ));
+                    let active_profile = self.config.profile.clone();
+                    let effective = self.config.get_effective_endpoint_info();
+                    let base = self.config.get_endpoint_info();
+                    let profile_info = self.config.get_profile_info(&active_profile);
+                    
+                    let model_source = if profile_info.as_ref().and_then(|p| p.model_override.as_ref()).is_some() {
+                        "profile override"
                     } else {
-                        self.chat_history.push(ChatMessage::assistant("No active profile.".to_string()));
-                    }
+                        "base endpoint"
+                    };
+                    
+                    self.chat_history.push(ChatMessage::assistant(
+                        format!("Current model: {} ({} via {})\nBase endpoint model: {}\n\nUsage: /model <model-name> to set profile model override, or /model clear to use base endpoint model.",
+                            effective.model, model_source, active_profile, base.model)
+                    ));
                     return;
                 }
                 
                 let value = parts[1];
+                let active_profile_name = self.config.profile.clone();
+                
                 if value == "clear" {
-                    // Clear profile model override, use endpoint default
-                    let active_profile_name = self.config.active_profile.clone();
-                    if let Some(profile) = self.config.profiles.iter_mut().find(|p| p.name == active_profile_name) {
-                        profile.model = None;
+                    // Clear profile model override
+                    if let Err(e) = self.config.set_profile_model_override(&active_profile_name, None) {
+                        self.chat_history.push(ChatMessage::assistant(format!("Error: {}", e)));
+                    } else {
                         let _ = event_tx.send(TuiEvent::ConfigUpdate(self.config.clone()));
                         self.chat_history.push(ChatMessage::assistant(
-                            format!("Model override cleared for profile '{}'. Using endpoint default.", active_profile_name)
+                            format!("Model override cleared for profile '{}'. Using base endpoint model.", active_profile_name)
                         ));
                     }
                 } else {
                     // Set profile model override
-                    let active_profile_name = self.config.active_profile.clone();
-                    if let Some(profile) = self.config.profiles.iter_mut().find(|p| p.name == active_profile_name) {
-                        profile.model = Some(value.to_string());
+                    if let Err(e) = self.config.set_profile_model_override(&active_profile_name, Some(value.to_string())) {
+                        self.chat_history.push(ChatMessage::assistant(format!("Error: {}", e)));
+                    } else {
                         let _ = event_tx.send(TuiEvent::ConfigUpdate(self.config.clone()));
                         self.chat_history.push(ChatMessage::assistant(
                             format!("Model set to '{}' for profile '{}' (profile override)", value, active_profile_name)
@@ -705,36 +744,28 @@ impl App {
     }
 
     pub fn copy_text_to_clipboard(&mut self, text: String) {
-        let clipboard_res = if let Some(cb) = &mut self.clipboard {
-            Ok(cb)
-        } else {
-            match arboard::Clipboard::new() {
-                Ok(cb) => {
-                    self.clipboard = Some(cb);
-                    Ok(self.clipboard.as_mut().unwrap())
-                }
-                Err(e) => Err(e),
+        // Try arboard first
+        if let Some(clipboard) = &mut self.clipboard {
+            if clipboard.set_text(text.clone()).is_ok() {
+                self.status_message = Some("Copied to clipboard".into());
+                return;
             }
-        };
+        }
 
-        match clipboard_res {
-            Ok(clipboard) => {
-                if let Err(e) = clipboard.set_text(text) {
-                    self.status_message = Some(format!("❌ Clipboard error: {}", e));
-                } else {
-                    self.status_message = Some("📋 Copied to clipboard".to_string());
-                }
-            },
+        // Fallback to file
+        let path = "/tmp/mylm-clipboard.txt";
+        match std::fs::write(path, &text) {
+            Ok(_) => {
+                self.status_message = Some(format!("Clipboard unavailable; wrote to {}", path));
+            }
             Err(e) => {
-                 self.status_message = Some(format!("❌ Clipboard error: {}", e));
+                self.status_message = Some(format!("Clipboard error & file write failed: {}", e));
             }
         }
     }
 
     pub fn copy_last_ai_response_to_clipboard(&mut self) {
-        if let Some(msg) = self.chat_history.iter().rev().find(|m| m.role == mylm_core::llm::chat::MessageRole::Assistant) {
-            // Clean up the message if needed (though user asked for "plain text", usually the content is markdown/text)
-            // We'll just copy the content directly as that's usually what is desired.
+        if let Some(msg) = self.chat_history.iter().rev().find(|m| m.role == MessageRole::Assistant) {
             self.copy_text_to_clipboard(msg.content.clone());
         } else {
             self.status_message = Some("⚠️ No AI response to copy".to_string());
@@ -748,6 +779,36 @@ impl App {
          temp_parser.process(&self.raw_buffer);
          let content = temp_parser.screen().contents();
          self.copy_text_to_clipboard(content);
+    }
+
+    pub fn copy_visible_conversation_to_clipboard(&mut self) {
+        let mut transcript = String::new();
+        for msg in &self.chat_history {
+            match msg.role {
+                MessageRole::User => {
+                    if !transcript.is_empty() {
+                        transcript.push_str("\n\n");
+                    }
+                    transcript.push_str("User: ");
+                    transcript.push_str(&msg.content);
+                }
+                MessageRole::Assistant => {
+                    if !transcript.is_empty() {
+                        transcript.push_str("\n\n");
+                    }
+                    transcript.push_str("AI: ");
+                    transcript.push_str(&msg.content);
+                }
+                _ => {
+                    // Skip System, Tool, and any other non-visible roles
+                }
+            }
+        }
+        if transcript.is_empty() {
+            self.status_message = Some("⚠️ No conversation to copy".to_string());
+        } else {
+            self.copy_text_to_clipboard(transcript);
+        }
     }
 
     pub fn set_state(&mut self, state: AppState) {
@@ -779,6 +840,102 @@ impl App {
             usage,
         });
         self.set_state(AppState::Streaming("Answer".to_string()));
+    }
+
+    // UI Layout helpers
+    pub fn adjust_chat_width(&mut self, delta: i16) {
+        let new_width = self.chat_width_percent as i16 + delta;
+        self.chat_width_percent = new_width.clamp(20, 50) as u16;
+    }
+
+    pub fn toggle_terminal_visibility(&mut self) {
+        self.show_terminal = !self.show_terminal;
+        if !self.show_terminal {
+            // When hiding terminal, focus must be on chat
+            self.focus = Focus::Chat;
+        }
+    }
+
+    // Selection helpers
+    pub fn start_selection(&mut self, x: u16, y: u16, pane: Focus) {
+        self.selection_start = Some((x, y));
+        self.selection_end = Some((x, y));
+        self.selection_pane = Some(pane);
+        self.is_selecting = true;
+    }
+
+    pub fn update_selection(&mut self, x: u16, y: u16) {
+        if self.is_selecting {
+            self.selection_end = Some((x, y));
+        }
+    }
+
+    pub fn end_selection(&mut self) -> Option<String> {
+        self.is_selecting = false;
+        let result = self.get_selected_text();
+        // Clear selection after copying
+        self.selection_start = None;
+        self.selection_end = None;
+        self.selection_pane = None;
+        result
+    }
+
+    fn get_selected_text(&self) -> Option<String> {
+        let (start, end, pane) = match (self.selection_start, self.selection_end, self.selection_pane) {
+            (Some(s), Some(e), Some(p)) => (s, e, p),
+            _ => return None,
+        };
+
+        // Normalize selection (start should be top-left, end bottom-right)
+        let (x1, y1) = start;
+        let (x2, y2) = end;
+        let ((start_x, start_y), (end_x, end_y)) = if y1 < y2 || (y1 == y2 && x1 <= x2) {
+            ((x1, y1), (x2, y2))
+        } else {
+            ((x2, y2), (x1, y1))
+        };
+
+        match pane {
+            Focus::Terminal => self.get_terminal_selected_text(start_x, start_y, end_x, end_y),
+            Focus::Chat => self.get_chat_selected_text(start_x, start_y, end_x, end_y),
+        }
+    }
+
+    fn get_terminal_selected_text(&self, start_x: u16, start_y: u16, end_x: u16, end_y: u16) -> Option<String> {
+        // Get terminal screen content
+        let screen = self.terminal_parser.screen();
+        let mut lines = Vec::new();
+
+        for row in start_y..=end_y {
+            let (cols, _) = screen.size();
+            let mut line = String::new();
+            
+            let col_start = if row == start_y { start_x } else { 0 };
+            let col_end = if row == end_y { end_x } else { cols - 1 };
+
+            for col in col_start..=col_end {
+                if let Some(cell) = screen.cell(row, col) {
+                    line.push_str(&cell.contents());
+                }
+            }
+            lines.push(line.trim_end().to_string());
+        }
+
+        Some(lines.join("\n"))
+    }
+
+    fn get_chat_selected_text(&self, _start_x: u16, _start_y: u16, _end_x: u16, _end_y: u16) -> Option<String> {
+        // For chat, we need to reconstruct the visible text and extract selection
+        // This is simplified - chat text is more complex due to wrapping
+        // For now, return a message indicating copy isn't fully implemented for chat
+        None
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection_start = None;
+        self.selection_end = None;
+        self.selection_pane = None;
+        self.is_selecting = false;
     }
 }
 
@@ -909,10 +1066,9 @@ async fn run_agent_loop(
                             let agent_lock = agent.lock().await;
                             if let Some(store) = &agent_lock.memory_store {
                                 if let Ok(memory_id) = store.record_command(&cmd, &output, 0, Some(agent_lock.session_id.clone())).await {
-                                    if agent_lock.llm_client.config().memory.auto_categorize {
-                                        let content = format!("Command: {}\nOutput: {}", cmd, output);
-                                        let _ = agent_lock.auto_categorize(memory_id, &content).await;
-                                    }
+                                    // Auto categorize is always enabled in V2
+                                    let content = format!("Command: {}\nOutput: {}", cmd, output);
+                                    let _ = agent_lock.auto_categorize(memory_id, &content).await;
                                 }
                             }
                         }
@@ -940,7 +1096,7 @@ async fn run_agent_loop(
 
                         let call_res = match agent_lock.tool_registry.execute_tool(&tool, &t_args).await {
                             Ok(output) => Ok(output),
-                            Err(e) => Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, e)) as Box<dyn std::error::Error + Send + Sync>),
+                            Err(e) => Err(Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error + Send + Sync>),
                         };
 
                         match call_res {
@@ -960,6 +1116,17 @@ async fn run_agent_loop(
                                         detail: Some(err_str),
                                     });
                                     return; // TERMINATE the loop
+                                }
+                                
+                                // Check if it's a "tool not found" error - also stop the loop
+                                if err_str.contains("not found in registry") || err_str.contains("not available") {
+                                    let _ = event_tx.send(TuiEvent::AgentResponseFinal(format!("❌ Tool Error: {}", err_str), TokenUsage::default()));
+                                    let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::WaitingForUser));
+                                    let _ = event_tx.send(TuiEvent::ActivityUpdate {
+                                        summary: "Tool Not Found".to_string(),
+                                        detail: Some(err_str.clone()),
+                                    });
+                                    return; // TERMINATE the loop - no point retrying a missing tool
                                 }
                                 
                                 observation = format!("Error: {}", e);

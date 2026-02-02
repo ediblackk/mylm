@@ -30,17 +30,18 @@ impl WebSearchTool {
     async fn call_kimi(&self, query: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
         let _ = self.event_tx.send(TuiEvent::StatusUpdate(format!("Searching (Kimi): {}", query)));
         let base_url = "https://api.moonshot.ai/v1".to_string();
-        let model = if self.config.model.is_empty() {
-            "kimi-k2-turbo-preview".to_string()
-        } else {
-            self.config.model.clone()
-        };
+        let model = "kimi-k2-turbo-preview".to_string();
+
+        let api_key = self.config.api_key.clone().unwrap_or_default();
+        if api_key.is_empty() {
+            return Err(anyhow::anyhow!("Kimi API key not configured").into());
+        }
 
         let llm_config = LlmConfig::new(
             LlmProvider::MoonshotKimi,
             base_url,
             model,
-            Some(self.config.api_key.clone()),
+            Some(api_key),
         );
         let client = LlmClient::new(llm_config)?;
 
@@ -102,10 +103,16 @@ impl WebSearchTool {
         query: &str,
     ) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
         let _ = self.event_tx.send(TuiEvent::StatusUpdate(format!("Searching (SerpAPI): {}", query)));
+        
+        let api_key = self.config.api_key.clone().unwrap_or_default();
+        if api_key.is_empty() {
+            return Err(anyhow::anyhow!("SerpAPI key not configured").into());
+        }
+        
         let url = format!(
             "https://serpapi.com/search.json?q={}&api_key={}",
             urlencoding::encode(query),
-            self.config.api_key
+            api_key
         );
 
         let resp_res = self.client.get(url).send().await;
@@ -172,10 +179,10 @@ impl Tool for WebSearchTool {
             .into());
         }
 
-        match self.config.provider.as_str() {
-            "kimi" => self.call_kimi(args).await,
-            "serpapi" | "google" => self.call_serpapi(args).await,
-            p => Err(anyhow::anyhow!("Unsupported web search provider: {}", p).into()),
+        match self.config.provider {
+            crate::config::SearchProvider::Kimi => self.call_kimi(args).await,
+            crate::config::SearchProvider::Serpapi => self.call_serpapi(args).await,
+            crate::config::SearchProvider::Brave => Err(anyhow::anyhow!("Brave search not yet implemented").into()),
         }
     }
 }

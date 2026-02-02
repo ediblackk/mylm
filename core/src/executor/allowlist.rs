@@ -240,10 +240,7 @@ pub enum AllowlistLevel {
 impl AllowlistLevel {
     /// Check if this level requires force
     pub fn requires_force(&self) -> bool {
-        match self {
-            AllowlistLevel::RequiresForce | AllowlistLevel::Unknown => true,
-            _ => false,
-        }
+        matches!(self, AllowlistLevel::RequiresForce | AllowlistLevel::Unknown)
     }
 
     /// Get a human-readable description

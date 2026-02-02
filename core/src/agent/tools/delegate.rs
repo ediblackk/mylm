@@ -14,6 +14,14 @@ struct DelegateArgs {
     objective: String,
     #[serde(default)]
     context: Option<serde_json::Value>,
+    #[serde(default)]
+    system_prompt: Option<String>,
+    #[serde(default)]
+    tools: Option<Vec<String>>,
+    #[serde(default)]
+    max_iterations: Option<usize>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// A tool for delegating tasks to sub-agents (Executor layer).
@@ -59,7 +67,50 @@ impl Tool for DelegateTool {
     }
 
     fn usage(&self) -> &str {
-        "Provide objective and optional context: {\"objective\": \"task description\", \"context\": {...}}"
+        r#"Provide objective and optional parameters:
+{
+  "objective": "task description",
+  "context": {...},
+  "system_prompt": "custom system prompt (optional)",
+  "tools": ["tool1", "tool2"],
+  "max_iterations": 50,
+  "model": "model-name"
+}"#
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "objective": {
+                    "type": "string",
+                    "description": "Task to delegate to a sub-agent"
+                },
+                "context": {
+                    "description": "Optional structured context passed to the sub-agent",
+                    "nullable": true
+                },
+                "system_prompt": {
+                    "type": "string",
+                    "description": "Optional system prompt override for the sub-agent"
+                },
+                "tools": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional allowlist of tool names for the sub-agent"
+                },
+                "max_iterations": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum iterations for the sub-agent"
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Optional model name override for the sub-agent"
+                }
+            },
+            "required": ["objective"]
+        })
     }
 
     fn kind(&self) -> ToolKind {
@@ -77,6 +128,10 @@ impl Tool for DelegateTool {
             DelegateArgs {
                 objective: args.trim().trim_matches('"').to_string(),
                 context: None,
+                system_prompt: None,
+                tools: None,
+                max_iterations: None::<usize>,
+                model: None,
             }
         };
 
@@ -102,17 +157,29 @@ impl Tool for DelegateTool {
         tokio::spawn(async move {
             crate::info_log!("Starting background sub-agent for task: {}", objective_clone);
             
+            // Prepare sub-agent configuration with custom or default values
+            let system_prompt = delegate_args.system_prompt.unwrap_or_else(|| {
+                format!("You are a specialized worker agent. Your objective is: {}", objective_clone)
+            });
+            let max_iterations = delegate_args.max_iterations.unwrap_or(50);
+            let _model = delegate_args.model; // Model selection to be applied via LLM client configuration
+
+            // TODO: Filter tools based on delegate_args.tools if provided
+            // For now, sub-agent starts with empty tool set (inherits context via prompt)
+            let _requested_tools = delegate_args.tools;
+
             // Create a new AgentV2 instance for the subtask
             let mut sub_agent = AgentV2::new_with_iterations(
                 llm_client,
                 scribe,
                 vec![], // Sub-agent will inherit tools from parent or use minimal set
-                format!("You are a specialized worker agent. Your objective is: {}", objective_clone),
-                50, // Reasonable iteration limit for sub-agents
+                system_prompt,
+                max_iterations,
                 crate::config::AgentVersion::V2,
                 memory_store,
                 categorizer,
                 None, // Sub-agent gets its own JobRegistry for now
+                None, // capabilities_context
             );
 
             // Set up event channels for the sub-agent

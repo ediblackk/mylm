@@ -5,15 +5,24 @@
 //! mixed and matched without hardcoding dependencies.
 
 use crate::agent::{Agent, ToolRegistry};
+use crate::agent::v2::AgentV2;
 use crate::agent::tools;
 use crate::llm::LlmClient;
 use crate::config::AgentVersion;
+use crate::memory::scribe::Scribe;
 use std::sync::Arc;
+
+pub enum BuiltAgent {
+    V1(Agent),
+    V2(AgentV2),
+}
 
 /// Builder for creating agents with different tool configurations
 pub struct AgentBuilder {
     llm_client: Arc<LlmClient>,
+    scribe: Option<Arc<Scribe>>,
     tool_registry: ToolRegistry,
+    pending_tools: Vec<Box<dyn crate::agent::tool::Tool>>,
     system_prompt_prefix: String,
     max_iterations: usize,
     version: AgentVersion,
@@ -26,13 +35,21 @@ impl AgentBuilder {
     pub fn new(llm_client: Arc<LlmClient>) -> Self {
         Self {
             llm_client,
+            scribe: None,
             tool_registry: ToolRegistry::new(),
+            pending_tools: Vec::new(),
             system_prompt_prefix: "You are a helpful AI assistant.".to_string(),
             max_iterations: 50,
             version: AgentVersion::V1,
             memory_store: None,
             categorizer: None,
         }
+    }
+
+    /// Set the scribe for V2 agents
+    pub fn with_scribe(mut self, scribe: Arc<Scribe>) -> Self {
+        self.scribe = Some(scribe);
+        self
     }
     
     /// Set the system prompt prefix
@@ -66,38 +83,57 @@ impl AgentBuilder {
     }
     
     /// Add a single tool to the registry
-    pub fn with_tool(self, tool: Box<dyn crate::agent::tool::Tool>) -> Self {
-        // Note: This is a simplified version. In practice, you'd need to handle
-        // the async nature of tool registration. For now, we'll use a blocking approach.
-        let rt = tokio::runtime::Handle::current();
-        let _ = rt.block_on(self.tool_registry.register_tool(tool));
+    pub fn with_tool(mut self, tool: Box<dyn crate::agent::tool::Tool>) -> Self {
+        self.pending_tools.push(tool);
         self
     }
     
     /// Add multiple tools to the registry
-    pub fn with_tools(self, tools: Vec<Box<dyn crate::agent::tool::Tool>>) -> Self {
-        let rt = tokio::runtime::Handle::current();
-        for tool in tools {
-            let _ = rt.block_on(self.tool_registry.register_tool(tool));
-        }
+    pub fn with_tools(mut self, mut tools: Vec<Box<dyn crate::agent::tool::Tool>>) -> Self {
+        self.pending_tools.append(&mut tools);
         self
     }
     
     /// Build the agent with the current configuration
-    pub fn build(self) -> Agent {
+    pub async fn build(self) -> BuiltAgent {
+        // Register all pending tools
+        for tool in self.pending_tools {
+            let _ = self.tool_registry.register_tool(tool).await;
+        }
+
         // Get all tools from the registry
-        let rt = tokio::runtime::Handle::current();
-        let tools = rt.block_on(self.tool_registry.get_all_tools());
+        let tools_list = self.tool_registry.get_all_tools().await;
         
-        Agent::new_with_iterations(
-            self.llm_client,
-            tools,
-            self.system_prompt_prefix,
-            self.max_iterations,
-            self.version,
-            self.memory_store,
-            self.categorizer,
-        )
+        match self.version {
+            AgentVersion::V2 => {
+                let scribe = self.scribe.expect("Scribe is required for Agent V2");
+
+                BuiltAgent::V2(AgentV2::new_with_iterations(
+                    self.llm_client,
+                    scribe,
+                    tools_list,
+                    self.system_prompt_prefix,
+                    self.max_iterations,
+                    self.version,
+                    self.memory_store,
+                    self.categorizer,
+                    None, // JobRegistry
+                    None, // capabilities_context
+                ))
+            },
+            AgentVersion::V1 => {
+                BuiltAgent::V1(Agent::new_with_iterations(
+                    self.llm_client,
+                    tools_list,
+                    self.system_prompt_prefix,
+                    self.max_iterations,
+                    self.version,
+                    self.memory_store,
+                    self.categorizer,
+                    None, // job_registry
+                ).await)
+            }
+        }
     }
 }
 
@@ -167,21 +203,21 @@ impl AgentConfigs {
 }
 
 /// Helper function to create a basic agent quickly
-pub fn create_basic_agent(llm_client: Arc<LlmClient>) -> Agent {
-    AgentConfigs::basic(llm_client).build()
+pub async fn create_basic_agent(llm_client: Arc<LlmClient>) -> BuiltAgent {
+    AgentConfigs::basic(llm_client).build().await
 }
 
 /// Helper function to create a development agent quickly
-pub fn create_development_agent(llm_client: Arc<LlmClient>) -> Agent {
-    AgentConfigs::development(llm_client).build()
+pub async fn create_development_agent(llm_client: Arc<LlmClient>) -> BuiltAgent {
+    AgentConfigs::development(llm_client).build().await
 }
 
 /// Helper function to create a web-enabled agent quickly
-pub fn create_web_agent(llm_client: Arc<LlmClient>) -> Agent {
-    AgentConfigs::web_enabled(llm_client).build()
+pub async fn create_web_agent(llm_client: Arc<LlmClient>) -> BuiltAgent {
+    AgentConfigs::web_enabled(llm_client).build().await
 }
 
 /// Helper function to create a full-featured agent quickly
-pub fn create_full_agent(llm_client: Arc<LlmClient>) -> Agent {
-    AgentConfigs::full_featured(llm_client).build()
+pub async fn create_full_agent(llm_client: Arc<LlmClient>) -> BuiltAgent {
+    AgentConfigs::full_featured(llm_client).build().await
 }

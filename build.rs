@@ -7,7 +7,9 @@ use std::io::{self, Read};
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=core/src");
     println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-changed=core/Cargo.toml");
     println!("cargo:rerun-if-changed=Cargo.lock");
     
     let git_dir = Path::new(".git");
@@ -53,9 +55,11 @@ fn compute_source_hash() -> io::Result<String> {
     let mut files = vec![
         PathBuf::from("Cargo.toml"),
         PathBuf::from("Cargo.lock"),
+        PathBuf::from("core/Cargo.toml"),
     ];
     
     collect_files(Path::new("src"), &mut files)?;
+    collect_files(Path::new("core/src"), &mut files)?;
     files.sort(); // Ensure deterministic order
 
     for file_path in files {

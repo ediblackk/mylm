@@ -4,6 +4,7 @@ use std::error::Error as StdError;
 use sysinfo::{CpuRefreshKind, Networks, ProcessRefreshKind, RefreshKind, System};
 
 /// A tool for monitoring system resources, processes, and network statistics.
+#[derive(Default)]
 pub struct SystemMonitorTool;
 
 impl SystemMonitorTool {
