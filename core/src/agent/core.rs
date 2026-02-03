@@ -234,6 +234,8 @@ pub struct Agent {
     pub session_id: String,
     pub version: crate::config::AgentVersion,
     pub scratchpad: Option<Arc<RwLock<String>>>,
+    /// Disable memory recall and hot memory injection (incognito mode)
+    pub disable_memory: bool,
     
     // State maintained between steps
     pub history: Vec<ChatMessage>,
@@ -258,6 +260,7 @@ impl Agent {
         categorizer: Option<Arc<MemoryCategorizer>>,
         job_registry: Option<crate::agent::v2::jobs::JobRegistry>,
         scratchpad: Option<Arc<RwLock<String>>>,
+        disable_memory: bool,
     ) -> Self {
         let tool_registry = crate::agent::ToolRegistry::new();
         
@@ -303,6 +306,7 @@ impl Agent {
             pending_tool_call_id: None,
             version,
             scratchpad,
+            disable_memory,
         }
     }
 
@@ -734,6 +738,7 @@ impl Agent {
                 Some(job_registry),
                 None, // capabilities_context
                 self.scratchpad.clone(),
+                self.disable_memory,
             );
 
             // 4. Bridge Channels

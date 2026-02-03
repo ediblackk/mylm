@@ -7,6 +7,7 @@ use mylm_core::llm::TokenUsage;
 use mylm_core::agent::{Agent, AgentDecision, ToolKind};
 use mylm_core::agent::v2::jobs::JobRegistry;
 use crate::terminal::session::SessionMonitor;
+use crate::terminal::session_manager::SessionManager;
 use mylm_core::context::pack::ContextBuilder;
 use mylm_core::context::{ContextConfig, ContextManager};
 use vt100::Parser;
@@ -90,6 +91,7 @@ pub struct App {
     pub memory_graph_scroll: usize,
     pub last_total_chat_lines: Option<usize>,
     pub show_help_view: bool,
+    pub help_scroll: usize,
     pub update_available: bool,
     pub exit_name_input: String,
     // Job Panel state
@@ -106,16 +108,26 @@ pub struct App {
     pub selection_end: Option<(u16, u16)>,
     pub selection_pane: Option<Focus>, // which pane the selection started in
     pub is_selecting: bool,
+    // Pane offsets for coordinate translation
+    pub terminal_area_offset: Option<(u16, u16)>, // (x, y) offset of terminal pane
+    pub chat_area_offset: Option<(u16, u16)>,     // (x, y) offset of chat pane
     pub clipboard: Option<arboard::Clipboard>,
     pub scratchpad: Arc<RwLock<String>>,
     // PaCoRe (Parallel Consistency Reasoning) engine
-    #[allow(dead_code)]
-    pub pacore_engine: Option<Arc<Mutex<Option<Exp>>>>,
-    pub pacore_enabled: bool,
-    pub pacore_rounds: String,
-    // Context manager for token tracking and condensation
-    pub context_manager: ContextManager,
-}
+            #[allow(dead_code)]
+            pub pacore_engine: Option<Arc<Mutex<Option<Exp>>>>,
+            pub pacore_enabled: bool,
+            pub pacore_rounds: String,
+            // PaCoRe progress tracking
+            pub pacore_progress: Option<(usize, usize)>, // (completed, total)
+            pub pacore_current_round: Option<(usize, usize)>, // (current, total)
+            // Context manager for token tracking and condensation
+            pub context_manager: ContextManager,
+            // Session manager for automatic persistence
+            pub session_manager: SessionManager,
+            // Incognito mode flag
+            pub incognito: bool,
+    }
 
 impl App {
     pub fn new(
@@ -124,6 +136,7 @@ impl App {
         config: mylm_core::config::Config,
         scratchpad: Arc<RwLock<String>>,
         job_registry: JobRegistry,
+        incognito: bool,
     ) -> Self {
         // In V2, context limits and prices are not stored in config
         // Use sensible defaults
@@ -190,6 +203,7 @@ impl App {
             memory_graph_scroll: 0,
             last_total_chat_lines: None,
             show_help_view: false,
+            help_scroll: 0,
             update_available: false,
             exit_name_input: String::new(),
             // Job Panel state
@@ -206,13 +220,19 @@ impl App {
             selection_end: None,
             selection_pane: None,
             is_selecting: false,
+            terminal_area_offset: None,
+            chat_area_offset: None,
             clipboard,
             scratchpad,
             // Initialize PaCoRe as None (lazy load on first use if enabled)
             pacore_engine: None,
             pacore_enabled,
             pacore_rounds,
+            pacore_progress: None,
+            pacore_current_round: None,
             context_manager,
+            session_manager: SessionManager::new(),
+            incognito,
         }
     }
 
@@ -323,7 +343,7 @@ impl App {
         }
     }
 
-    pub fn submit_message(&mut self, event_tx: mpsc::UnboundedSender<TuiEvent>) {
+    pub async fn submit_message(&mut self, event_tx: mpsc::UnboundedSender<TuiEvent>) {
         if !self.chat_input.is_empty() {
             // Abort any existing task before starting a new one
             self.abort_current_task();
@@ -356,6 +376,13 @@ impl App {
             }
 
             self.chat_history.push(ChatMessage::user(&final_message));
+
+            // Auto-save session after user message (fire-and-forget)
+            if !self.incognito {
+                let session = self.build_current_session().await;
+                self.session_manager.set_current_session(session);
+            }
+
             self.chat_input.clear();
             self.reset_cursor();
             self.input_scroll = 0;
@@ -759,14 +786,41 @@ impl App {
         }
     }
 
-    pub fn save_session(&self, custom_name: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
-        let data_dir = dirs::data_dir()
-            .ok_or("Could not find data directory")?
-            .join("mylm")
-            .join("sessions");
-        
-        std::fs::create_dir_all(&data_dir)?;
+    /// Build a Session object from current state
+    async fn build_current_session(&self) -> crate::terminal::session::Session {
+        let stats = self.session_monitor.get_stats();
+        let preview = self.chat_history.iter()
+            .rev()
+            .find(|m| m.role == mylm_core::llm::chat::MessageRole::Assistant)
+            .map(|m| m.content.chars().take(100).collect::<String>())
+            .unwrap_or_else(|| "New Session".to_string());
 
+        let agent = self.agent.lock().await;
+
+        crate::terminal::session::Session {
+            id: self.session_id.clone(),
+            timestamp: chrono::Utc::now(),
+            history: self.chat_history.clone(),
+            metadata: crate::terminal::session::SessionMetadata {
+                last_message_preview: preview,
+                message_count: self.chat_history.len(),
+                total_tokens: stats.total_tokens,
+                input_tokens: stats.input_tokens,
+                output_tokens: stats.output_tokens,
+                cost: stats.cost,
+                elapsed_seconds: self.session_monitor.duration().as_secs(),
+            },
+            terminal_history: self.raw_buffer.clone(),
+            agent_session_id: agent.session_id.clone(),
+            agent_history: agent.history.clone(),
+        }
+    }
+
+    pub async fn save_session(&self, custom_name: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+        if self.incognito {
+            return Ok(());
+        }
+        
         let stats = self.session_monitor.get_stats();
         let preview = self.chat_history.iter()
             .rev()
@@ -775,6 +829,7 @@ impl App {
             .unwrap_or_else(|| "New Session".to_string());
 
         let now = chrono::Utc::now();
+        let agent = self.agent.lock().await;
         let session = crate::terminal::session::Session {
             id: custom_name.clone().unwrap_or_else(|| self.session_id.clone()),
             timestamp: now,
@@ -789,72 +844,45 @@ impl App {
                 elapsed_seconds: self.session_monitor.duration().as_secs(),
             },
             terminal_history: self.raw_buffer.clone(),
+            agent_session_id: agent.session_id.clone(),
+            agent_history: agent.history.clone(),
         };
 
-        let content = serde_json::to_string_pretty(&session)?;
-        
-        // Save unique file
-        let filename = match custom_name {
-            Some(name) => {
-                let safe_name = name.chars()
-                    .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
-                    .collect::<String>();
-                format!("session_{}_{}.json", safe_name, now.format("%Y%m%d_%H%M%S"))
-            },
-            None => format!("session_{}.json", now.format("%Y%m%d_%H%M%S")),
-        };
-        
-        let path = data_dir.join(filename);
-        std::fs::write(&path, &content)?;
-
-        // Update latest.json (as a copy for simplicity and compatibility across platforms without symlink worries)
-        let latest_path = data_dir.join("latest.json");
-        std::fs::write(latest_path, content)?;
+        // Delegate to SessionManager for async persistence
+        self.session_manager.set_current_session(session);
         
         Ok(())
     }
 
-    pub fn load_session(id: Option<&str>) -> Result<crate::terminal::session::Session, Box<dyn std::error::Error>> {
-        let data_dir = dirs::data_dir()
-            .ok_or("Could not find data directory")?
-            .join("mylm")
-            .join("sessions");
-        
-        let filename = match id {
-            Some(id) => if id.ends_with(".json") { id.to_string() } else { format!("session_{}.json", id) },
-            None => "latest.json".to_string(),
-        };
-
-        let path = data_dir.join(filename);
-        
-        if !path.exists() {
-            return Err("Session not found".into());
+    pub async fn load_session(id: Option<&str>) -> Result<crate::terminal::session::Session, Box<dyn std::error::Error>> {
+        // Handle None case (load latest) separately
+        if id.is_none() {
+            if let Some(latest) = crate::terminal::session_manager::SessionManager::load_latest().await {
+                return Ok(latest);
+            }
+            return Err("No latest session found".into());
         }
-
-        let content = std::fs::read_to_string(path)?;
         
-        // Try to parse as new Session format first
-        if let Ok(session) = serde_json::from_str::<crate::terminal::session::Session>(&content) {
-            Ok(session)
+        let target_id = id.unwrap();
+        let target_clean = if target_id.ends_with(".json") {
+            target_id.trim_end_matches(".json")
         } else {
-            // Fallback to legacy ChatHistory format (Vec<ChatMessage>)
-            let history: Vec<ChatMessage> = serde_json::from_str(&content)?;
-            Ok(crate::terminal::session::Session {
-                id: "legacy".to_string(),
-                timestamp: chrono::Utc::now(),
-                history,
-                metadata: crate::terminal::session::SessionMetadata {
-                    last_message_preview: "Legacy Session".to_string(),
-                    message_count: 0,
-                    total_tokens: 0,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    cost: 0.0,
-                    elapsed_seconds: 0,
-                },
-                terminal_history: Vec::new(),
-            })
+            target_id
+        };
+        
+        // Use SessionManager to load all sessions
+        let sessions = crate::terminal::session_manager::SessionManager::load_sessions();
+        
+        // Find matching session in a single pass
+        for session in sessions {
+            if session.id == target_clean || 
+               session.id.ends_with(&format!("_{}", target_clean)) ||
+               session.id.contains(target_clean) {
+                return Ok(session);
+            }
         }
+        
+        Err("Session not found".into())
     }
 
     pub fn handle_terminal_input(&mut self, bytes: &[u8]) {
@@ -933,8 +961,16 @@ impl App {
     }
 
     pub fn set_state(&mut self, state: AppState) {
+        // Reset PaCoRe progress when going idle
+        let is_idle = matches!(state, AppState::Idle);
+        
         self.state = state;
         self.state_started_at = Instant::now();
+        
+        if is_idle {
+            self.pacore_progress = None;
+            self.pacore_current_round = None;
+        }
     }
 
     pub fn push_activity(&mut self, summary: impl Into<String>, detail: Option<String>) {
@@ -949,9 +985,16 @@ impl App {
         }
     }
 
-    pub fn start_streaming_final_answer(&mut self, content: String, usage: TokenUsage) {
+    pub async fn start_streaming_final_answer(&mut self, content: String, usage: TokenUsage) {
         // Insert a placeholder assistant message and fill it incrementally from ticks.
         self.chat_history.push(ChatMessage::assistant(String::new()));
+
+        // Auto-save session after assistant message (fire-and-forget)
+        if !self.incognito {
+            let session = self.build_current_session().await;
+            self.session_manager.set_current_session(session);
+        }
+
         let msg_index = self.chat_history.len().saturating_sub(1);
         self.pending_stream = Some(PendingStream {
             started_at: Instant::now(),
@@ -966,15 +1009,7 @@ impl App {
     // UI Layout helpers
     pub fn adjust_chat_width(&mut self, delta: i16) {
         let new_width = self.chat_width_percent as i16 + delta;
-        self.chat_width_percent = new_width.clamp(20, 50) as u16;
-    }
-
-    pub fn toggle_terminal_visibility(&mut self) {
-        self.show_terminal = !self.show_terminal;
-        if !self.show_terminal {
-            // When hiding terminal, focus must be on chat
-            self.focus = Focus::Chat;
-        }
+        self.chat_width_percent = new_width.clamp(20, 100) as u16;
     }
 
     // Selection helpers
@@ -1026,13 +1061,20 @@ impl App {
         // Get terminal screen content
         let screen = self.terminal_parser.screen();
         let mut lines = Vec::new();
+        
+        // Apply offset if available
+        let (offset_x, offset_y) = self.terminal_area_offset.unwrap_or((0, 0));
+        let start_x = start_x.saturating_sub(offset_x);
+        let start_y = start_y.saturating_sub(offset_y);
+        let end_x = end_x.saturating_sub(offset_x);
+        let end_y = end_y.saturating_sub(offset_y);
 
         for row in start_y..=end_y {
             let (cols, _) = screen.size();
             let mut line = String::new();
             
             let col_start = if row == start_y { start_x } else { 0 };
-            let col_end = if row == end_y { end_x } else { cols - 1 };
+            let col_end = if row == end_y { end_x } else { cols.saturating_sub(1) };
 
             for col in col_start..=col_end {
                 if let Some(cell) = screen.cell(row, col) {
@@ -1364,18 +1406,75 @@ async fn run_pacore_task(
     
     // Clone rounds for status message before moving into Exp
     let rounds_display = rounds_vec.clone();
+    let total_calls: usize = rounds_vec.iter().sum();
     
-    // Create PaCoRe engine with correct signature: model, rounds, max_concurrent, client
+    // Create progress channel
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(100);
+    let event_tx_clone = event_tx.clone();
+    
+    // Spawn progress handler
+    let num_rounds = rounds_vec.len();
+    let rounds_for_progress = rounds_vec.clone();
+    tokio::spawn(async move {
+        let mut completed_calls = 0usize;
+        while let Some(event) = progress_rx.recv().await {
+            use mylm_core::pacore::PaCoReProgressEvent;
+            let status = match &event {
+                PaCoReProgressEvent::RoundStarted { round, total_rounds, calls_in_round } => {
+                    format!("PaCoRe Round {}/{} • {} calls starting...", 
+                        round + 1, total_rounds, calls_in_round)
+                }
+                PaCoReProgressEvent::CallCompleted { round, call_index: _, total_calls } => {
+                    completed_calls += 1;
+                    // Calculate completed calls in current round
+                    let prev_rounds_total: usize = (0..*round).map(|r| rounds_for_progress.get(r).copied().unwrap_or(0)).sum();
+                    let current_round_completed = completed_calls.saturating_sub(prev_rounds_total);
+                    format!("PaCoRe R{} • {}/{} ✓ [{}/{} total]", 
+                        round + 1, current_round_completed, total_calls, completed_calls, total_calls)
+                }
+                PaCoReProgressEvent::SynthesisStarted { round } => {
+                    format!("PaCoRe synthesizing round {}...", round + 1)
+                }
+                PaCoReProgressEvent::StreamingStarted => {
+                    "PaCoRe streaming final response...".to_string()
+                }
+                PaCoReProgressEvent::RoundCompleted { round, responses_received } => {
+                    format!("PaCoRe Round {} completed ({} responses)", round + 1, responses_received)
+                }
+                PaCoReProgressEvent::Error { round, error } => {
+                    format!("PaCoRe error in round {}: {}", round + 1, error)
+                }
+                _ => continue,
+            };
+            
+            // Send status update
+            let _ = event_tx_clone.send(TuiEvent::StatusUpdate(status));
+            
+            // Send progress update for progress bar
+            if let PaCoReProgressEvent::CallCompleted { round, .. } = event {
+                let _ = event_tx_clone.send(TuiEvent::PaCoReProgress {
+                    completed: completed_calls,
+                    total: total_calls,
+                    current_round: round + 1,
+                    total_rounds: num_rounds,
+                });
+            }
+        }
+    });
+    
+    // Create PaCoRe engine with progress callback
     let exp = Exp::new(
         model_name,
         rounds_vec,
         10, // max_concurrent - using default from CLI
         chat_client,
-    );
+    ).with_progress_callback(move |e| {
+        let _ = progress_tx.try_send(e);
+    });
     
     // Run PaCoRe reasoning
     let _ = event_tx.send(TuiEvent::StatusUpdate(
-        format!("PaCoRe reasoning with rounds: {:?}", rounds_display)
+        format!("PaCoRe reasoning with rounds: {:?} ({} total calls)", rounds_display, total_calls)
     ));
     
     // Convert ChatMessage history to PaCoRe Message format

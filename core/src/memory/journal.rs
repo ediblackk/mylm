@@ -73,6 +73,29 @@ impl Journal {
         Ok(journal)
     }
 
+    /// Create a journal at a specific path (for incognito mode or custom locations)
+    pub fn with_path(path: PathBuf) -> Result<Self> {
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        // Create file with header if it doesn't exist
+        if !path.exists() {
+            let mut file = fs::File::create(&path)?;
+            let today = Utc::now().format("%Y-%m-%d").to_string();
+            writeln!(file, "# Journal - {}\n", today)?;
+        }
+
+        let mut journal = Self {
+            path,
+            entries: Vec::new(),
+        };
+        journal.load_today()?;
+
+        Ok(journal)
+    }
+
     pub fn load_today(&mut self) -> Result<()> {
         if !self.path.exists() {
             return Ok(());

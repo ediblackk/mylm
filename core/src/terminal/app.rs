@@ -31,5 +31,6 @@ pub enum TuiEvent {
     GetTerminalScreen(tokio::sync::oneshot::Sender<String>),
     AppStateUpdate(AppState),
     MemoryGraphUpdate(MemoryGraph),
+    PaCoReProgress { completed: usize, total: usize, current_round: usize, total_rounds: usize },
     Tick,
 }

@@ -531,10 +531,10 @@ async fn run_agent_for_user_message(
                 mylm_core::BuiltAgent::V2(agent) => {
                     agent.step(last_observation.take()).await
                         .map(|d| match d {
-                            mylm_core::agent::v2::core::AgentDecision::Message(m, u) => AgentDecision::Message(m, u),
-                            mylm_core::agent::v2::core::AgentDecision::Action { tool, args, kind } => AgentDecision::Action { tool, args, kind },
-                            mylm_core::agent::v2::core::AgentDecision::MalformedAction(e) => AgentDecision::MalformedAction(e),
-                            mylm_core::agent::v2::core::AgentDecision::Error(e) => AgentDecision::Error(e),
+                            mylm_core::agent::v2::AgentDecision::Message(m, u) => AgentDecision::Message(m, u),
+                            mylm_core::agent::v2::AgentDecision::Action { tool, args, kind } => AgentDecision::Action { tool, args, kind },
+                            mylm_core::agent::v2::AgentDecision::MalformedAction(e) => AgentDecision::MalformedAction(e),
+                            mylm_core::agent::v2::AgentDecision::Error(e) => AgentDecision::Error(e),
                         })
                 }
             }

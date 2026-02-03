@@ -15,9 +15,9 @@ pub use v2::{
     AgentConfig, AgentOverride, ConfigError, ConfigV2, EndpointConfig,
     EndpointOverride, FeaturesConfig, MemoryConfig, PacoreConfig, Profile,
     PromptsConfig, Provider, ResolvedConfig, SearchProvider, WebSearchConfig,
-    build_system_prompt, build_system_prompt_with_capabilities, get_identity_prompt,
-    get_memory_protocol, get_prompts_dir, get_react_protocol, get_user_prompts_dir,
-    install_default_prompts, load_prompt, load_prompt_from_path,
+    build_system_prompt, build_system_prompt_with_capabilities, generate_capabilities_prompt,
+    get_identity_prompt, get_memory_protocol, get_prompts_dir, get_react_protocol,
+    get_user_prompts_dir, install_default_prompts, load_prompt, load_prompt_from_path,
 };
 
 // Keep backward-compatible Config alias
@@ -162,6 +162,7 @@ pub struct ProfileInfo {
     pub name: String,
     pub model_override: Option<String>,
     pub max_iterations: Option<usize>,
+    pub iteration_rate_limit: Option<u64>,
 }
 
 /// UI-facing endpoint info (for display purposes)
@@ -249,6 +250,9 @@ pub trait ConfigUiExt {
     /// Set profile max_iterations override
     fn set_profile_max_iterations(&mut self, profile_name: &str, iterations: Option<usize>) -> anyhow::Result<()>;
     
+    /// Set profile iteration_rate_limit override
+    fn set_profile_iteration_rate_limit(&mut self, profile_name: &str, rate_limit: Option<u64>) -> anyhow::Result<()>;
+    
     /// Check if configuration is initialized (has valid endpoint)
     fn is_initialized(&self) -> bool;
     
@@ -266,6 +270,7 @@ impl ConfigUiExt for ConfigV2 {
             name: name.to_string(),
             model_override: p.endpoint.as_ref().and_then(|e| e.model.clone()),
             max_iterations: p.agent.as_ref().and_then(|a| a.max_iterations),
+            iteration_rate_limit: p.agent.as_ref().and_then(|a| a.iteration_rate_limit),
         })
     }
     
@@ -356,16 +361,49 @@ impl ConfigUiExt for ConfigV2 {
         if let Some(iters) = iterations {
             profile.agent = Some(AgentOverride {
                 max_iterations: Some(iters),
+                iteration_rate_limit: profile.agent.as_ref().and_then(|a| a.iteration_rate_limit),
                 main_model: profile.agent.as_ref().and_then(|a| a.main_model.clone()),
                 worker_model: profile.agent.as_ref().and_then(|a| a.worker_model.clone()),
             });
         } else {
             // Remove max_iterations override but keep other agent settings
+            let iteration_rate_limit = profile.agent.as_ref().and_then(|a| a.iteration_rate_limit);
             let main_model = profile.agent.as_ref().and_then(|a| a.main_model.clone());
             let worker_model = profile.agent.as_ref().and_then(|a| a.worker_model.clone());
-            if main_model.is_some() || worker_model.is_some() {
+            if iteration_rate_limit.is_some() || main_model.is_some() || worker_model.is_some() {
                 profile.agent = Some(AgentOverride {
                     max_iterations: None,
+                    iteration_rate_limit,
+                    main_model,
+                    worker_model,
+                });
+            } else {
+                profile.agent = None;
+            }
+        }
+        Ok(())
+    }
+    
+    fn set_profile_iteration_rate_limit(&mut self, profile_name: &str, rate_limit: Option<u64>) -> anyhow::Result<()> {
+        let profile = self.profiles.get_mut(profile_name)
+            .ok_or_else(|| anyhow::anyhow!("Profile '{}' does not exist", profile_name))?;
+        
+        if let Some(ms) = rate_limit {
+            profile.agent = Some(AgentOverride {
+                max_iterations: profile.agent.as_ref().and_then(|a| a.max_iterations),
+                iteration_rate_limit: Some(ms),
+                main_model: profile.agent.as_ref().and_then(|a| a.main_model.clone()),
+                worker_model: profile.agent.as_ref().and_then(|a| a.worker_model.clone()),
+            });
+        } else {
+            // Remove rate limit override but keep other agent settings
+            let max_iterations = profile.agent.as_ref().and_then(|a| a.max_iterations);
+            let main_model = profile.agent.as_ref().and_then(|a| a.main_model.clone());
+            let worker_model = profile.agent.as_ref().and_then(|a| a.worker_model.clone());
+            if max_iterations.is_some() || main_model.is_some() || worker_model.is_some() {
+                profile.agent = Some(AgentOverride {
+                    max_iterations,
+                    iteration_rate_limit: None,
                     main_model,
                     worker_model,
                 });

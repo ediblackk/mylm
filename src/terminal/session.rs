@@ -13,6 +13,10 @@ pub struct Session {
     pub metadata: SessionMetadata,
     #[serde(default)]
     pub terminal_history: Vec<u8>,
+    #[serde(default)]
+    pub agent_session_id: String,
+    #[serde(default)]
+    pub agent_history: Vec<ChatMessage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +31,20 @@ pub struct SessionMetadata {
     pub cost: f64,
     #[serde(default)]
     pub elapsed_seconds: u64,
+}
+
+impl Default for SessionMetadata {
+    fn default() -> Self {
+        Self {
+            last_message_preview: String::new(),
+            message_count: 0,
+            total_tokens: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost: 0.0,
+            elapsed_seconds: 0,
+        }
+    }
 }
 
 /// Session statistics for the current TUI session
@@ -53,6 +71,20 @@ impl Default for SessionStats {
             base_duration: Duration::from_secs(0),
             active_context_tokens: 0,
             max_context_tokens: 32768,
+        }
+    }
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            timestamp: chrono::Utc::now(),
+            history: Vec::new(),
+            metadata: SessionMetadata::default(),
+            terminal_history: Vec::new(),
+            agent_session_id: String::new(),
+            agent_history: Vec::new(),
         }
     }
 }

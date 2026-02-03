@@ -40,7 +40,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_memory_view(frame, app, main_layout[1]);
     } else {
         // Dynamic layout based on terminal visibility and chat width
-        let chunks = if app.show_terminal {
+        // When chat width is 100% or terminal is hidden, chat takes full width
+        let terminal_visible = app.show_terminal && app.chat_width_percent < 100;
+        
+        let chunks = if terminal_visible {
             let chat_pct = app.chat_width_percent;
             let term_pct = 100u16.saturating_sub(chat_pct);
             Layout::default()
@@ -48,23 +51,22 @@ pub fn render(frame: &mut Frame, app: &mut App) {
                 .constraints([Constraint::Percentage(term_pct), Constraint::Percentage(chat_pct)])
                 .split(main_layout[1])
         } else {
-            // Terminal hidden, chat takes full width
+            // Terminal hidden or chat at 100%, chat takes full width
             Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Min(0), Constraint::Percentage(100)])
                 .split(main_layout[1])
         };
 
-        if app.show_terminal {
+        if terminal_visible {
             if app.show_help_view {
                 render_help_view(frame, app, chunks[0]);
             } else {
                 render_terminal(frame, app, chunks[0]);
             }
         }
-        // Chat is always rendered in the second chunk (or full width if terminal hidden)
-        let chat_area = if app.show_terminal { chunks[1] } else { chunks[1] };
-        render_chat(frame, app, chat_area);
+        // Chat is always rendered
+        render_chat(frame, app, chunks[1]);
     }
 
     // Render job panel at bottom if visible
@@ -206,12 +208,13 @@ fn render_help_view(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" [ myLM Help (F1 to close) ] ")
+        .title(" [ myLM Help (F1 to close, ↑/↓ to scroll) ] ")
         .border_style(Style::default().fg(Color::Yellow));
 
     let paragraph = Paragraph::new(help_text)
         .block(block)
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((app.help_scroll as u16, 0));
 
     frame.render_widget(paragraph, area);
 }
@@ -309,8 +312,13 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
         Span::styled(" [F3: Memory] ", Style::default().fg(if app.show_memory_view { Color::Green } else { Color::Yellow }).add_modifier(Modifier::BOLD)),
         Span::styled(" [F4: Jobs] ", Style::default().fg(if app.show_jobs_panel { Color::Green } else { Color::Yellow }).add_modifier(Modifier::BOLD)),
         Span::styled(" [Esc: Exit] ", Style::default().fg(if app.focus == Focus::Chat { Color::Yellow } else { Color::DarkGray }).add_modifier(Modifier::BOLD)),
-        if !app.show_terminal {
-            Span::styled(" [⚠️ TERMINAL HIDDEN - Ctrl+Shift+T] ", Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD))
+        if !app.show_terminal || app.chat_width_percent >= 100 {
+            let msg = if app.chat_width_percent >= 100 {
+                " [⚠️ TERMINAL HIDDEN - Chat 100%] "
+            } else {
+                " [⚠️ TERMINAL HIDDEN] "
+            };
+            Span::styled(msg, Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD))
         } else {
             Span::raw("")
         },
@@ -355,17 +363,10 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
     let bottom_row_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Length(35), // Version + Hash
             Constraint::Min(0),     // Gauge
             Constraint::Length(update_warning_width), // Update Warning
         ])
         .split(rows[1]);
-
-    let version_text = format!(" myLM v{}-{} ({}) ", env!("CARGO_PKG_VERSION"), env!("BUILD_NUMBER"), env!("GIT_HASH"));
-    let version_p = Paragraph::new(Span::styled(
-        version_text,
-        Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD)
-    ));
 
     let gauge = Gauge::default()
         .block(Block::default())
@@ -378,19 +379,21 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
         .wrap(Wrap { trim: true });
 
     frame.render_widget(stats_p, rows[0]);
-    frame.render_widget(version_p, bottom_row_chunks[0]);
-    frame.render_widget(gauge, bottom_row_chunks[1]);
+    frame.render_widget(gauge, bottom_row_chunks[0]);
 
     if app.update_available {
         let update_p = Paragraph::new(Span::styled(
             " 🔥 [UPDATE AVAILABLE] ",
             Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK)
         ));
-        frame.render_widget(update_p, bottom_row_chunks[2]);
+        frame.render_widget(update_p, bottom_row_chunks[1]);
     }
 }
 
 fn render_terminal(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Store the offset for mouse coordinate translation
+    app.terminal_area_offset = Some((area.x, area.y));
+    
     let title = match app.focus {
         Focus::Terminal => " Terminal (F2) [Ctrl+B: Copy] ",
         _ => " Terminal ",
@@ -473,6 +476,9 @@ fn render_terminal(frame: &mut Frame, app: &mut App, area: Rect) {
 
 
 fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Store the offset for mouse coordinate translation
+    app.chat_area_offset = Some((area.x, area.y));
+    
     let input_width = area.width.saturating_sub(2) as usize;
     let input_content = if app.state != AppState::Idle && app.state != AppState::WaitingForUser {
         "(AI is active...)".to_string()
@@ -484,11 +490,48 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     let wrapped_input = wrap_text(&input_content, input_width);
     let input_lines = wrapped_input.len().clamp(1, 3) as u16;
     let input_height = input_lines + 2;
+    
+    // Check if we need to show PaCoRe progress bar
+    let show_progress = app.pacore_progress.is_some();
+    let progress_height = if show_progress { 3u16 } else { 0u16 };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(input_height)])
+        .constraints([
+            Constraint::Min(3), 
+            Constraint::Length(progress_height),
+            Constraint::Length(input_height)
+        ])
         .split(area);
+    
+    // Render PaCoRe progress bar if active
+    if show_progress {
+        if let Some((completed, total)) = app.pacore_progress {
+            let ratio = if total > 0 { completed as f64 / total as f64 } else { 0.0 };
+            let _percent = (ratio * 100.0) as u16;
+            
+            let (current_round, total_rounds) = app.pacore_current_round.unwrap_or((1, 1));
+            
+            // Create progress bar with custom styling
+            let filled = (ratio * 20.0) as usize;
+            let empty = 20 - filled;
+            let bar_str = format!(
+                "[{}{}] {}/{} calls (Round {}/{})",
+                "█".repeat(filled),
+                "░".repeat(empty),
+                completed,
+                total,
+                current_round,
+                total_rounds
+            );
+            
+            let progress_widget = Paragraph::new(bar_str)
+                .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                .alignment(ratatui::layout::Alignment::Center);
+            
+            frame.render_widget(progress_widget, chunks[1]);
+        }
+    }
 
     let title = match app.focus {
         Focus::Chat => " AI Chat (F2) [Ctrl+Y: Copy AI] ",
@@ -767,7 +810,7 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
         let p = Paragraph::new(Span::styled(&input_content, Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)))
             .block(input_block)
             .wrap(Wrap { trim: true });
-        frame.render_widget(p, chunks[1]);
+        frame.render_widget(p, chunks[2]);
     } else {
         // Calculate cursor position in wrapped text
         let (cursor_x, cursor_y) = calculate_input_cursor_pos(&app.chat_input, app.cursor_position, input_width);
@@ -799,14 +842,14 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
 
         let input_paragraph = Paragraph::new(display_content)
             .block(input_block);
-        frame.render_widget(input_paragraph, chunks[1]);
+        frame.render_widget(input_paragraph, chunks[2]);
 
         if app.focus == Focus::Chat {
             let visible_cursor_y = cursor_y.saturating_sub(start_line as u16);
 
             frame.set_cursor_position((
-                chunks[1].x + cursor_x + 1,
-                chunks[1].y + visible_cursor_y + 1,
+                chunks[2].x + cursor_x + 1,
+                chunks[2].y + visible_cursor_y + 1,
             ));
         }
     }

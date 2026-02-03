@@ -5,280 +5,19 @@ use crate::agent::toolcall_log;
 use crate::agent::v2::jobs::{JobRegistry, JobStatus};
 use crate::agent::event::RuntimeEvent;
 use crate::agent::v2::recovery::{RecoveryWorker, RecoveryContext};
-use crate::agent::protocol::{AgentRequest, AgentResponse, AgentError};
+use crate::agent::v2::protocol::{AgentDecision, AgentRequest, AgentResponse, AgentError, parse_short_key_actions_from_content};
+use crate::agent::v2::prompt::PromptBuilder;
+use crate::agent::v2::memory::MemoryManager;
 use crate::memory::{MemoryCategorizer, scribe::Scribe, journal::InteractionType};
 use crate::terminal::app::TuiEvent;
 use crate::context::ContextManager;
 use std::error::Error as StdError;
-use serde::{Deserialize, Serialize};
-use serde_json;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::collections::HashMap;
 use regex::Regex;
 use crate::agent::tools::ScratchpadTool;
 use crate::agent::tools::ConsolidateTool;
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct ShortKeyAction {
-    #[serde(rename = "t", default)]
-    pub thought: String,
-    #[serde(rename = "a")]
-    pub action: Option<String>,
-    #[serde(rename = "i")]
-    pub input: Option<serde_json::Value>,
-    #[serde(rename = "f")]
-    pub final_answer: Option<String>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ShortKeyAction;
-
-    #[test]
-    fn short_key_action_parses_without_thought() {
-        let v: ShortKeyAction = serde_json::from_str(r#"{"f":"test"}"#)
-            .expect("ShortKeyAction should parse without 't'");
-        assert_eq!(v.thought, "");
-        assert_eq!(v.final_answer.as_deref(), Some("test"));
-    }
-}
-
-/// Try to parse one or more [`ShortKeyAction`] from arbitrary model output.
-///
-/// This is intentionally defensive because some models/proxies produce:
-/// - fenced JSON blocks (```json ... ```)
-/// - JSON embedded in surrounding prose
-/// - invalid JSON with literal newlines inside string values
-pub(crate) fn parse_short_key_actions_from_content(content: &str) -> Result<Vec<ShortKeyAction>, AgentError> {
-    let trimmed = content.trim();
-
-    // 1. Check for fenced JSON blocks first (most explicit)
-    let fenced_blocks = extract_json_code_fence_blocks(content);
-    for block in fenced_blocks {
-        if let Some(actions) = parse_batch_or_single(&block) {
-            return Ok(actions);
-        }
-    }
-
-    // 2. Try parsing the whole trimmed content
-    if let Some(actions) = parse_batch_or_single(trimmed) {
-        return Ok(actions);
-    }
-
-    // 3. Extract balanced JSON objects or arrays
-    let candidates = extract_balanced_json_structures(content);
-    for c in candidates {
-        if let Some(actions) = parse_batch_or_single(&c) {
-            return Ok(actions);
-        }
-    }
-
-    // 4. If nothing worked, return a Parse Error
-    Err(AgentError {
-        message: "Failed to parse Short-Key JSON from model response.".to_string(),
-        code: Some("PARSE_ERROR".to_string()),
-        context: Some(serde_json::json!({ "raw_content": content })),
-    })
-}
-
-fn parse_batch_or_single(candidate: &str) -> Option<Vec<ShortKeyAction>> {
-    let trimmed = candidate.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    // Try as array
-    if let Ok(batch) = serde_json::from_str::<Vec<ShortKeyAction>>(trimmed) {
-        return Some(batch);
-    }
-
-    // Try as single object
-    if let Some(single) = parse_short_key_action_candidate(trimmed) {
-        return Some(vec![single]);
-    }
-
-    // Try normalization for both
-    let normalized = escape_unescaped_newlines_in_json_strings(trimmed);
-    if let Ok(batch) = serde_json::from_str::<Vec<ShortKeyAction>>(&normalized) {
-        return Some(batch);
-    }
-    if let Ok(single) = serde_json::from_str::<ShortKeyAction>(&normalized) {
-        return Some(vec![single]);
-    }
-
-    None
-}
-
-fn parse_short_key_action_candidate(candidate: &str) -> Option<ShortKeyAction> {
-    match serde_json::from_str::<ShortKeyAction>(candidate) {
-        Ok(v) => Some(v),
-        Err(_) => {
-            // Some models output invalid JSON with literal newlines inside string values.
-            // Normalize it into valid JSON and try again.
-            let normalized = escape_unescaped_newlines_in_json_strings(candidate);
-            serde_json::from_str::<ShortKeyAction>(&normalized).ok()
-        }
-    }
-}
-
-/// Extract ```json ... ``` blocks.
-///
-/// Important: we terminate only on a *closing fence line* that is exactly ``` (plus whitespace),
-/// so occurrences of ``` inside JSON string values (e.g. markdown in `f`) won't truncate.
-fn extract_json_code_fence_blocks(content: &str) -> Vec<String> {
-    let mut blocks = Vec::new();
-    let lower = content.to_lowercase();
-    let mut search_from = 0usize;
-
-    // Closing fence must be on its own line.
-    let end_fence_re = Regex::new(r"(?m)^[ \t]*```[ \t]*$").expect("valid regex");
-
-    while let Some(rel_start) = lower[search_from..].find("```json") {
-        let fence_start = search_from + rel_start;
-        let after_tag = fence_start + "```json".len();
-
-        // Fenced content begins after the next newline.
-        let content_start = match content[after_tag..].find('\n') {
-            Some(rel_nl) => after_tag + rel_nl + 1,
-            None => break,
-        };
-
-        let hay = &content[content_start..];
-        if let Some(m) = end_fence_re.find(hay) {
-            let end_fence_start = content_start + m.start();
-            blocks.push(content[content_start..end_fence_start].to_string());
-            search_from = content_start + m.end();
-        } else {
-            break;
-        }
-    }
-
-    blocks
-}
-
-/// Extract top-level `{ ... }` or `[ ... ]` candidates by scanning with brace/bracket balancing.
-///
-/// Respects JSON strings and escapes, so braces inside strings don't affect balancing.
-fn extract_balanced_json_structures(content: &str) -> Vec<String> {
-    let mut out = Vec::new();
-
-    let mut in_string = false;
-    let mut escape = false;
-    let mut brace_depth: i32 = 0;
-    let mut bracket_depth: i32 = 0;
-    let mut start: Option<usize> = None;
-
-    for (i, ch) in content.char_indices() {
-        if in_string {
-            if escape {
-                escape = false;
-                continue;
-            }
-            match ch {
-                '\\' => escape = true,
-                '"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-
-        match ch {
-            '"' => in_string = true,
-            '{' => {
-                if brace_depth == 0 && bracket_depth == 0 {
-                    start = Some(i);
-                }
-                brace_depth += 1;
-            }
-            '}' => {
-                if brace_depth > 0 {
-                    brace_depth -= 1;
-                    if brace_depth == 0 && bracket_depth == 0 {
-                        if let Some(s) = start.take() {
-                            out.push(content[s..=i].to_string());
-                        }
-                    }
-                }
-            }
-            '[' => {
-                if brace_depth == 0 && bracket_depth == 0 {
-                    start = Some(i);
-                }
-                bracket_depth += 1;
-            }
-            ']' => {
-                if bracket_depth > 0 {
-                    bracket_depth -= 1;
-                    if brace_depth == 0 && bracket_depth == 0 {
-                        if let Some(s) = start.take() {
-                            out.push(content[s..=i].to_string());
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    out
-}
-
-/// Convert invalid JSON containing literal newlines inside string values into valid JSON.
-///
-/// Only escapes `\n`/`\r` when inside a JSON string literal.
-fn escape_unescaped_newlines_in_json_strings(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut in_string = false;
-    let mut escape = false;
-
-    for ch in input.chars() {
-        if in_string {
-            if escape {
-                out.push(ch);
-                escape = false;
-                continue;
-            }
-            match ch {
-                '\\' => {
-                    out.push(ch);
-                    escape = true;
-                }
-                '"' => {
-                    out.push(ch);
-                    in_string = false;
-                }
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                _ => out.push(ch),
-            }
-        } else {
-            out.push(ch);
-            if ch == '"' {
-                in_string = true;
-            }
-        }
-    }
-
-    out
-}
-
-/// The decision made by the agent after a step.
-#[derive(Debug, Clone)]
-pub enum AgentDecision {
-    /// The LLM produced a text response (final answer or question).
-    Message(String, TokenUsage),
-    /// The LLM wants to execute a tool.
-    Action {
-        tool: String,
-        args: String,
-        kind: ToolKind,
-    },
-    /// The LLM output a tool call that couldn't be parsed correctly.
-    MalformedAction(String),
-    /// The agent has reached maximum iterations or an error occurred.
-    Error(String),
-}
 
 /// The core AgentV2 that manages the agentic loop.
 pub struct AgentV2 {
@@ -309,10 +48,10 @@ pub struct AgentV2 {
     parse_failure_count: usize,
 
     // Budget and timeout controls
-    pub budget: usize,                    // Maximum number of steps allowed
-    pub max_steps: usize,                 // Current step limit (can be increased)
-    pub heartbeat_interval: std::time::Duration, // How often to poll for job updates
-    pub safety_timeout: std::time::Duration,     // Maximum duration for autonomous run
+    pub budget: usize,
+    pub max_steps: usize,
+    pub heartbeat_interval: std::time::Duration,
+    pub safety_timeout: std::time::Duration,
 
     /// Optional capabilities context to inject into system prompt
     pub capabilities_context: Option<String>,
@@ -322,6 +61,12 @@ pub struct AgentV2 {
 
     /// Context manager for token counting, pruning, and condensation
     pub context_manager: ContextManager,
+    /// Disable memory recall and hot memory injection (incognito mode)
+    pub disable_memory: bool,
+
+    // Helper components
+    memory_manager: MemoryManager,
+    prompt_builder: PromptBuilder,
 }
 
 impl AgentV2 {
@@ -337,6 +82,7 @@ impl AgentV2 {
         job_registry: Option<JobRegistry>,
         capabilities_context: Option<String>,
         scratchpad: Option<Arc<RwLock<String>>>,
+        disable_memory: bool,
     ) -> Self {
         let mut tool_map = HashMap::new();
         for tool in tools {
@@ -356,6 +102,19 @@ impl AgentV2 {
 
         // Initialize context manager from LLM client config
         let context_manager = ContextManager::from_llm_client(&client);
+
+        // Create helper components
+        let memory_manager = MemoryManager::new(
+            scribe.clone(),
+            memory_store.clone(),
+            categorizer.clone(),
+            disable_memory,
+        );
+        let prompt_builder = PromptBuilder::new(
+            system_prompt_prefix.clone(),
+            tool_map.clone(),
+            capabilities_context.clone(),
+        );
 
         Self {
             llm_client: client.clone(),
@@ -378,13 +137,16 @@ impl AgentV2 {
             event_tx: None,
             recovery_worker: RecoveryWorker::new(client.clone()),
             parse_failure_count: 0,
-            budget: max_iterations,  // Default budget equals max_iterations
-            max_steps: max_iterations, // Initial step limit
-            heartbeat_interval: std::time::Duration::from_secs(5), // 5 second heartbeat
-            safety_timeout: std::time::Duration::from_secs(300), // 5 minute safety timeout
+            budget: max_iterations,
+            max_steps: max_iterations,
+            heartbeat_interval: std::time::Duration::from_secs(5),
+            safety_timeout: std::time::Duration::from_secs(300),
             capabilities_context,
             scratchpad,
             context_manager,
+            disable_memory,
+            memory_manager,
+            prompt_builder,
         }
     }
 
@@ -428,14 +190,6 @@ impl AgentV2 {
     }
 
     /// Reset the agent's state for a new task.
-    ///
-    /// This function:
-    /// 1. Resets iteration counters and state
-    /// 2. Generates and injects the system prompt with capabilities
-    /// 3. Injects recent journal entries (hot memory) into the context
-    /// 4. Ensures the model knows it should proactively use memory tools
-    ///
-    /// NOTE: To also inject hot memory context, call `inject_hot_memory()` after this.
     pub async fn reset(&mut self, history: Vec<ChatMessage>) {
         self.history = history;
         self.iteration_count = 0;
@@ -445,74 +199,31 @@ impl AgentV2 {
         self.repetition_count = 0;
         self.parse_failure_count = 0;
         self.pending_tool_call_id = None;
-        self.max_steps = self.budget; // Reset step limit to budget
+        self.max_steps = self.budget;
 
         // Ensure system prompt is present with capability awareness
         if self.history.is_empty() || self.history[0].role != MessageRole::System {
             let scratchpad_content = self.scratchpad.read().unwrap_or_else(|e| e.into_inner());
-            self.history.insert(0, ChatMessage::system(self.generate_system_prompt(&scratchpad_content)));
+            self.prompt_builder = PromptBuilder::new(
+                self.system_prompt_prefix.clone(),
+                self.tools.clone(),
+                self.capabilities_context.clone(),
+            );
+            self.history.insert(0, ChatMessage::system(self.prompt_builder.build(&scratchpad_content)));
         }
     }
 
     /// Inject hot memory (recent journal entries) into the conversation context.
-    ///
-    /// This should be called after `reset()` to add recent activity awareness.
-    /// Call this before starting the agent loop to ensure the model knows about
-    /// recent interactions and can reference them proactively.
     pub async fn inject_hot_memory(&mut self, limit: usize) {
-        // Inject hot memory (recent journal entries) into context
-        // This ensures the model is aware of recent activity and can use memory proactively
-        if let Ok(hot_memory_context) = self.get_hot_memory_context(limit).await {
-            if !hot_memory_context.is_empty() {
-                // Insert hot memory after system prompt but before user messages
-                let hot_memory_msg = ChatMessage::system(format!(
-                    "## Recent Activity (Hot Memory)\n{}\n\nUse this context and proactively search memory for relevant information when needed.",
-                    hot_memory_context
-                ));
-                if self.history.len() > 1 {
-                    self.history.insert(1, hot_memory_msg);
-                } else {
-                    self.history.push(hot_memory_msg);
-                }
-            }
-        }
+        self.memory_manager.inject_hot_memory(&mut self.history, limit).await;
     }
 
     /// Reset the agent and immediately inject hot memory context.
-    ///
-    /// This is a convenience method that combines `reset()` and `inject_hot_memory()`.
     pub async fn reset_with_memory(&mut self, history: Vec<ChatMessage>, limit: usize) {
         self.reset(history).await;
-        self.inject_hot_memory(limit).await;
-    }
-
-    /// Get recent journal entries (hot memory) as context
-    ///
-    /// Fetches the last N entries from the journal to provide
-    /// immediate context about recent activity.
-    async fn get_hot_memory_context(&self, limit: usize) -> Result<String, Box<dyn StdError + Send + Sync>> {
-        let journal = self.scribe.journal();
-        let journal_guard = journal.lock().await;
-        let entries = journal_guard.entries();
-        
-        if entries.is_empty() {
-            return Ok(String::new());
+        if !self.disable_memory {
+            self.inject_hot_memory(limit).await;
         }
-        
-        // Get the last N entries
-        let start = entries.len().saturating_sub(limit);
-        let recent_entries = &entries[start..];
-        
-        let mut context = String::new();
-        for entry in recent_entries {
-            context.push_str(&format!("- [{}] {}: {}\n", 
-                entry.timestamp, 
-                entry.entry_type,
-                entry.content.lines().next().unwrap_or(&entry.content) // First line only
-            ));
-        }
-        
-        Ok(context)
     }
 
     /// Perform a single step in the agentic loop.
@@ -521,7 +232,7 @@ impl AgentV2 {
         if let Ok(guard) = self.scratchpad.read() {
             if guard.len() > 4000 {
                 let warning = format!("SYSTEM ALERT: Scratchpad size is {}/4000. Please use `consolidate_memory` to save important facts to long-term memory and condense the scratchpad.", guard.len());
-                
+
                 // Avoid spamming if the last message is already the warning
                 let last_msg_is_warning = self.history.last()
                     .map(|m| m.content == warning)
@@ -551,7 +262,12 @@ impl AgentV2 {
 
         if let Some(obs) = observation {
             // Log the observation
-            let _ = self.scribe.observe(InteractionType::Output, &obs).await;
+            if let Err(e) = self.scribe.observe(InteractionType::Output, &obs).await {
+                crate::error_log!("Failed to log observation to memory: {}", e);
+                if let Some(tx) = &self.event_tx {
+                    let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", e) });
+                }
+            }
 
             if let Some(tool_id) = self.pending_tool_call_id.take() {
                 let tool_name = self.last_tool_call.as_ref().map(|(n, _)| n.clone()).unwrap_or_else(|| "unknown".to_string());
@@ -562,9 +278,8 @@ impl AgentV2 {
         }
 
         // --- Context Management (Pruning & Condensation) ---
-        // Update context manager with current history
         self.context_manager.set_history(&self.history);
-        
+
         // Prepare context (condense if needed, then prune)
         match self.context_manager.prepare_context(Some(&self.llm_client)).await {
             Ok(optimized_history) => {
@@ -576,23 +291,25 @@ impl AgentV2 {
         }
 
         // --- Memory Recall ---
-        let query = self.history.iter().rev()
-            .find(|m| m.role == MessageRole::User)
-            .map(|m| m.content.as_str())
-            .unwrap_or("");
-        
         let mut request_history = self.history.clone();
-        if let Ok(recalled_context) = self.scribe.recall(query, 5).await {
-            if !recalled_context.is_empty() {
-                request_history.push(ChatMessage::system(format!(
-                    "## Recalled Context (Long-term & Recent Memory)\n{}\nUse this context to inform your decisions.",
-                    recalled_context
-                )));
+        if !self.disable_memory {
+            let query = self.history.iter().rev()
+                .find(|m| m.role == MessageRole::User)
+                .map(|m| m.content.as_str())
+                .unwrap_or("");
+
+            if let Ok(recalled_context) = self.scribe.recall(query, 5).await {
+                if !recalled_context.is_empty() {
+                    request_history.push(ChatMessage::system(format!(
+                        "## Recalled Context (Long-term & Recent Memory)\n{}\nUse this context to inform your decisions.",
+                        recalled_context
+                    )));
+                }
             }
         }
 
         let mut request = ChatRequest::new(self.llm_client.model().to_string(), request_history);
-        
+
         // Provide tool definitions for Modern API fallback
         let mut chat_tools = Vec::new();
         for tool in self.tools.values() {
@@ -613,7 +330,6 @@ impl AgentV2 {
         let content = response.content();
 
         // Structured debug log (JSONL)
-        // Captures raw content + native tool_calls for post-mortem parsing/tool-call debugging.
         let tool_calls_json = response.choices
             .first()
             .and_then(|c| c.message.tool_calls.as_ref())
@@ -631,7 +347,12 @@ impl AgentV2 {
         }));
 
         // Log the thought/response
-        let _ = self.scribe.observe(InteractionType::Thought, &content).await;
+        if let Err(e) = self.scribe.observe(InteractionType::Thought, &content).await {
+            crate::error_log!("Failed to log thought to memory: {}", e);
+            if let Some(tx) = &self.event_tx {
+                let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", e) });
+            }
+        }
 
         if let Some(usage) = &response.usage {
             self.total_usage.prompt_tokens += usage.prompt_tokens;
@@ -661,12 +382,12 @@ impl AgentV2 {
                 self.parse_failure_count += 1;
                 if self.parse_failure_count > 1 {
                     crate::info_log!("Repeated Short-Key failure (attempt {}), triggering RecoveryWorker...", self.parse_failure_count);
-                    
+
                     let task = self.history.iter()
                         .find(|m| m.role == MessageRole::User)
                         .map(|m| m.content.clone())
                         .unwrap_or_else(|| "No task found".to_string());
-                        
+
                     let mut tools_desc = String::new();
                     for tool in self.tools.values() {
                         tools_desc.push_str(&format!("- {}: {}\n  Usage: {}\n", tool.name(), tool.description(), tool.usage()));
@@ -682,7 +403,7 @@ impl AgentV2 {
                     match self.recovery_worker.recover(context, None).await {
                         Ok(recovered_actions) => {
                             crate::info_log!("Recovery successful!");
-                            self.parse_failure_count = 0; // Reset after successful recovery
+                            self.parse_failure_count = 0;
                             short_key_actions = Some(recovered_actions);
                         }
                         Err(rec_err) => {
@@ -740,9 +461,8 @@ impl AgentV2 {
             let mut agent_requests = Vec::new();
             for (idx, sk) in tool_actions.into_iter().enumerate() {
                 let raw_tool_name = sk.action.unwrap();
-                // Normalize the tool name here
                 let tool_name = crate::agent::tool_registry::normalize_tool_name(&raw_tool_name).to_string();
-                
+
                 let input = sk.input.unwrap_or(serde_json::Value::Null);
                 agent_requests.push(AgentRequest {
                     id: Some(format!("call_{}_{}", self.iteration_count, idx)),
@@ -754,7 +474,7 @@ impl AgentV2 {
 
             // Execute Actions in Parallel
             let results = self.execute_parallel_tools(agent_requests).await?;
-            
+
             // Add Assistant content to history
             self.history.push(ChatMessage::assistant(content.clone()));
 
@@ -766,7 +486,7 @@ impl AgentV2 {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                
+
                 let output = if let Some(r) = &res.result {
                     r.to_string()
                 } else if let Some(e) = &res.error {
@@ -794,11 +514,10 @@ impl AgentV2 {
                 }
                 let (tool_name, args, tool_id) = {
                     let tool_call = &message.tool_calls.as_ref().unwrap()[0];
-                    // Normalize the tool name here
                     let normalized_name = crate::agent::tool_registry::normalize_tool_name(&tool_call.function.name).to_string();
                     (normalized_name, tool_call.function.arguments.to_string(), tool_call.id.clone())
                 };
-                
+
                 // Recoverable Error for Unknown Tools
                 if !self.tools.contains_key(&tool_name) {
                     let available_tools: Vec<_> = self.tools.keys().cloned().collect();
@@ -806,11 +525,10 @@ impl AgentV2 {
                         "TOOL_ERROR(name_not_found, requested='{}', available={:?})",
                         tool_name, available_tools
                     );
-                    
+
                     self.history.push(message);
                     self.history.push(ChatMessage::tool(tool_id, tool_name.clone(), observation.clone()));
-                    
-                    // Log the error
+
                     toolcall_log::append_jsonl_owned(serde_json::json!({
                         "kind": "tool_error",
                         "session_id": self.session_id,
@@ -818,8 +536,7 @@ impl AgentV2 {
                         "error": "name_not_found",
                         "tool": tool_name
                     }));
-                    
-                    // Return a message so the agent loop continues and sees the observation
+
                     return Ok(AgentDecision::Message(
                         format!("I attempted to call tool '{}' but it was not found. I will try again with a valid tool.", tool_name),
                         self.total_usage.clone()
@@ -854,7 +571,6 @@ impl AgentV2 {
         let action_input_match = action_input_re.captures(&content);
 
         if let (Some(raw_tool_name), Some(args)) = (action_match.as_ref().map(|c| c[1].trim().to_string()), action_input_match.as_ref().map(|c| c[1].trim().to_string())) {
-            // Normalize the tool name here
             let tool_name = crate::agent::tool_registry::normalize_tool_name(&raw_tool_name).to_string();
             self.last_tool_call = Some((tool_name.clone(), args.clone()));
             if content.contains("Final Answer:") {
@@ -892,9 +608,8 @@ impl AgentV2 {
             let event_tx = self.event_tx.clone();
             let tool = self.tools.get(&req.action).cloned();
             let scribe = self.scribe.clone();
-            
+
             futures.push(async move {
-                // Emit Step event
                 if let Some(tx) = &event_tx {
                     let _: Result<(), _> = tx.send(RuntimeEvent::Step { request: req.clone() });
                 }
@@ -907,13 +622,22 @@ impl AgentV2 {
                             req.input.to_string()
                         };
 
-                        // Log tool call
-                        let _ = scribe.observe(InteractionType::Tool, &format!("Action: {}\nInput: {}", req.action, args)).await;
+                        if let Err(e) = scribe.observe(InteractionType::Tool, &format!("Action: {}\nInput: {}", req.action, args)).await {
+                            crate::error_log!("Failed to log tool call to memory: {}", e);
+                            if let Some(tx) = &event_tx {
+                                let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", e) });
+                            }
+                        }
 
                         match t.call(&args).await {
                             Ok(output) => {
                                 let output_str = output.as_string();
-                                let _ = scribe.observe(InteractionType::Output, &output_str).await;
+                                if let Err(log_err) = scribe.observe(InteractionType::Output, &output_str).await {
+                                    crate::error_log!("Failed to log tool output to memory: {}", log_err);
+                                    if let Some(tx) = &event_tx {
+                                        let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", log_err) });
+                                    }
+                                }
                                 AgentResponse {
                                     result: Some(serde_json::json!({
                                         "output": output_str,
@@ -928,7 +652,12 @@ impl AgentV2 {
                             },
                             Err(e) => {
                                 let error_msg = e.to_string();
-                                let _ = scribe.observe(InteractionType::Output, &format!("Error: {}", error_msg)).await;
+                                if let Err(log_err) = scribe.observe(InteractionType::Output, &format!("Error: {}", error_msg)).await {
+                                    crate::error_log!("Failed to log tool error to memory: {}", log_err);
+                                    if let Some(tx) = &event_tx {
+                                        let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", log_err) });
+                                    }
+                                }
                                 AgentResponse {
                                     result: None,
                                     error: Some(AgentError {
@@ -950,7 +679,6 @@ impl AgentV2 {
                     },
                 };
 
-                // Emit ToolOutput event
                 if let Some(tx) = &event_tx {
                     let _: Result<(), _> = tx.send(RuntimeEvent::ToolOutput { response: response.clone() });
                 }
@@ -965,25 +693,20 @@ impl AgentV2 {
 
     /// Inject relevant memories into the conversation history based on the last user message.
     pub async fn inject_memory_context(&mut self) -> Result<(), Box<dyn StdError + Send + Sync>> {
-        if !self.llm_client.config().memory.auto_context {
-            return Ok(());
-        }
+        self.memory_manager.inject_memory_context(
+            &mut self.history,
+            self.llm_client.config().memory.auto_context,
+        ).await
+    }
 
-        if let Some(store) = &self.memory_store {
-            // Find the last user message to use as a search query
-            if let Some(last_user_msg) = self.history.iter().rev().find(|m| m.role == MessageRole::User) {
-                let memories = store.search_memory(&last_user_msg.content, 5).await.unwrap_or_default();
-                if !memories.is_empty() {
-                    let context = self.build_context_from_memories(&memories);
-                    // Append context to the last user message
-                    if let Some(user_idx) = self.history.iter().rposition(|m| m.role == MessageRole::User) {
-                        self.history[user_idx].content.push_str("\n\n");
-                        self.history[user_idx].content.push_str(&context);
-                    }
-                }
-            }
-        }
-        Ok(())
+    /// Build context from memories.
+    fn build_context_from_memories(&self, memories: &[crate::memory::store::Memory]) -> String {
+        self.memory_manager.build_context_from_memories(memories)
+    }
+
+    /// Automatically categorize a newly added memory.
+    pub async fn auto_categorize(&self, memory_id: i64, content: &str) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        self.memory_manager.auto_categorize(memory_id, content).await
     }
 
     /// Legacy run method for backward compatibility.
@@ -1004,7 +727,6 @@ impl AgentV2 {
                     let memories = store.search_memory(&last_user_msg.content, 5).await.unwrap_or_default();
                     if !memories.is_empty() {
                         let context = self.build_context_from_memories(&memories);
-                        // Inject context appended to user msg (Context Pack style)
                         if let Some(user_idx) = history.iter().rposition(|m| m.role == MessageRole::User) {
                             history[user_idx].content.push_str("\n\n");
                             history[user_idx].content.push_str(&context);
@@ -1016,7 +738,7 @@ impl AgentV2 {
 
         self.reset(history).await;
         self.inject_hot_memory(5).await;
-        
+
         let mut last_observation = None;
         let mut retry_count = 0;
         let max_retries = 3;
@@ -1033,27 +755,21 @@ impl AgentV2 {
             }
 
             let _ = event_tx.send(TuiEvent::StatusUpdate("Thinking...".to_string()));
-            
+
             match self.step(last_observation.take()).await? {
                 AgentDecision::Message(msg, usage) => {
-                    retry_count = 0; // Reset on successful message
+                    retry_count = 0;
                     let _ = event_tx.send(TuiEvent::AgentResponse(msg.clone(), usage.clone()));
-                    
-                    // If we have a pending decision (like an Action queued after a Thought),
-                    // continue the loop immediately to execute it.
+
                     if self.has_pending_decision() {
                         continue;
                     }
 
-                    // For "Autonomous" mode, we look for "Final Answer:" or JSON equivalent to know when to stop.
                     if msg.contains("Final Answer:") || msg.contains("\"f\":") || msg.contains("\"final_answer\":") {
                         let _ = event_tx.send(TuiEvent::StatusUpdate("".to_string()));
                         return Ok((msg, usage));
                     }
-                    
-                    // If we get a message without "Final Answer:" and we're in an autonomous loop,
-                    // we should stop if it looks like a direct response to the user or a request for info.
-                    // Common indicators that the model is talking to the user:
+
                     if msg.trim().ends_with('?')
                         || msg.contains("Please")
                         || msg.contains("Would you")
@@ -1065,28 +781,19 @@ impl AgentV2 {
                         return Ok((msg, usage));
                     }
 
-                    // If it's a non-empty message and no tool was called, and it's not a tiny nudge,
-                    // we assume it's a response to the user.
                     if msg.len() > 30 {
                         let _ = event_tx.send(TuiEvent::StatusUpdate("".to_string()));
                         return Ok((msg, usage));
                     }
 
-                    // Nudge to continue only if it's very short or we suspect it's stuck/narrating
                     last_observation = Some("Please continue your task or provide a Final Answer if you are done.".to_string());
                     continue;
                 }
                 AgentDecision::Action { tool, args, kind } => {
-                    retry_count = 0; // Reset on successful action
+                    retry_count = 0;
                     let _ = event_tx.send(TuiEvent::StatusUpdate(format!("Tool: '{}'", tool)));
 
-                    // Approval gating (AUTO-APPROVE OFF)
-                    //
-                    // Requirement: every tool call must be approved when auto-approve is OFF.
-                    // Headless callers may not provide an approval channel; in that case, we MUST halt
-                    // before executing the tool.
                     if !auto_approve {
-                        // Provide a human-readable suggestion of what would run.
                         let suggestion = if tool == "execute_command" {
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&args) {
                                 v.get("command").and_then(|c| c.as_str())
@@ -1097,47 +804,28 @@ impl AgentV2 {
                                 args.clone()
                             }
                         } else {
-                            // For non-shell tools, show tool+args (keeps UI event semantics stable).
                             format!("{} {}", tool, args)
                         };
                         let _ = event_tx.send(TuiEvent::SuggestCommand(suggestion));
 
                         if let Some(rx) = &mut approval_rx {
-                            // Wait for approval (one tool execution == one approval)
                             let _ = event_tx.send(TuiEvent::StatusUpdate("Waiting for approval...".to_string()));
                             match rx.recv().await {
-                                Some(true) => {
-                                    let _ = event_tx.send(TuiEvent::StatusUpdate("Approved.".to_string()));
-                                    // Proceed to execution
-                                }
+                                Some(true) => {}
                                 Some(false) => {
                                     let _ = event_tx.send(TuiEvent::StatusUpdate("Denied.".to_string()));
-                                    last_observation = Some(format!(
-                                        "Error: User denied the execution of tool '{}'.",
-                                        tool
-                                    ));
+                                    last_observation = Some(format!("Error: User denied the execution of tool '{}'.", tool));
                                     continue;
                                 }
                                 None => {
-                                    return Ok((
-                                        "Error: Approval channel closed.".to_string(),
-                                        self.total_usage.clone(),
-                                    ));
+                                    return Ok(("Error: Approval channel closed.".to_string(), self.total_usage.clone()));
                                 }
                             }
                         } else {
-                            // Legacy/headless behavior: halt and return control to the caller.
-                            return Ok((
-                                format!(
-                                    "Approval required to run tool '{}' but no approval channel is available (AUTO-APPROVE is OFF).",
-                                    tool
-                                ),
-                                self.total_usage.clone(),
-                            ));
+                            return Ok((format!("Approval required to run tool '{}' but no approval channel is available (AUTO-APPROVE is OFF).", tool), self.total_usage.clone()));
                         }
                     }
 
-                    // Extract arguments from JSON if necessary (for tool calling API)
                     let processed_args = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&args) {
                         v.get("args")
                          .and_then(|a| a.as_str())
@@ -1147,26 +835,45 @@ impl AgentV2 {
                         args.clone()
                     };
 
-                    // Log tool call
-                    let _ = self.scribe.observe(InteractionType::Tool, &format!("Action: {}\nInput: {}", tool, processed_args)).await;
+                    if let Err(e) = self.scribe.observe(InteractionType::Tool, &format!("Action: {}\nInput: {}", tool, processed_args)).await {
+                        crate::error_log!("Failed to log tool call to memory: {}", e);
+                        if let Some(tx) = &self.event_tx {
+                            let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", e) });
+                        }
+                    }
 
                     let observation = match self.tools.get(&tool) {
                         Some(t) => match t.call(&processed_args).await {
                             Ok(output) => {
                                 let output_str = output.as_string();
-                                let _ = self.scribe.observe(InteractionType::Output, &output_str).await;
+                                if let Err(log_err) = self.scribe.observe(InteractionType::Output, &output_str).await {
+                                    crate::error_log!("Failed to log tool output to memory: {}", log_err);
+                                    if let Some(tx) = &self.event_tx {
+                                        let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", log_err) });
+                                    }
+                                }
                                 output_str
                             },
                             Err(e) => {
                                 let error_msg = format!("Tool Error: {}. Analyze the failure and try a different command or approach if possible.", e);
                                 let _ = event_tx.send(TuiEvent::StatusUpdate(format!("❌ Tool '{}' failed", tool)));
-                                let _ = self.scribe.observe(InteractionType::Output, &error_msg).await;
+                                if let Err(log_err) = self.scribe.observe(InteractionType::Output, &error_msg).await {
+                                    crate::error_log!("Failed to log tool error to memory: {}", log_err);
+                                    if let Some(tx) = &self.event_tx {
+                                        let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", log_err) });
+                                    }
+                                }
                                 error_msg
                             },
                         },
                         None => {
                             let error_msg = format!("Error: Tool '{}' not found. Check the available tools list.", tool);
-                            let _ = self.scribe.observe(InteractionType::Output, &error_msg).await;
+                            if let Err(log_err) = self.scribe.observe(InteractionType::Output, &error_msg).await {
+                                crate::error_log!("Failed to log tool-not-found error to memory: {}", log_err);
+                                if let Some(tx) = &self.event_tx {
+                                    let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", log_err) });
+                                }
+                            }
                             error_msg
                         },
                     };
@@ -1187,8 +894,7 @@ impl AgentV2 {
                     }
 
                     let _ = event_tx.send(TuiEvent::StatusUpdate(format!("⚠️ {} Retrying ({}/{})", error, retry_count, max_retries)));
-                    
-                    // Nudge the model to follow the format
+
                     let nudge = format!(
                         "{}\n\n\
                         IMPORTANT: You must follow the ReAct format exactly:\n\
@@ -1209,115 +915,13 @@ impl AgentV2 {
         }
     }
 
-    /// Prune history to stay within token limits.
-    /// DEPRECATED: Use context_manager.prune_history() instead.
-    #[allow(dead_code)]
-    fn prune_history(&self, _history: Vec<ChatMessage>, _limit: usize) -> Vec<ChatMessage> {
-        // Delegate to context_manager
-        let mut manager = self.context_manager.clone();
-        manager.set_history(&_history);
-        manager.prune_history();
-        manager.history().iter().map(|m| m.to_chat_message()).collect()
-    }
-
     /// Condense the conversation history by summarizing older messages.
-    /// DEPRECATED: Use context_manager.condense_history() instead.
     pub async fn condense_history(&self, _history: &[ChatMessage]) -> Result<Vec<ChatMessage>, Box<dyn StdError + Send + Sync>> {
-        // Delegate to context_manager
         let manager = self.context_manager.clone();
         match manager.condense_history(&self.llm_client).await {
             Ok(result) => Ok(result),
             Err(e) => Err(format!("Condensation failed: {}", e).into()),
         }
-    }
-
-    /// Generate the system prompt with available tools and Short-Key JSON instructions.
-    fn generate_system_prompt(&self, scratchpad_content: &str) -> String {
-        let mut tools_desc = String::new();
-        for tool in self.tools.values() {
-            tools_desc.push_str(&format!("- {}: {}\n  Usage: {}\n", tool.name(), tool.description(), tool.usage()));
-        }
-
-        // Include capabilities context if available
-        let capabilities_section = self.capabilities_context.as_ref()
-            .map(|ctx| format!("\n\n{}\n", ctx))
-            .unwrap_or_default();
-
-        let scratchpad_section = if !scratchpad_content.is_empty() {
-            format!("\n\n## CURRENT SCRATCHPAD (Working Memory)\n{}\n", scratchpad_content)
-        } else {
-            String::new()
-        };
-
-        format!(
-            "{}\n\n\
-            # Available Tools\n\
-            {}\n{}\n\
-            # Response Format: Short-Key JSON Protocol\n\
-            You MUST respond using the Short-Key JSON protocol. This format minimizes token usage and ensures structural integrity.\n\n\
-            ## Schema\n\
-            - `t`: Thought. Your internal reasoning and next steps (optional; may be omitted for a direct final answer).\n\
-            - `a`: Action. The name of the tool to execute (optional if providing final answer).\n\
-            - `i`: Input. The arguments for the tool in strict JSON format (optional).\n\
-            - `f`: Final Answer. Your final response to the user (optional).\n\n\
-            ## Examples\n\
-            ### Single Tool Call\n\
-            ```json\n\
-            {{\"t\": \"I need to list files in the current directory.\", \"a\": \"execute_command\", \"i\": \"ls\"}}\n\
-            ```\n\n\
-            ### Parallel Tool Calls\n\
-            You can execute multiple tools in parallel by returning an array of objects. Use this for independent operations like reading multiple files or searching different sources.\n\
-            ```json\n\
-            [\n\
-              {{\"t\": \"Checking config...\", \"a\": \"execute_command\", \"i\": \"cat config.json\"}},\n\
-              {{\"t\": \"Checking logs...\", \"a\": \"execute_command\", \"i\": \"tail -n 20 error.log\"}}\n\
-            ]\n\
-            ```\n\n\
-            ### Final Answer\n\
-            ```json\n\
-            {{\"f\": \"The project has been successfully initialized.\"}}\n\
-            ```\n\n\
-            IMPORTANT: Always wrap your JSON in a code block or return it as the raw response. Ensure all tool inputs are valid JSON objects.\n\n\
-            Begin!{}",
-            self.system_prompt_prefix,
-            tools_desc,
-            scratchpad_section,
-            capabilities_section
-        )
-    }
-
-    fn build_context_from_memories(&self, memories: &[crate::memory::store::Memory]) -> String {
-        if memories.is_empty() {
-            return String::new();
-        }
-        
-        let mut context = String::from("## Relevant Past Operations & Knowledge\n");
-        for (i, mem) in memories.iter().enumerate() {
-            let timestamp = chrono::DateTime::from_timestamp(mem.created_at, 0)
-                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                .unwrap_or_else(|| "unknown time".to_string());
-            
-            context.push_str(&format!(
-                "{}. [{}] {} ({})\n",
-                i + 1,
-                mem.r#type,
-                mem.content,
-                timestamp,
-            ));
-        }
-        context.push_str("\nUse this context to inform your actions and avoid repeating mistakes.");
-        context
-    }
-
-    /// Automatically categorize a newly added memory.
-    pub async fn auto_categorize(&self, memory_id: i64, content: &str) -> Result<(), Box<dyn StdError + Send + Sync>> {
-        if let (Some(categorizer), Some(store)) = (&self.categorizer, &self.memory_store) {
-            let category_id = categorizer.categorize_memory(content).await?;
-            store.update_memory_category(memory_id, category_id.clone()).await?;
-            // Update summary for the category
-            let _ = categorizer.update_category_summary(&category_id).await;
-        }
-        Ok(())
     }
 
     /// Event-driven run method with heartbeat loop and budget management.
@@ -1328,38 +932,33 @@ impl AgentV2 {
         mut interrupt_rx: tokio::sync::mpsc::Receiver<()>,
         mut approval_rx: tokio::sync::mpsc::Receiver<bool>,
     ) -> Result<(String, TokenUsage), Box<dyn StdError + Send + Sync>> {
-        // Reset state for new task and inject hot memory
         self.reset(history).await;
         self.inject_hot_memory(5).await;
-        
+
         let start_time = std::time::Instant::now();
         let heartbeat_interval = self.heartbeat_interval;
         let safety_timeout = self.safety_timeout;
-        
+
         let mut last_observation = None;
         let mut heartbeat_timer = tokio::time::interval(heartbeat_interval);
         heartbeat_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         let mut recovery_attempts = 0;
-        
+
         loop {
-            // Check safety timeout
             if start_time.elapsed() > safety_timeout {
                 let message = format!("⚠️ Safety timeout reached ({:?}). Stopping autonomous run.", safety_timeout);
                 let _ = event_tx.send(RuntimeEvent::StatusUpdate { message: message.clone() });
                 return Ok((message, self.total_usage.clone()));
             }
-            
-            // Check budget enforcement
+
             if self.iteration_count >= self.max_steps {
                 let message = format!("⚠️ Step budget exceeded ({}/{}). Requesting permission to continue...",
                     self.iteration_count, self.max_steps);
                 let _ = event_tx.send(RuntimeEvent::StatusUpdate { message: message.clone() });
-                
-                // Wait for approval to continue
+
                 match approval_rx.recv().await {
                     Some(true) => {
-                        // Increase budget by 50% and continue
                         self.max_steps = (self.max_steps as f64 * 1.5) as usize;
                         let continue_msg = format!("✅ Budget increased to {} steps. Continuing...", self.max_steps);
                         let _ = event_tx.send(RuntimeEvent::StatusUpdate { message: continue_msg });
@@ -1378,7 +977,6 @@ impl AgentV2 {
             }
 
             tokio::select! {
-                // Heartbeat: poll for background job updates
                 _ = heartbeat_timer.tick() => {
                     let active_jobs = self.job_registry.poll_updates();
                     if !active_jobs.is_empty() {
@@ -1389,11 +987,10 @@ impl AgentV2 {
                                         .as_ref()
                                         .map(|r| r.to_string())
                                         .unwrap_or_else(|| "Job completed successfully".to_string());
-                                    
+
                                     let message = format!("✅ Background job '{}' completed: {}", job.description, result_str);
                                     let _ = event_tx.send(RuntimeEvent::StatusUpdate { message: message.clone() });
-                                    
-                                    // Feed result back into agent context
+
                                     let observation = format!("Background job '{}' result: {}", job.description, result_str);
                                     last_observation = Some(observation);
                                 }
@@ -1402,16 +999,14 @@ impl AgentV2 {
                                         .as_ref()
                                         .map(|e| e.as_str())
                                         .unwrap_or("Unknown error");
-                                    
+
                                     let message = format!("❌ Background job '{}' failed: {}", job.description, error_msg);
                                     let _ = event_tx.send(RuntimeEvent::StatusUpdate { message: message.clone() });
-                                    
-                                    // Feed error back into agent context
+
                                     let observation = format!("Background job '{}' failed: {}", job.description, error_msg);
                                     last_observation = Some(observation);
                                 }
                                 JobStatus::Running => {
-                                    // Still running, could send status update if needed
                                     let message = format!("⏳ Background job '{}' is still running...", job.description);
                                     let _ = event_tx.send(RuntimeEvent::StatusUpdate { message });
                                 }
@@ -1419,28 +1014,25 @@ impl AgentV2 {
                         }
                     }
                 }
-                
-                // Main cognitive step
+
                 result = self.step(last_observation.take()) => {
                     match result {
                         Ok(decision) => {
-                            recovery_attempts = 0; // Reset on success
+                            recovery_attempts = 0;
                             match decision {
                                 AgentDecision::Message(msg, usage) => {
                                     let _ = event_tx.send(RuntimeEvent::AgentResponse {
                                         content: msg.clone(),
                                         usage: usage.clone()
                                     });
-                                    
-                                    // Check for final answer indicators
+
                                     if msg.contains("Final Answer:") || msg.contains("\"f\":") || msg.contains("\"final_answer\":") {
                                         let _ = event_tx.send(RuntimeEvent::StatusUpdate {
                                             message: "Task completed successfully.".to_string()
                                         });
                                         return Ok((msg, usage));
                                     }
-                                    
-                                    // Check if this looks like a user-facing response
+
                                     if msg.trim().ends_with('?')
                                         || msg.contains("Please")
                                         || msg.contains("Would you")
@@ -1454,18 +1046,13 @@ impl AgentV2 {
                                         });
                                         return Ok((msg, usage));
                                     }
-                                    
-                                    // Continue with a nudge
+
                                     last_observation = Some("Please continue your task or provide a Final Answer if you are done.".to_string());
                                 }
                                 AgentDecision::Action { tool, args: _, kind: _ } => {
                                     let _ = event_tx.send(RuntimeEvent::StatusUpdate {
                                         message: format!("Executing tool: '{}'", tool)
                                     });
-                                    
-                                    // For now, execute the tool directly (could be made async in future)
-                                    // This will be handled by the step() method's internal tool execution
-                                    // The observation will be processed in the next iteration
                                 }
                                 AgentDecision::MalformedAction(error) => {
                                     let _ = event_tx.send(RuntimeEvent::StatusUpdate {
@@ -1495,12 +1082,9 @@ impl AgentV2 {
                             let _ = event_tx.send(RuntimeEvent::StatusUpdate {
                                 message: recovery_msg.clone()
                             });
-                            
-                            // Sleep for 60 seconds (interruptible)
+
                             tokio::select! {
-                                _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
-                                    // Cooldown finished, loop will continue and retry
-                                }
+                                _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {}
                                 _ = interrupt_rx.recv() => {
                                     let message = "🛑 Execution interrupted by user during recovery.".to_string();
                                     let _ = event_tx.send(RuntimeEvent::StatusUpdate { message: message.clone() });
@@ -1511,8 +1095,7 @@ impl AgentV2 {
                         }
                     }
                 }
-                
-                // Handle interrupt signal
+
                 _ = interrupt_rx.recv() => {
                     let message = "🛑 Execution interrupted by user.".to_string();
                     let _ = event_tx.send(RuntimeEvent::StatusUpdate { message: message.clone() });

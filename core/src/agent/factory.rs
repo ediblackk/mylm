@@ -29,6 +29,7 @@ pub struct AgentBuilder {
     memory_store: Option<Arc<crate::memory::store::VectorStore>>,
     categorizer: Option<Arc<crate::memory::MemoryCategorizer>>,
     job_registry: Option<crate::agent::v2::jobs::JobRegistry>,
+    disable_memory: bool,
 }
 
 impl AgentBuilder {
@@ -45,6 +46,7 @@ impl AgentBuilder {
             memory_store: None,
             categorizer: None,
             job_registry: None,
+            disable_memory: false,
         }
     }
 
@@ -128,6 +130,7 @@ impl AgentBuilder {
                     self.job_registry, // JobRegistry
                     None, // capabilities_context
                     None, // scratchpad
+                    self.disable_memory,
                 ))
             },
             AgentVersion::V1 => {
@@ -141,6 +144,7 @@ impl AgentBuilder {
                     self.categorizer,
                     self.job_registry, // job_registry
                     None, // scratchpad
+                    self.disable_memory,
                 ).await)
             }
         }

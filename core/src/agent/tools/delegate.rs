@@ -228,6 +228,7 @@ impl Tool for DelegateTool {
                 Some(job_registry.clone()), // Share parent's job registry
                 None, // capabilities_context
                 None, // scratchpad
+                false, // disable_memory
             );
 
             // Set up event channels for the sub-agent

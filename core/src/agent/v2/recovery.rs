@@ -1,5 +1,5 @@
 use crate::llm::{LlmClient, chat::{ChatMessage, ChatRequest}};
-use crate::agent::v2::core::{ShortKeyAction, parse_short_key_actions_from_content};
+use crate::agent::v2::protocol::{ShortKeyAction, parse_short_key_actions_from_content};
 use std::error::Error;
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};

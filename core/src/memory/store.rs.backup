@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 use anyhow::{Context, Result};
-use arrow_array::{RecordBatch, RecordBatchIterator, StringArray, Float32Array, Int64Array, FixedSizeListArray, Array, ArrayRef, new_null_array};
+use arrow_array::{RecordBatch, RecordBatchIterator, StringArray, Float32Array, Int64Array, FixedSizeListArray, Array, ArrayRef};
 use arrow_schema::{DataType, Field, Schema};
 use chrono::Utc;
 use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
@@ -189,9 +189,10 @@ impl VectorStore {
     /// Reads all data from the old table, transforms records to match the new schema,
     /// and creates a new table with the correct schema.
     async fn migrate_table(&self, name: &str, old_schema: &Schema, new_schema: Arc<Schema>) -> Result<Table> {
-        use arrow_array::RecordBatch;
-        
-        // Open the old table
+    	use arrow_array::RecordBatch;
+    	use arrow_schema::Schema as ArrowSchema;
+    	
+    	// Open the old table
     	let old_table = self.conn.open_table(name).execute().await?;
     	
     	// Read all records from the old table
@@ -217,28 +218,41 @@ impl VectorStore {
     	// Transform each batch to the new schema
     	let mut new_batches = Vec::new();
     	for old_batch in &old_batches {
-    	    let mut new_columns: Vec<ArrayRef> = Vec::new();
-    	    
-    	    for new_field in new_schema.fields() {
-    	        let field_name = new_field.name();
-    	        
-    	        if let Some((old_idx, old_field)) = field_map.get(field_name) {
-    	            // Field exists in old schema - get column by index (no Result)
-    	            let old_col = old_batch.column(*old_idx);
-    	            // Check if data types are compatible
-    	            if old_field.data_type() != new_field.data_type() {
-    	                warn!("Field '{}' type mismatch: old={:?}, new={:?}. Using old column as-is.", field_name, old_field.data_type(), new_field.data_type());
-    	            }
-    	            new_columns.push(old_col.clone());
-    	        } else {
-    	            // Field doesn't exist in old schema - create null column with default value
-    	            info!("Field '{}' missing in old schema, creating null column with default", field_name);
-    	            new_columns.push(new_null_array(new_field.data_type(), old_batch.num_rows()));
-    	        }
-    	    }
-    	    
-    	    let new_batch = RecordBatch::try_new(new_schema.clone(), new_columns)?;
-    	    new_batches.push(new_batch);
+    		let mut new_columns: Vec<ArrayRef> = Vec::new();
+    		
+    		for new_field in new_schema.fields() {
+    			let field_name = new_field.name();
+    			
+    			if let Some((old_idx, old_field)) = field_map.get(field_name) {
+    				// Field exists in old schema - try to get the column
+    				// column_by_name returns Result<&Array, _>
+    				match old_batch.column_by_name(field_name) {
+    					Ok(old_col) => {
+    						// Check if data types are compatible
+    						if old_field.data_type() != new_field.data_type() {
+    							warn!("Field '{}' type mismatch: old={:?}, new={:?}. Attempting conversion...", field_name, old_field.data_type(), new_field.data_type());
+    							// For now, we'll just use the old column as-is and hope Arrow can handle it
+    							// In a production system, we'd need proper type conversion
+    							new_columns.push(old_col.clone());
+    						} else {
+    							new_columns.push(old_col.clone());
+    						}
+    					},
+    					Err(_) => {
+    						// Column missing in this batch - create null column
+    						warn!("Field '{}' missing in data batch, creating null column", field_name);
+    						new_columns.push(create_null_array(new_field.data_type(), old_batch.num_rows())?;
+    					}
+    				}
+    			} else {
+    				// Field doesn't exist in old schema - create null column with default value
+    				info!("Field '{}' missing in old schema, creating null column with default", field_name);
+    				new_columns.push(create_null_array(new_field.data_type(), old_batch.num_rows())?;
+    			}
+    		}
+    		
+    		let new_batch = RecordBatch::try_new(new_schema.clone(), new_columns)?;
+    		new_batches.push(new_batch);
     	}
     	
     	// Create a new table with the migrated data
@@ -292,8 +306,35 @@ impl VectorStore {
     	
     	info!("Database repair completed:\n{}", report);
     	Ok(report)
-    	   }
-    	  
+    }
+   }
+   
+   // Helper function to create an array of null values for a given data type
+   fn create_null_array(data_type: &DataType, length: usize) -> Result<ArrayRef> {
+       use arrow_array::builder::{ArrayBuilder, StringBuilder, Int64Builder, Float32Builder};
+       
+       let builder: Box<dyn ArrayBuilder> = match data_type {
+           DataType::Utf8 => Box::new(StringBuilder::new()),
+           DataType::Int64 => Box::new(Int64Builder::new()),
+           DataType::Float32 => Box::new(Float32Builder::new()),
+           DataType::FixedSizeList(field, size) => {
+               // For fixed size list (embedding), create a null array
+               // We'll create a builder for the inner type
+               let inner_type = field.data_type();
+               let inner_builder: Box<dyn ArrayBuilder> = match inner_type {
+                   DataType::Float32 => Box::new(Float32Builder::new()),
+                   _ => return Err(anyhow::anyhow!("Unsupported inner type for FixedSizeList: {:?}", inner_type)),
+               };
+               // Use FixedSizeListBuilder
+               use arrow_array::FixedSizeListBuilder;
+               Box::new(FixedSizeListBuilder::new(inner_builder, *size as usize))
+           },
+           _ => return Err(anyhow::anyhow!("Unsupported data type for null array: {:?}", data_type)),
+       };
+       
+       builder.append_n_null(length);
+       Ok(builder.finish())
+   }
 
     pub async fn add_memory(&self, content: &str) -> Result<()> {
         self.add_memory_typed(content, MemoryType::UserNote, None, None, None, None).await

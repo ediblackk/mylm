@@ -67,18 +67,7 @@ async fn main() -> Result<()> {
             .default(true)
             .interact()?
         {
-             crate::cli::hub::handle_setup_endpoint(&mut config).await?;
-             
-             if config.is_initialized() {
-                 println!("\n✨ Endpoint configured! Now let's create a profile to use it.");
-                 if dialoguer::Confirm::new()
-                    .with_prompt("Create a profile now?")
-                    .default(true)
-                    .interact()?
-                 {
-                     crate::cli::hub::handle_create_profile(&mut config).await?;
-                 }
-             }
+             crate::cli::hub::handle_add_provider(&mut config).await?;
         } else {
              println!("⚠️  mylm requires at least one endpoint to function.");
         }
@@ -198,14 +187,14 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
 
         Some(Commands::Interactive) => {
             let update_available = check_for_updates_fast();
-            terminal::run_tui(None, None, None, None, update_available).await?;
+            terminal::run_tui(None, None, None, None, update_available, false).await?;
         }
 
         Some(Commands::Pop) => {
             if crate::cli::hub::is_tmux_available() {
                 let context = TerminalContext::collect().await;
                 let update_available = check_for_updates_fast();
-                terminal::run_tui(None, None, Some(context), Some(initial_context.terminal), update_available).await?;
+                terminal::run_tui(None, None, Some(context), Some(initial_context.terminal), update_available, false).await?;
             } else {
                 println!("\n❌ {} is required for the 'Pop Terminal' feature.", Style::new().bold().apply_to("tmux"));
                 println!("   This feature uses tmux to capture your current terminal session history and provide seamless context.");
@@ -436,7 +425,7 @@ async fn handle_hub(config: &mut Config, formatter: &OutputFormatter, initial_co
             HubChoice::PopTerminal => {
                 let context = mylm_core::context::TerminalContext::collect().await;
                 let update_available = check_for_updates_fast();
-                terminal::run_tui(None, None, Some(context), Some(initial_context.terminal), update_available).await?;
+                terminal::run_tui(None, None, Some(context), Some(initial_context.terminal), update_available, false).await?;
                 break;
             }
             HubChoice::PopTerminalMissing => {
@@ -453,10 +442,10 @@ async fn handle_hub(config: &mut Config, formatter: &OutputFormatter, initial_co
                 tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
             }
             HubChoice::ResumeSession => {
-                match App::load_session(None) {
+                match App::load_session(None).await {
                     Ok(session) => {
                         let update_available = check_for_updates_fast();
-                        terminal::run_tui(Some(session), None, None, None, update_available).await?;
+                        terminal::run_tui(Some(session), None, None, None, update_available, false).await?;
                         break;
                     }
                     Err(e) => {
@@ -466,7 +455,12 @@ async fn handle_hub(config: &mut Config, formatter: &OutputFormatter, initial_co
             }
             HubChoice::StartTui => {
                 let update_available = check_for_updates_fast();
-                terminal::run_tui(None, None, None, None, update_available).await?;
+                terminal::run_tui(None, None, None, None, update_available, false).await?;
+                break;
+            }
+            HubChoice::StartIncognito => {
+                let update_available = check_for_updates_fast();
+                terminal::run_tui(None, None, None, None, update_available, true).await?;
                 break;
             }
             HubChoice::QuickQuery => {
@@ -497,10 +491,10 @@ async fn handle_hub(config: &mut Config, formatter: &OutputFormatter, initial_co
                 if let Some(choice) = crate::cli::hub::show_session_select(session_options)? {
                     let idx = choice.find(" | ").unwrap_or(choice.len());
                     let id = &choice[..idx];
-                    match App::load_session(Some(id)) {
+                    match App::load_session(Some(id)).await {
                         Ok(session) => {
                             let update_available = check_for_updates_fast();
-                            terminal::run_tui(Some(session), None, None, None, update_available).await?;
+                            terminal::run_tui(Some(session), None, None, None, update_available, false).await?;
                             break;
                         }
                         Err(e) => println!("❌ Failed to load session: {}", e),
@@ -562,11 +556,11 @@ async fn handle_session_command(cmd: &SessionCommand, _config: &Config) -> Resul
                 }
             }
         }
-        SessionCommand::Resume { id } => {
-            match App::load_session(Some(id)) {
+         SessionCommand::Resume { id } => {
+            match App::load_session(Some(id)).await {
                 Ok(session) => {
                     let update_available = check_for_updates_fast();
-                    terminal::run_tui(Some(session), None, None, None, update_available).await?;
+                    terminal::run_tui(Some(session), None, None, None, update_available, false).await?;
                 }
                 Err(e) => println!("❌ Failed to load session: {}", e),
             }
@@ -589,7 +583,7 @@ async fn handle_session_command(cmd: &SessionCommand, _config: &Config) -> Resul
     Ok(())
 }
 
-/// Handle the unified settings dashboard - Menu System
+/// Handle the unified settings dashboard - Multi-Provider Menu System
 async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
     // Ensure we have at least one profile if none exist
     if config.profiles.is_empty() {
@@ -608,116 +602,74 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
         let choice = crate::cli::hub::show_settings_dashboard(config)?;
 
         match choice {
-            crate::cli::hub::SettingsMenuChoice::ManageProfiles => {
+            crate::cli::hub::SettingsMenuChoice::ManageProviders => {
                 loop {
-                    let action = crate::cli::hub::show_profiles_menu(config)?;
-
+                    let action = crate::cli::hub::show_provider_menu()?;
                     match action {
-                        crate::cli::hub::ProfileMenuChoice::SelectProfile => {
-                            let profiles: Vec<String> = config.profile_names();
-                            if let Some(ans) = crate::cli::hub::show_profile_select(profiles)? {
-                                config.set_active_profile(&ans)?;
-                                config.save_to_default_location()?;
-                                println!("✅ Active profile set to: {}", config.profile);
-                            }
+                        crate::cli::hub::ProviderMenuChoice::AddProvider => {
+                            crate::cli::hub::handle_add_provider(config).await?;
                         }
-                        crate::cli::hub::ProfileMenuChoice::CreateProfile => {
-                            crate::cli::hub::handle_create_profile(config).await?;
+                        crate::cli::hub::ProviderMenuChoice::EditProvider => {
+                            crate::cli::hub::handle_edit_provider(config).await?;
                         }
-                        crate::cli::hub::ProfileMenuChoice::EditProfile => {
-                            crate::cli::hub::handle_edit_profile(config)?;
+                        crate::cli::hub::ProviderMenuChoice::RemoveProvider => {
+                            crate::cli::hub::handle_remove_provider(config)?;
                         }
-                        crate::cli::hub::ProfileMenuChoice::DeleteProfile => {
-                            crate::cli::hub::handle_delete_profile(config)?;
-                        }
-                        crate::cli::hub::ProfileMenuChoice::Back => break,
+                        crate::cli::hub::ProviderMenuChoice::Back => break,
                     }
                 }
             }
 
-            crate::cli::hub::SettingsMenuChoice::EndpointSetup => {
-                crate::cli::hub::handle_setup_endpoint(config).await?;
+            crate::cli::hub::SettingsMenuChoice::SelectMainModel => {
+                crate::cli::hub::handle_select_main_model(config).await?;
             }
 
-            crate::cli::hub::SettingsMenuChoice::ToggleTmuxAutostart => {
-                if let Err(e) = toggle_tmux_autostart().context("Failed to toggle tmux autostart") {
-                    println!("❌ Error: {}", e);
-                }
+            crate::cli::hub::SettingsMenuChoice::SelectWorkerModel => {
+                crate::cli::hub::handle_select_worker_model(config).await?;
             }
 
-            crate::cli::hub::SettingsMenuChoice::WebSearch => {
+            crate::cli::hub::SettingsMenuChoice::WebSearchSettings => {
+                crate::cli::hub::handle_web_search_settings(config).await?;
+            }
+
+            crate::cli::hub::SettingsMenuChoice::AgentSettings => {
                 loop {
-                    let action = crate::cli::hub::show_web_search_menu(config)?;
-
+                    let action = crate::cli::hub::show_agent_settings_menu(config)?;
                     match action {
-                        crate::cli::hub::WebSearchMenuChoice::ToggleEnabled => {
-                            config.features.web_search.enabled = !config.features.web_search.enabled;
-                            config.save_to_default_location()?;
-                        }
-                        crate::cli::hub::WebSearchMenuChoice::SetProvider => {
-                            let providers: Vec<String> = vec![
-                                "Disabled".to_string(),
-                                "Kimi (Moonshot AI)".to_string(),
-                                "SerpAPI (Google/Bing/etc.)".to_string(),
-                            ];
-                            let current = match config.features.web_search.provider {
-                                mylm_core::config::SearchProvider::Kimi => "kimi",
-                                mylm_core::config::SearchProvider::Serpapi => "serpapi",
-                                mylm_core::config::SearchProvider::Brave => "brave",
-                            };
-                            let default_idx = match current {
-                                "kimi" => 1,
-                                "serpapi" => 2,
-                                _ => 0,
-                            };
-                            let choice = inquire::Select::new("Select web search provider:", providers)
-                                .with_starting_cursor(default_idx)
-                                .prompt()?;
-
-                            match choice.as_str() {
-                                "Kimi (Moonshot AI)" => {
-                                    config.features.web_search.enabled = true;
-                                    config.features.web_search.provider = mylm_core::config::SearchProvider::Kimi;
-                                }
-                                "SerpAPI (Google/Bing/etc.)" => {
-                                    config.features.web_search.enabled = true;
-                                    config.features.web_search.provider = mylm_core::config::SearchProvider::Serpapi;
-                                }
-                                _ => {
-                                    config.features.web_search.enabled = false;
+                        crate::cli::hub::AgentSettingsChoice::IterationsSettings => {
+                            loop {
+                                let iter_action = crate::cli::hub::show_iterations_settings_menu(config)?;
+                                match iter_action {
+                                    crate::cli::hub::IterationsSettingsChoice::SetMaxIterations => {
+                                        crate::cli::hub::handle_max_iterations(config)?;
+                                    }
+                                    crate::cli::hub::IterationsSettingsChoice::SetRateLimit => {
+                                        crate::cli::hub::handle_set_rate_limit(config)?;
+                                    }
+                                    crate::cli::hub::IterationsSettingsChoice::Back => break,
                                 }
                             }
-
-                            config.save_to_default_location()?;
                         }
-                        crate::cli::hub::WebSearchMenuChoice::SetApiKey => {
-                            let key = dialoguer::Password::new()
-                                .with_prompt("Web Search API Key")
-                                .allow_empty_password(true)
-                                .interact()?;
-                            if !key.trim().is_empty() {
-                                config.features.web_search.api_key = Some(key);
-                                config.save_to_default_location()?;
+                        crate::cli::hub::AgentSettingsChoice::ToggleTmuxAutostart => {
+                            crate::cli::hub::handle_toggle_tmux_autostart(config)?;
+                        }
+                        crate::cli::hub::AgentSettingsChoice::PaCoReSettings => {
+                            loop {
+                                let pacore_action = crate::cli::hub::show_pacore_settings_menu(config)?;
+                                match pacore_action {
+                                    crate::cli::hub::PaCoReSettingsChoice::TogglePaCoRe => {
+                                        crate::cli::hub::handle_toggle_pacore(config)?;
+                                    }
+                                    crate::cli::hub::PaCoReSettingsChoice::SetPaCoReRounds => {
+                                        crate::cli::hub::handle_set_pacore_rounds(config)?;
+                                    }
+                                    crate::cli::hub::PaCoReSettingsChoice::Back => break,
+                                }
                             }
                         }
-
-                        crate::cli::hub::WebSearchMenuChoice::Back => break,
+                        crate::cli::hub::AgentSettingsChoice::Back => break,
                     }
                 }
-            }
-
-            crate::cli::hub::SettingsMenuChoice::GeneralSettings => {
-                println!("\n⚙️  General Settings");
-                println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
-                println!("ℹ️  General settings are managed through specific menus in V2:");
-                println!("  - Use 'Manage Profiles' to set models and iteration limits.");
-                println!("  - Use 'Endpoint Setup' to configure API keys and base URLs.");
-                println!("  - Use 'Web Search' to configure search providers.");
-                println!("\n  Current Version: v{}-{}", env!("CARGO_PKG_VERSION"), env!("BUILD_NUMBER"));
-                println!("  Data Directory: {:?}", dirs::data_dir().map(|d| d.join("mylm")));
-                println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
-                
-                let _ = inquire::Select::new("", vec!["Back"]).prompt()?;
             }
 
             crate::cli::hub::SettingsMenuChoice::Back => break,
@@ -861,6 +813,7 @@ async fn handle_one_shot(
         Some(categorizer),
         Some(job_registry),
         None, // scratchpad
+        false, // disable_memory
     ).await;
     
     let messages = vec![

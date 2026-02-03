@@ -2,6 +2,7 @@ pub mod app;
 pub mod pty;
 pub mod ui;
 pub mod session;
+pub mod session_manager;
 pub mod help;
 
 use crate::terminal::app::{App, Focus, AppState, TuiEvent};
@@ -21,6 +22,7 @@ use mylm_core::executor::safety::SafetyChecker;
 use mylm_core::config::{Config, ConfigUiExt, build_system_prompt};
 use mylm_core::context::TerminalContext;
 use anyhow::{Context, Result};
+use uuid::Uuid;
 use crossterm::{
     event::{self, Event as CrosstermEvent, KeyCode, KeyModifiers, MouseEventKind, EnableBracketedPaste, DisableBracketedPaste, EnableMouseCapture, DisableMouseCapture},
     execute,
@@ -29,10 +31,10 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{io, time::Duration};
 use std::sync::{Arc, RwLock};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use std::sync::atomic::Ordering;
 
-pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>, initial_query: Option<String>, initial_context: Option<TerminalContext>, initial_terminal_context: Option<mylm_core::context::terminal::TerminalContext>, update_available: bool) -> Result<()> {
+pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>, initial_query: Option<String>, initial_context: Option<TerminalContext>, initial_terminal_context: Option<mylm_core::context::terminal::TerminalContext>, update_available: bool, incognito: bool) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -78,10 +80,33 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
     mylm_core::agent::logger::init(base_data_dir.clone());
     mylm_core::info_log!("mylm starting up...");
 
-    let data_dir = base_data_dir.join("memory");
-    std::fs::create_dir_all(&data_dir)?;
-    let store = std::sync::Arc::new(mylm_core::memory::VectorStore::new(data_dir.to_str().unwrap()).await?);
-    let categorizer = std::sync::Arc::new(mylm_core::memory::categorizer::MemoryCategorizer::new(llm_client.clone(), store.clone()));
+    // Incognito mode: use temporary directory that will be deleted on exit
+    let incognito_dir_opt = if incognito {
+        let temp_dir = std::env::temp_dir().join(format!("mylm-incognito-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir)?;
+        Some(temp_dir)
+    } else {
+        None
+    };
+
+    // Determine store and categorizer directories
+    let (store, categorizer, journal) = if incognito {
+        // Use temporary directories
+        let memory_dir = incognito_dir_opt.as_ref().unwrap().join("memory");
+        let journal_path = incognito_dir_opt.as_ref().unwrap().join("journal.md");
+        std::fs::create_dir_all(&memory_dir)?;
+        let store = std::sync::Arc::new(mylm_core::memory::VectorStore::new(memory_dir.to_str().unwrap()).await?);
+        let journal = mylm_core::memory::journal::Journal::with_path(journal_path)?;
+        (store, None, journal)
+    } else {
+        // Use persistent data directory
+        let data_dir = base_data_dir.join("memory");
+        std::fs::create_dir_all(&data_dir)?;
+        let store = std::sync::Arc::new(mylm_core::memory::VectorStore::new(data_dir.to_str().unwrap()).await?);
+        let categorizer = std::sync::Arc::new(mylm_core::memory::categorizer::MemoryCategorizer::new(llm_client.clone(), store.clone()));
+        let journal = mylm_core::memory::journal::Journal::new()?;
+        (store, Some(categorizer), journal)
+    };
     
     // Initialize state store
     let state_store = std::sync::Arc::new(std::sync::RwLock::new(mylm_core::state::StateStore::new()?));
@@ -105,16 +130,16 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
 
     // Create a temporary Scribe for tools that need it during initialization
     // The Agent will create its own internal Scribe, but we need one for DelegateTool now.
-    let journal = std::sync::Arc::new(tokio::sync::Mutex::new(mylm_core::memory::journal::Journal::new().unwrap()));
-    let scribe = std::sync::Arc::new(mylm_core::memory::scribe::Scribe::new(journal, store.clone(), llm_client.clone()));
+    let journal = Arc::new(Mutex::new(journal));
+    let scribe = Arc::new(mylm_core::memory::scribe::Scribe::new(journal, store.clone(), llm_client.clone()));
 
-    let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone(), Some(store.clone()), Some(categorizer.clone()), None, Some(job_registry.clone()));
+    let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone(), Some(store.clone()), categorizer.clone(), None, Some(job_registry.clone()));
     let memory_tool = MemoryTool::new(store.clone());
     let web_search_tool = WebSearchTool::new(config.features.web_search.clone(), event_tx.clone());
     let crawl_tool = CrawlTool::new(event_tx.clone());
     let state_tool = StateTool::new(state_store.clone());
     let system_tool = SystemMonitorTool::new();
-    let delegate_tool = DelegateTool::new(llm_client.clone(), scribe.clone(), job_registry.clone(), Some(store.clone()), Some(categorizer.clone()), None);
+    let delegate_tool = DelegateTool::new(llm_client.clone(), scribe.clone(), job_registry.clone(), Some(store.clone()), categorizer.clone(), None);
     let wait_tool = WaitTool;
     let terminal_sight_tool = TerminalSightTool::new(event_tx.clone());
     let scratchpad_tool = ScratchpadTool::new(scratchpad.clone());
@@ -141,24 +166,30 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
         .and_then(|p| p.max_iterations)
         .unwrap_or(10);
     
-    let agent = Agent::new_with_iterations(
+    let mut agent = Agent::new_with_iterations(
         llm_client,
         tools,
         system_prompt,
         max_iterations,
         mylm_core::config::AgentVersion::V2,
         Some(store.clone()),
-        Some(categorizer.clone()),
+        categorizer.clone(),
         Some(job_registry.clone()),
-        Some(scratchpad.clone())
+        Some(scratchpad.clone()),
+        incognito,
     ).await;
+    
+    // Override the agent's scribe to use our incognito journal (if incognito)
+    // This ensures the agent uses the same journal as the tools, which may be incognito
+    agent.scribe = Some(scribe.clone());
 
     // Setup PTY with context CWD
     let (pty_manager, mut pty_rx) = spawn_pty(context.cwd.clone())?;
 
     // Create app state
-    let mut app = App::new(pty_manager, agent, config, scratchpad, job_registry);
+    let mut app = App::new(pty_manager, agent, config, scratchpad, job_registry, incognito);
     app.update_available = update_available;
+    
     
     // Resize app to current terminal size before injecting context
     // This ensures vt100 parser wraps lines correctly for our TUI panes.
@@ -209,6 +240,14 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
         app.session_id = session.id;
         app.session_monitor.resume_stats(&session.metadata);
 
+        // Restore agent state from session
+        {
+            let mut agent = app.agent.lock().await;
+            agent.session_id = session.agent_session_id.clone();
+            agent.history = session.agent_history.clone();
+            app.context_manager.set_history(&agent.history);
+        }
+
         if !session.terminal_history.is_empty() {
             // Restore saved terminal history
             app.process_terminal_data(&session.terminal_history);
@@ -223,7 +262,7 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
         app.chat_input = query;
         app.cursor_position = app.chat_input.chars().count();
         app.focus = Focus::Chat;
-        app.submit_message(event_tx.clone());
+        app.submit_message(event_tx.clone()).await;
     }
 
     // Spawn PTY listener
@@ -266,9 +305,16 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
         state_store,
     ).await;
 
-    // Save session on exit as fallback (only if not already handled)
-    if !app.should_quit {
-        let _ = app.save_session(None);
+    // Save session on exit as fallback (only if not already handled and not incognito)
+    if !app.should_quit && !incognito {
+        let _ = app.save_session(None).await;
+    }
+
+    // Cleanup incognito temporary directory
+    if incognito {
+        if let Some(incognito_dir) = incognito_dir_opt {
+            let _ = std::fs::remove_dir_all(incognito_dir);
+        }
     }
 
     // Restore terminal
@@ -465,7 +511,7 @@ async fn run_loop(
                     app.status_message = None;
                 }
                 TuiEvent::AgentResponseFinal(response, usage) => {
-                    app.start_streaming_final_answer(response, usage);
+                    app.start_streaming_final_answer(response, usage).await;
                     app.status_message = None;
                 }
                 TuiEvent::StatusUpdate(status) => {
@@ -496,6 +542,10 @@ async fn run_loop(
                 }
                 TuiEvent::MemoryGraphUpdate(graph) => {
                     app.memory_graph = graph;
+                }
+                TuiEvent::PaCoReProgress { completed, total, current_round, total_rounds } => {
+                    app.pacore_progress = Some((completed, total));
+                    app.pacore_current_round = Some((current_round, total_rounds));
                 }
                 TuiEvent::ConfigUpdate(new_config) => {
                     app.config = new_config.clone();
@@ -659,8 +709,35 @@ async fn run_loop(
                                     app.memory_graph_scroll = 0;
                                     app.show_job_detail = false;
                                     app.job_scroll = 0;
+                                    app.help_scroll = 0;
                                 }
                                 continue;
+                            }
+
+                            // Help View Scroll Handling (when help is shown)
+                            if app.show_help_view {
+                                // Max scroll - help content is ~35 lines, limit to 30
+                                const MAX_HELP_SCROLL: usize = 30;
+                                
+                                match key.code {
+                                    KeyCode::Up => {
+                                        app.help_scroll = app.help_scroll.saturating_sub(1);
+                                        continue;
+                                    }
+                                    KeyCode::Down => {
+                                        app.help_scroll = (app.help_scroll + 1).min(MAX_HELP_SCROLL);
+                                        continue;
+                                    }
+                                    KeyCode::PageUp => {
+                                        app.help_scroll = app.help_scroll.saturating_sub(10);
+                                        continue;
+                                    }
+                                    KeyCode::PageDown => {
+                                        app.help_scroll = (app.help_scroll + 10).min(MAX_HELP_SCROLL);
+                                        continue;
+                                    }
+                                    _ => {}
+                                }
                             }
 
                             // Global Focus Toggle (F2) - Works everywhere
@@ -709,12 +786,6 @@ async fn run_loop(
                                     app.selected_job_index = None;
                                     app.job_scroll = 0;
                                 }
-                                continue;
-                            }
-
-                            // Global Terminal Toggle (Ctrl+Shift+T)
-                            if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) {
-                                app.toggle_terminal_visibility();
                                 continue;
                             }
 
@@ -920,7 +991,7 @@ async fn run_loop(
                                     if app.state == AppState::Idle || app.state == AppState::WaitingForUser {
                                         match key.code {
                                             KeyCode::Enter => {
-                                                app.submit_message(event_tx.clone());
+                                                app.submit_message(event_tx.clone()).await;
                                             }
                                             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                                 app.trigger_manual_condensation(event_tx.clone());
@@ -992,16 +1063,16 @@ async fn run_loop(
                                         }
                                     } else if app.state == AppState::NamingSession {
                                         match key.code {
-                                            KeyCode::Enter => {
-                                                let name = if app.exit_name_input.trim().is_empty() {
-                                                    None
-                                                } else {
-                                                    Some(app.exit_name_input.trim().to_string())
-                                                };
-                                                let _ = app.save_session(name);
-                                                app.should_quit = true;
-                                                return Ok(());
-                                            }
+                                    KeyCode::Enter => {
+                                        let name = if app.exit_name_input.trim().is_empty() {
+                                            None
+                                        } else {
+                                            Some(app.exit_name_input.trim().to_string())
+                                        };
+                                        let _ = app.save_session(name).await;
+                                        app.should_quit = true;
+                                        return Ok(());
+                                    }
                                             KeyCode::Esc => {
                                                 app.set_state(AppState::ConfirmExit);
                                             }

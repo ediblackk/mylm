@@ -1,8 +1,8 @@
 use anyhow::Result;
 use console::Style;
-use dialoguer::{Confirm, Password};
+use dialoguer::Password;
 use inquire::{Select as InquireSelect, Text};
-use mylm_core::config::{Config, ConfigUiExt, Provider, Profile};
+use mylm_core::config::{Config, ConfigUiExt, Provider};
 use serde_json::Value;
 
 /// Main hub choice enum
@@ -12,6 +12,7 @@ pub enum HubChoice {
     PopTerminalMissing,
     ResumeSession,
     StartTui,
+    StartIncognito,
     QuickQuery,
     ManageSessions,
     BackgroundJobs,
@@ -32,6 +33,7 @@ impl std::fmt::Display for HubChoice {
             HubChoice::PopTerminalMissing => write!(f, "🚀 Pop Terminal (tmux Required)"),
             HubChoice::ResumeSession => write!(f, "🔄 Resume Latest Session"),
             HubChoice::StartTui => write!(f, "✨ Start Fresh TUI Session"),
+            HubChoice::StartIncognito => write!(f, "🕵️  Start Incognito Session"),
             HubChoice::QuickQuery => write!(f, "⚡ Quick Query"),
             HubChoice::Configuration => write!(f, "⚙️  Configuration"),
             HubChoice::ManageSessions => write!(f, "📂 Manage Sessions"),
@@ -44,28 +46,48 @@ impl std::fmt::Display for HubChoice {
 /// Settings dashboard main menu choices
 #[derive(Debug, PartialEq)]
 pub enum SettingsMenuChoice {
-    ManageProfiles,
-    EndpointSetup,
-    ToggleTmuxAutostart,
-    WebSearch,
-    GeneralSettings,
+    ManageProviders,     // Add/Edit/Remove providers
+    SelectMainModel,     // Choose provider + model
+    SelectWorkerModel,   // Choose provider + model for worker
+    WebSearchSettings,   // Web search provider config
+    AgentSettings,       // Max iterations, tmux, etc
     Back,
 }
 
 impl std::fmt::Display for SettingsMenuChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SettingsMenuChoice::ManageProfiles => write!(f, "📂 [1] Manage Profiles"),
-            SettingsMenuChoice::EndpointSetup => write!(f, "🔌 [2] Endpoint Setup"),
-            SettingsMenuChoice::ToggleTmuxAutostart => write!(f, "🔄 [3] Toggle Tmux Autostart"),
-            SettingsMenuChoice::WebSearch => write!(f, "🌐 [4] Web Search"),
-            SettingsMenuChoice::GeneralSettings => write!(f, "⚙️  [5] General Settings"),
+            SettingsMenuChoice::ManageProviders => write!(f, "🔌 [1] Manage Providers"),
+            SettingsMenuChoice::SelectMainModel => write!(f, "🧠 [2] Select Main LLM"),
+            SettingsMenuChoice::SelectWorkerModel => write!(f, "⚡ [3] Select Worker Model"),
+            SettingsMenuChoice::WebSearchSettings => write!(f, "🌐 [4] Web Search"),
+            SettingsMenuChoice::AgentSettings => write!(f, "⚙️  [5] Agent Settings"),
             SettingsMenuChoice::Back => write!(f, "⬅️  [6] Back"),
         }
     }
 }
 
-/// Web search configuration submenu choices
+/// Provider management submenu
+#[derive(Debug, PartialEq)]
+pub enum ProviderMenuChoice {
+    AddProvider,
+    EditProvider,
+    RemoveProvider,
+    Back,
+}
+
+impl std::fmt::Display for ProviderMenuChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProviderMenuChoice::AddProvider => write!(f, "➕ Add Provider"),
+            ProviderMenuChoice::EditProvider => write!(f, "✏️  Edit Provider"),
+            ProviderMenuChoice::RemoveProvider => write!(f, "🗑️  Remove Provider"),
+            ProviderMenuChoice::Back => write!(f, "⬅️  Back"),
+        }
+    }
+}
+
+/// Web search settings submenu
 #[derive(Debug, PartialEq)]
 pub enum WebSearchMenuChoice {
     ToggleEnabled,
@@ -85,24 +107,58 @@ impl std::fmt::Display for WebSearchMenuChoice {
     }
 }
 
-/// Profile management submenu choices
+/// Agent settings submenu
 #[derive(Debug, PartialEq)]
-pub enum ProfileMenuChoice {
-    SelectProfile,
-    CreateProfile,
-    EditProfile,
-    DeleteProfile,
+pub enum AgentSettingsChoice {
+    IterationsSettings,
+    ToggleTmuxAutostart,
+    PaCoReSettings,
     Back,
 }
 
-impl std::fmt::Display for ProfileMenuChoice {
+impl std::fmt::Display for AgentSettingsChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProfileMenuChoice::SelectProfile => write!(f, "👤 [1] Select Profile"),
-            ProfileMenuChoice::CreateProfile => write!(f, "➕ [2] Create New Profile"),
-            ProfileMenuChoice::EditProfile => write!(f, "✏️  [3] Edit Profile Overrides"),
-            ProfileMenuChoice::DeleteProfile => write!(f, "🗑️  [4] Delete Profile"),
-            ProfileMenuChoice::Back => write!(f, "⬅️  [5] Back"),
+            AgentSettingsChoice::IterationsSettings => write!(f, "🔁 Iterations Settings"),
+            AgentSettingsChoice::ToggleTmuxAutostart => write!(f, "🔄 Toggle Tmux Autostart"),
+            AgentSettingsChoice::PaCoReSettings => write!(f, "⚡ PaCoRe Settings"),
+            AgentSettingsChoice::Back => write!(f, "⬅️  Back"),
+        }
+    }
+}
+
+/// Iterations settings submenu
+#[derive(Debug, PartialEq)]
+pub enum IterationsSettingsChoice {
+    SetMaxIterations,
+    SetRateLimit,
+    Back,
+}
+
+impl std::fmt::Display for IterationsSettingsChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IterationsSettingsChoice::SetMaxIterations => write!(f, "🔢 Set Max Iterations"),
+            IterationsSettingsChoice::SetRateLimit => write!(f, "⏱️  Set Rate Limit (ms)"),
+            IterationsSettingsChoice::Back => write!(f, "⬅️  Back"),
+        }
+    }
+}
+
+/// PaCoRe settings submenu
+#[derive(Debug, PartialEq)]
+pub enum PaCoReSettingsChoice {
+    TogglePaCoRe,
+    SetPaCoReRounds,
+    Back,
+}
+
+impl std::fmt::Display for PaCoReSettingsChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PaCoReSettingsChoice::TogglePaCoRe => write!(f, "⚡ Toggle PaCoRe"),
+            PaCoReSettingsChoice::SetPaCoReRounds => write!(f, "📊 Set PaCoRe Rounds"),
+            PaCoReSettingsChoice::Back => write!(f, "⬅️  Back"),
         }
     }
 }
@@ -117,6 +173,9 @@ pub fn is_tmux_available() -> bool {
 
 /// Show the interactive hub menu
 pub async fn show_hub(config: &Config) -> Result<HubChoice> {
+    // Clear screen for clean display
+    print!("\x1B[2J\x1B[1;1H");
+    
     print_banner(config).await;
 
     let mut options = Vec::new();
@@ -138,6 +197,7 @@ pub async fn show_hub(config: &Config) -> Result<HubChoice> {
 
     options.extend(vec![
         HubChoice::StartTui,
+        HubChoice::StartIncognito,
         HubChoice::QuickQuery,
         HubChoice::ManageSessions,
         HubChoice::BackgroundJobs,
@@ -167,36 +227,24 @@ pub fn show_session_select(sessions: Vec<String>) -> Result<Option<String>> {
     }
 }
 
-/// Show profile selection menu
-pub fn show_profile_select(profiles: Vec<String>) -> Result<Option<String>> {
-    let mut options = profiles;
-    options.push("⬅️  Back".to_string());
-
-    let ans: Result<String, _> = InquireSelect::new("Select Active Profile", options).prompt();
-
-    match ans {
-        Ok(choice) if choice == "⬅️  Back" => Ok(None),
-        Ok(choice) => Ok(Some(choice)),
-        Err(_) => Ok(None),
-    }
-}
-
-
 // ============================================================================
 // SETTINGS DASHBOARD - Main Configuration Menu
 // ============================================================================
 
-/// Main settings dashboard - presents a clean Menu System
+/// Main settings dashboard - shows current config summary
 pub fn show_settings_dashboard(config: &Config) -> Result<SettingsMenuChoice> {
-    // Display current state
-    display_current_config(config);
+    // Clear screen for clean display
+    print!("\x1B[2J\x1B[1;1H");
+    
+    // Display current state summary
+    display_config_summary(config);
 
     let options = vec![
-        SettingsMenuChoice::ManageProfiles,
-        SettingsMenuChoice::EndpointSetup,
-        SettingsMenuChoice::ToggleTmuxAutostart,
-        SettingsMenuChoice::WebSearch,
-        SettingsMenuChoice::GeneralSettings,
+        SettingsMenuChoice::ManageProviders,
+        SettingsMenuChoice::SelectMainModel,
+        SettingsMenuChoice::SelectWorkerModel,
+        SettingsMenuChoice::WebSearchSettings,
+        SettingsMenuChoice::AgentSettings,
         SettingsMenuChoice::Back,
     ];
 
@@ -211,7 +259,505 @@ pub fn show_settings_dashboard(config: &Config) -> Result<SettingsMenuChoice> {
     }
 }
 
+/// Display compact configuration summary
+fn display_config_summary(config: &Config) {
+    let effective = config.resolve_profile();
+    let green = Style::new().green();
+    let yellow = Style::new().yellow();
+    let dim = Style::new().dim();
+    
+    // Single line status bar
+    let ws_status = if config.features.web_search.enabled { "🌐" } else { "·" };
+    let tmux_status = if config.tmux_autostart { "🔄" } else { "·" };
+    let pacore_status = if config.features.pacore.enabled { format!("⚡{}", config.features.pacore.rounds) } else { "·".to_string() };
+    let rate_display = if effective.agent.iteration_rate_limit > 0 { format!("⏱️{}", effective.agent.iteration_rate_limit) } else { "·".to_string() };
+    
+    println!("  {} {} {} {} {} {} {} {} {} {} {} {}",
+        dim.apply_to("Iter:"), yellow.apply_to(format!("{}", effective.agent.max_iterations)),
+        dim.apply_to("│"), rate_display,
+        dim.apply_to("│ Web:"), ws_status,
+        dim.apply_to("│ Tmux:"), tmux_status,
+        dim.apply_to("│ PaCoRe:"), pacore_status,
+        dim.apply_to("│ Key:"), if effective.api_key.is_some() { green.apply_to("✓") } else { Style::new().red().apply_to("✗") }
+    );
+    println!();
+}
+
+// ============================================================================
+// PROVIDER MANAGEMENT
+// ============================================================================
+
+/// Show provider management menu
+pub fn show_provider_menu() -> Result<ProviderMenuChoice> {
+    // Clear screen for clean display
+    print!("\x1B[2J\x1B[1;1H");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    
+    let options = vec![
+        ProviderMenuChoice::AddProvider,
+        ProviderMenuChoice::EditProvider,
+        ProviderMenuChoice::RemoveProvider,
+        ProviderMenuChoice::Back,
+    ];
+
+    let ans: Result<ProviderMenuChoice, _> = InquireSelect::new(
+        "Manage Providers",
+        options
+    ).prompt();
+
+    match ans {
+        Ok(choice) => Ok(choice),
+        Err(_) => Ok(ProviderMenuChoice::Back),
+    }
+}
+
+/// Provider preset information
+struct ProviderPreset {
+    name: &'static str,
+    display_name: &'static str,
+    base_url: &'static str,
+    provider_type: Provider,
+    api_key_required: bool,
+}
+
+fn get_provider_presets() -> Vec<ProviderPreset> {
+    vec![
+        ProviderPreset {
+            name: "openai",
+            display_name: "🟢 OpenAI",
+            base_url: "https://api.openai.com/v1",
+            provider_type: Provider::Openai,
+            api_key_required: true,
+        },
+        ProviderPreset {
+            name: "anthropic",
+            display_name: "🟡 Anthropic",
+            base_url: "https://api.anthropic.com/v1",
+            provider_type: Provider::Custom,
+            api_key_required: true,
+        },
+        ProviderPreset {
+            name: "openrouter",
+            display_name: "🔵 OpenRouter",
+            base_url: "https://openrouter.ai/api/v1",
+            provider_type: Provider::Openrouter,
+            api_key_required: true,
+        },
+        ProviderPreset {
+            name: "google",
+            display_name: "🔴 Google Gemini",
+            base_url: "https://generativelanguage.googleapis.com/v1beta",
+            provider_type: Provider::Google,
+            api_key_required: true,
+        },
+        ProviderPreset {
+            name: "deepseek",
+            display_name: "🟣 DeepSeek",
+            base_url: "https://api.deepseek.com/v1",
+            provider_type: Provider::Custom,
+            api_key_required: true,
+        },
+        ProviderPreset {
+            name: "mistral",
+            display_name: "🟠 Mistral AI",
+            base_url: "https://api.mistral.ai/v1",
+            provider_type: Provider::Custom,
+            api_key_required: true,
+        },
+        ProviderPreset {
+            name: "cohere",
+            display_name: "⚫ Cohere",
+            base_url: "https://api.cohere.com/v1",
+            provider_type: Provider::Custom,
+            api_key_required: true,
+        },
+        ProviderPreset {
+            name: "ai21",
+            display_name: "⚪ AI21 Labs",
+            base_url: "https://api.ai21.com/studio/v1",
+            provider_type: Provider::Custom,
+            api_key_required: true,
+        },
+        ProviderPreset {
+            name: "groq",
+            display_name: "🟤 Groq",
+            base_url: "https://api.groq.com/openai/v1",
+            provider_type: Provider::Custom,
+            api_key_required: true,
+        },
+        ProviderPreset {
+            name: "perplexity",
+            display_name: "🔷 Perplexity",
+            base_url: "https://api.perplexity.ai",
+            provider_type: Provider::Custom,
+            api_key_required: true,
+        },
+        ProviderPreset {
+            name: "together",
+            display_name: "🔶 Together AI",
+            base_url: "https://api.together.xyz/v1",
+            provider_type: Provider::Custom,
+            api_key_required: true,
+        },
+        ProviderPreset {
+            name: "fireworks",
+            display_name: "🎆 Fireworks AI",
+            base_url: "https://api.fireworks.ai/inference/v1",
+            provider_type: Provider::Custom,
+            api_key_required: true,
+        },
+        ProviderPreset {
+            name: "replicate",
+            display_name: "🔄 Replicate",
+            base_url: "https://api.replicate.com/v1",
+            provider_type: Provider::Custom,
+            api_key_required: true,
+        },
+        ProviderPreset {
+            name: "moonshot",
+            display_name: "🌙 Moonshot AI (Kimi)",
+            base_url: "https://api.moonshot.cn/v1",
+            provider_type: Provider::Kimi,
+            api_key_required: true,
+        },
+        ProviderPreset {
+            name: "zai",
+            display_name: "🇨🇭 Z AI",
+            base_url: "https://api.z.ai/v1",
+            provider_type: Provider::Custom,
+            api_key_required: true,
+        },
+        ProviderPreset {
+            name: "minimax",
+            display_name: "📊 MiniMax",
+            base_url: "https://api.minimax.chat/v1",
+            provider_type: Provider::Custom,
+            api_key_required: true,
+        },
+        ProviderPreset {
+            name: "cerebras",
+            display_name: "🧠 Cerebras",
+            base_url: "https://api.cerebras.ai/v1",
+            provider_type: Provider::Custom,
+            api_key_required: true,
+        },
+        ProviderPreset {
+            name: "ollama",
+            display_name: "🏠 Ollama",
+            base_url: "http://localhost:11434/v1",
+            provider_type: Provider::Ollama,
+            api_key_required: false,
+        },
+        ProviderPreset {
+            name: "lmstudio",
+            display_name: "💻 LM Studio",
+            base_url: "http://localhost:1234/v1",
+            provider_type: Provider::Custom,
+            api_key_required: false,
+        },
+        ProviderPreset {
+            name: "custom",
+            display_name: "⚙️  Custom / Other",
+            base_url: "",
+            provider_type: Provider::Custom,
+            api_key_required: true,
+        },
+    ]
+}
+
+/// Handle adding a new provider
+pub async fn handle_add_provider(config: &mut Config) -> Result<bool> {
+    println!("\n🔌 Add New Provider");
+    println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
+    
+    // Get provider presets
+    let presets = get_provider_presets();
+    let preset_names: Vec<&str> = presets.iter().map(|p| p.display_name).collect();
+    
+    // Let user select from presets
+    let selected_preset = InquireSelect::new(
+        "Select provider:",
+        preset_names
+    ).prompt()?;
+    
+    // Find the preset
+    let preset = presets.iter()
+        .find(|p| p.display_name == selected_preset)
+        .unwrap();
+    
+    // Check if already exists
+    if config.providers.contains_key(preset.name) {
+        println!("⚠️  Provider '{}' already exists. Use Edit to modify it.", preset.name);
+        return Ok(false);
+    }
+    
+    // Get base URL (use preset default or allow custom)
+    let base_url = if preset.name == "custom" {
+        Text::new("Base URL:").prompt()?
+    } else {
+        let url = Text::new("Base URL:")
+            .with_initial_value(preset.base_url)
+            .prompt()?;
+        url
+    };
+    
+    // Get API key
+    let api_key_prompt = if preset.api_key_required {
+        "API Key:"
+    } else {
+        "API Key (optional for local):"
+    };
+    
+    let api_key = Password::new()
+        .with_prompt(api_key_prompt)
+        .allow_empty_password(!preset.api_key_required)
+        .interact()?;
+
+    // Create provider config
+    let provider_config = mylm_core::config::v2::ProviderConfig {
+        provider_type: preset.provider_type.clone(),
+        base_url,
+        api_key: if api_key.is_empty() { None } else { Some(api_key) },
+        timeout_secs: 30,
+    };
+
+    config.providers.insert(preset.name.to_string(), provider_config);
+    
+    // If this is the first provider, make it active
+    if config.providers.len() == 1 {
+        config.active_provider = preset.name.to_string();
+    }
+
+    println!("✅ Provider '{}' added successfully!", preset.name);
+    config.save_to_default_location()?;
+    Ok(true)
+}
+
+/// Handle editing a provider
+pub async fn handle_edit_provider(config: &mut Config) -> Result<bool> {
+    if config.providers.is_empty() {
+        println!("⚠️  No providers configured. Add one first.");
+        return Ok(false);
+    }
+    
+    // Select provider to edit
+    let provider_names: Vec<String> = config.providers.keys().cloned().collect();
+    let name = InquireSelect::new("Select provider to edit:", provider_names).prompt()?;
+    
+    let provider_config = config.providers.get(&name).cloned().unwrap();
+    
+    println!("\n✏️  Editing Provider: {}", name);
+    println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
+    println!("Current: {} @ {}", 
+        format!("{:?}", provider_config.provider_type),
+        provider_config.base_url
+    );
+    println!();
+
+    let options = vec![
+        "Change Base URL",
+        "Change API Key",
+        "Test Connection",
+        "Back",
+    ];
+
+    loop {
+        let choice = InquireSelect::new("What to edit:", options.clone()).prompt()?;
+
+        match choice {
+            "Change Base URL" => {
+                let new_url = Text::new("Base URL:")
+                    .with_initial_value(&provider_config.base_url)
+                    .prompt()?;
+                if let Some(cfg) = config.providers.get_mut(&name) {
+                    cfg.base_url = new_url;
+                }
+                config.save_to_default_location()?;
+                println!("✅ Base URL updated!");
+            }
+            "Change API Key" => {
+                let new_key = Password::new()
+                    .with_prompt("New API Key (empty to remove)")
+                    .allow_empty_password(true)
+                    .interact()?;
+                if let Some(cfg) = config.providers.get_mut(&name) {
+                    cfg.api_key = if new_key.is_empty() { None } else { Some(new_key) };
+                }
+                config.save_to_default_location()?;
+                println!("✅ API Key updated!");
+            }
+            "Test Connection" => {
+                let cfg = config.providers.get(&name).unwrap();
+                println!("🔄 Testing connection to {}...", cfg.base_url);
+                match fetch_models(&cfg.base_url, &cfg.api_key.clone().unwrap_or_default()).await {
+                    Ok(models) => println!("✅ Success! Found {} models.", models.len()),
+                    Err(e) => println!("❌ Failed: {}", e),
+                }
+            }
+            _ => break,
+        }
+    }
+
+    Ok(true)
+}
+
+/// Handle removing a provider
+pub fn handle_remove_provider(config: &mut Config) -> Result<bool> {
+    if config.providers.is_empty() {
+        println!("⚠️  No providers to remove.");
+        return Ok(false);
+    }
+    
+    let provider_names: Vec<String> = config.providers.keys().cloned().collect();
+    let name = InquireSelect::new("Select provider to remove:", provider_names).prompt()?;
+    
+    // Don't allow removing the active provider
+    if name == config.active_provider {
+        println!("⚠️  Cannot remove the active provider. Switch to another provider first.");
+        return Ok(false);
+    }
+    
+    config.providers.remove(&name);
+    println!("✅ Provider '{}' removed.", name);
+    config.save_to_default_location()?;
+    Ok(true)
+}
+
+// ============================================================================
+// MODEL SELECTION (Provider -> Model)
+// ============================================================================
+
+/// Select main LLM model - first choose provider, then model
+pub async fn handle_select_main_model(config: &mut Config) -> Result<bool> {
+    println!("\n🧠 Select Main LLM");
+    println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
+    
+    // Step 1: Select Provider
+    if config.providers.is_empty() {
+        println!("⚠️  No providers configured. Add a provider first.");
+        return Ok(false);
+    }
+    
+    let provider_names: Vec<String> = config.providers.keys().cloned().collect();
+    let selected_provider = InquireSelect::new("Select provider:", provider_names).prompt()?;
+    
+    // Make it the active provider
+    config.active_provider = selected_provider.clone();
+    
+    // Update legacy endpoint for compatibility
+    if let Some(provider_cfg) = config.providers.get(&selected_provider) {
+        config.endpoint.provider = provider_cfg.provider_type.clone();
+        config.endpoint.base_url = Some(provider_cfg.base_url.clone());
+        config.endpoint.api_key = provider_cfg.api_key.clone();
+    }
+    
+    // Step 2: Select Model from this provider
+    println!("\n🔄 Fetching models from {}...", selected_provider);
+    
+    let provider_cfg = config.providers.get(&selected_provider).unwrap();
+    let models = match fetch_models(&provider_cfg.base_url, 
+                      &provider_cfg.api_key.clone().unwrap_or_default()).await {
+        Ok(m) => m,
+        Err(e) => {
+            println!("⚠️  Could not fetch models: {}", e);
+            println!("   Falling back to manual entry.");
+            Vec::new()
+        }
+    };
+
+    let selected_model = if models.is_empty() {
+        Text::new("Model name:")
+            .with_initial_value(&config.endpoint.model)
+            .prompt()?
+    } else {
+        if models.len() > 20 {
+            println!("   (Type to search through {} models)", models.len());
+        }
+        
+        let initial = models.iter()
+            .position(|m| m == &config.endpoint.model)
+            .unwrap_or(0);
+            
+        InquireSelect::new("Select model:", models)
+            .with_starting_cursor(initial)
+            .prompt()?
+    };
+
+    config.endpoint.model = selected_model.clone();
+    config.save_to_default_location()?;
+    
+    println!("✅ Main LLM set to: {} @ {}", selected_model, selected_provider);
+    Ok(true)
+}
+
+/// Select worker model - can be from different provider than main
+pub async fn handle_select_worker_model(config: &mut Config) -> Result<bool> {
+    println!("\n⚡ Select Worker Model");
+    println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
+    println!("Worker model handles sub-tasks and simpler operations.");
+    println!("Can be from same or different provider than main LLM.");
+    println!();
+    
+    if config.providers.is_empty() {
+        println!("⚠️  No providers configured. Add a provider first.");
+        return Ok(false);
+    }
+    
+    // Step 1: Select Provider for worker
+    let provider_names: Vec<String> = config.providers.keys().cloned().collect();
+    let selected_provider = InquireSelect::new("Select provider for worker:", provider_names).prompt()?;
+    
+    // Step 2: Select Model from this provider
+    let provider_cfg = config.providers.get(&selected_provider).unwrap();
+    
+    println!("🔄 Fetching models from {}...", selected_provider);
+    let mut models = match fetch_models(&provider_cfg.base_url, 
+                      &provider_cfg.api_key.clone().unwrap_or_default()).await {
+        Ok(m) => m,
+        Err(_) => Vec::new(),
+    };
+    
+    // Add "Same as Main LLM" option
+    let same_as_main = format!("🔄 Same as Main ({})", config.endpoint.model);
+    models.insert(0, same_as_main.clone());
+
+    let selected = InquireSelect::new("Select worker model:", models).prompt()?;
+
+    let worker_model = if selected == same_as_main {
+        None // Use main model
+    } else {
+        Some(format!("{}/{}", selected_provider, selected))
+    };
+
+    // Update profile with worker model
+    let profile = config.profiles.entry(config.profile.clone()).or_default();
+    let current_agent = profile.agent.clone().unwrap_or_default();
+    profile.agent = Some(mylm_core::config::AgentOverride {
+        max_iterations: current_agent.max_iterations,
+        iteration_rate_limit: current_agent.iteration_rate_limit,
+        main_model: current_agent.main_model,
+        worker_model: worker_model.clone(),
+    });
+
+    config.save_to_default_location()?;
+    
+    match worker_model {
+        Some(m) => println!("✅ Worker model set to: {}", m),
+        None => println!("✅ Worker model set to use Main LLM"),
+    }
+    Ok(true)
+}
+
+// ============================================================================
+// WEB SEARCH SETTINGS
+// ============================================================================
+
+/// Show web search settings menu
 pub fn show_web_search_menu(config: &Config) -> Result<WebSearchMenuChoice> {
+    // Clear screen for clean display
+    print!("\x1B[2J\x1B[1;1H");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    
     let enabled = if config.features.web_search.enabled { "On" } else { "Off" };
     let provider = match config.features.web_search.provider {
         mylm_core::config::SearchProvider::Kimi => "Kimi",
@@ -244,333 +790,280 @@ pub fn show_web_search_menu(config: &Config) -> Result<WebSearchMenuChoice> {
     }
 }
 
-/// Display current configuration summary
-fn display_current_config(config: &Config) {
-    let profile_name = &config.profile;
-    let endpoint_info = config.get_endpoint_info();
-    let effective_info = config.get_effective_endpoint_info();
-    let profile_info = config.get_active_profile_info();
+/// Handle web search settings
+pub async fn handle_web_search_settings(config: &mut Config) -> Result<bool> {
+    loop {
+        let action = show_web_search_menu(config)?;
 
-    println!("\n📊 Current Configuration");
-    println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
-
-    println!("  Active Profile: {}", Style::new().green().bold().apply_to(profile_name));
-    
-    if let Some(ref p) = profile_info {
-        if let Some(ref model) = p.model_override {
-            println!("  ├─ Model Override: {}", model);
-        }
-        if let Some(iters) = p.max_iterations {
-            println!("  ├─ Max Iterations: {}", iters);
+        match action {
+            WebSearchMenuChoice::ToggleEnabled => {
+                config.features.web_search.enabled = !config.features.web_search.enabled;
+                config.save_to_default_location()?;
+                println!("✅ Web search {}", 
+                    if config.features.web_search.enabled { "enabled" } else { "disabled" });
+            }
+            WebSearchMenuChoice::SetProvider => {
+                let providers = vec![
+                    "Kimi (Moonshot AI)",
+                    "SerpAPI (Google/Bing)",
+                    "Brave Search",
+                ];
+                let choice = InquireSelect::new("Select web search provider:", providers).prompt()?;
+                
+                config.features.web_search.provider = match choice {
+                    "Kimi (Moonshot AI)" => mylm_core::config::SearchProvider::Kimi,
+                    "Brave Search" => mylm_core::config::SearchProvider::Brave,
+                    _ => mylm_core::config::SearchProvider::Serpapi,
+                };
+                config.features.web_search.enabled = true;
+                config.save_to_default_location()?;
+                println!("✅ Web search provider updated!");
+            }
+            WebSearchMenuChoice::SetApiKey => {
+                let key = Password::new()
+                    .with_prompt("Web Search API Key")
+                    .allow_empty_password(true)
+                    .interact()?;
+                if !key.trim().is_empty() {
+                    config.features.web_search.api_key = Some(key);
+                    config.save_to_default_location()?;
+                    println!("✅ API Key saved!");
+                }
+            }
+            WebSearchMenuChoice::Back => break,
         }
     }
-
-    println!("\n  Base Endpoint:");
-    println!("  ├─ Provider: {}", endpoint_info.provider);
-    println!("  ├─ Base URL: {}", endpoint_info.base_url);
-    println!("  ├─ Model: {}", endpoint_info.model);
-    println!("  ├─ API Key: {}", 
-        if endpoint_info.api_key_set { "✅ Set" } else { "❌ Not Set" }
-    );
-
-    println!("\n  Effective Configuration (Profile Applied):");
-    println!("  ├─ Model: {}", effective_info.model);
-    println!("  ├─ Provider: {}", effective_info.provider);
-    println!("  └─ API Key: {}", 
-        if effective_info.api_key_set { "✅ Set" } else { "❌ Not Set" }
-    );
-
-    println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
-    println!();
+    Ok(true)
 }
 
 // ============================================================================
-// PROFILE MANAGEMENT
+// AGENT SETTINGS
 // ============================================================================
 
-/// Show profile management submenu
-pub fn show_profiles_menu(_config: &Config) -> Result<ProfileMenuChoice> {
+/// Show agent settings menu
+pub fn show_agent_settings_menu(config: &Config) -> Result<AgentSettingsChoice> {
+    // Clear screen for clean display
+    print!("\x1B[2J\x1B[1;1H");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    
+    let resolved = config.resolve_profile();
+    let pacore_status = if config.features.pacore.enabled { "On" } else { "Off" };
+    let rate_limit = resolved.agent.iteration_rate_limit;
+    
+    println!("\n⚙️  Agent Settings");
+    println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
+    println!("  Current Values:");
+    println!("    Max Iterations:      {}", resolved.agent.max_iterations);
+    println!("    Rate Limit:          {} ms", if rate_limit == 0 { "0 (no delay)".to_string() } else { rate_limit.to_string() });
+    println!("    Tmux Autostart:      {}", if config.tmux_autostart { "On" } else { "Off" });
+    println!("    PaCoRe:              {} (rounds: {})", pacore_status, config.features.pacore.rounds);
+    println!();
+
     let options = vec![
-        ProfileMenuChoice::SelectProfile,
-        ProfileMenuChoice::CreateProfile,
-        ProfileMenuChoice::EditProfile,
-        ProfileMenuChoice::DeleteProfile,
-        ProfileMenuChoice::Back,
+        AgentSettingsChoice::IterationsSettings,
+        AgentSettingsChoice::ToggleTmuxAutostart,
+        AgentSettingsChoice::PaCoReSettings,
+        AgentSettingsChoice::Back,
     ];
 
-    let ans: Result<ProfileMenuChoice, _> = InquireSelect::new(
-        "Manage Profiles",
+    let ans: Result<AgentSettingsChoice, _> = InquireSelect::new(
+        "Select setting to change:",
         options
     ).prompt();
 
     match ans {
         Ok(choice) => Ok(choice),
-        Err(_) => Ok(ProfileMenuChoice::Back),
+        Err(_) => Ok(AgentSettingsChoice::Back),
     }
 }
 
-/// Handle profile creation wizard
-pub async fn handle_create_profile(config: &mut Config) -> Result<bool> {
-    // Get profile name
-    let name = Text::new("Profile name:").prompt()?;
-    if name.trim().is_empty() {
-        println!("⚠️  Profile name cannot be empty.");
-        return Ok(false);
-    }
-
-    // Check for duplicate
-    if config.profiles.contains_key(&name) {
-        println!("⚠️  Profile '{}' already exists.", name);
-        return Ok(false);
-    }
-
-    // Ask for model override
-    let model_choice = InquireSelect::new(
-        "Model override:",
-        vec!["Use base endpoint model", "Override with specific model", "Skip for now"]
-    ).prompt()?;
-
-    let model_override = match model_choice {
-        "Override with specific model" => {
-            let model = Text::new("Model name:").prompt()?;
-            if model.trim().is_empty() { None } else { Some(model) }
-        }
-        _ => None,
-    };
-
-    // Ask for max_iterations override
-    let iter_choice = InquireSelect::new(
-        "Max iterations override:",
-        vec!["Use default (10)", "Override with custom value", "Skip for now"]
-    ).prompt()?;
-
-    let max_iterations = match iter_choice {
-        "Override with custom value" => {
-            let iters: String = Text::new("Max iterations:").prompt()?;
-            iters.parse::<usize>().ok()
-        }
-        _ => None,
-    };
-
-    // Create profile with overrides
-    let mut profile = Profile::default();
+/// Show iterations settings submenu
+pub fn show_iterations_settings_menu(config: &Config) -> Result<IterationsSettingsChoice> {
+    // Clear screen for clean display
+    print!("\x1B[2J\x1B[1;1H");
+    std::io::Write::flush(&mut std::io::stdout())?;
     
-    if model_override.is_some() || max_iterations.is_some() {
-        profile.endpoint = model_override.clone().map(|m| mylm_core::config::EndpointOverride {
-            model: Some(m),
-            api_key: None,
-        });
-        profile.agent = max_iterations.map(|i| mylm_core::config::AgentOverride {
-            max_iterations: Some(i),
-            main_model: None,
-            worker_model: None,
-        });
-    }
-
-    config.profiles.insert(name.clone(), profile);
-
-    println!("✅ Profile '{}' created successfully!", name);
-    config.save_to_default_location()?;
-
-    Ok(true)
-}
-
-/// Handle profile editing
-pub fn handle_edit_profile(config: &mut Config) -> Result<bool> {
-    let profiles: Vec<String> = config.profile_names();
-    if profiles.is_empty() {
-        println!("⚠️  No profiles to edit.");
-        return Ok(false);
-    }
-
-    let profile_name = InquireSelect::new("Select profile to edit:", profiles).prompt()?;
-
-    // Edit options for profile
-    let edit_options = vec!["Model Override", "Max Iterations", "Back"];
-    let edit_selection = InquireSelect::new("What to edit:", edit_options).prompt()?;
-
-    match edit_selection {
-        "Model Override" => {
-            let current = config.get_profile_info(&profile_name)
-                .and_then(|p| p.model_override)
-                .unwrap_or_else(|| "(none)".to_string());
-            
-            println!("Current model override: {}", current);
-            
-            let new_model: String = Text::new("New model override (empty to clear):")
-                .with_initial_value(&current)
-                .prompt()?;
-            
-            let override_value = if new_model.trim().is_empty() || new_model == "(none)" {
-                None
-            } else {
-                Some(new_model)
-            };
-            
-            config.set_profile_model_override(&profile_name, override_value)?;
-            println!("✅ Model override updated!");
-        }
-        "Max Iterations" => {
-            let current = config.get_profile_info(&profile_name)
-                .and_then(|p| p.max_iterations.map(|i| i.to_string()))
-                .unwrap_or_else(|| "(default)".to_string());
-            
-            println!("Current max iterations: {}", current);
-            
-            let new_iters: String = Text::new("New max iterations (empty to clear):")
-                .with_initial_value(&current)
-                .prompt()?;
-            
-            let override_value = if new_iters.trim().is_empty() || new_iters == "(default)" {
-                None
-            } else {
-                new_iters.parse::<usize>().ok()
-            };
-            
-            config.set_profile_max_iterations(&profile_name, override_value)?;
-            println!("✅ Max iterations updated!");
-        }
-        _ => return Ok(false),
-    }
-
-    config.save_to_default_location()?;
-    Ok(true)
-}
-
-/// Handle profile deletion
-pub fn handle_delete_profile(config: &mut Config) -> Result<bool> {
-    let profiles: Vec<String> = config.profile_names();
-    if profiles.is_empty() {
-        println!("⚠️  No profiles to delete.");
-        return Ok(false);
-    }
-
-    let profile_name = InquireSelect::new("Select profile to delete:", profiles).prompt()?;
-
-    // Cannot delete active profile
-    if profile_name == config.profile {
-        println!("⚠️  Cannot delete the active profile. Switch to another profile first.");
-        return Ok(false);
-    }
-
-    if Confirm::new()
-        .with_prompt(format!("Delete profile '{}'?", profile_name))
-        .default(false)
-        .interact()?
-    {
-        config.delete_profile(&profile_name)?;
-        println!("✅ Profile deleted.");
-        config.save_to_default_location()?;
-    }
-
-    Ok(true)
-}
-
-// ============================================================================
-// ENDPOINT SETUP (V2 - Single Base Endpoint)
-// ============================================================================
-
-/// Handle base endpoint configuration (V2)
-pub async fn handle_setup_endpoint(config: &mut Config) -> Result<bool> {
-    let current = config.get_endpoint_info();
+    let resolved = config.resolve_profile();
+    let rate_limit = resolved.agent.iteration_rate_limit;
     
-    println!("\n🔌 Endpoint Configuration");
+    println!("\n🔁 Iterations Settings");
     println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
-    println!("Current settings:");
-    println!("  Provider: {}", current.provider);
-    println!("  Model: {}", current.model);
-    println!("  Base URL: {}", current.base_url);
-    println!("  API Key: {}", if current.api_key_set { "✅ Set" } else { "❌ Not Set" });
+    println!("  Current Values:");
+    println!("    Max Iterations:      {}", resolved.agent.max_iterations);
+    println!("    Rate Limit:          {} ms", if rate_limit == 0 { "0 (no delay)".to_string() } else { rate_limit.to_string() });
+    println!();
+    println!("  Rate Limit adds a pause between agent actions.");
+    println!("  Useful for rate limiting or observing behavior.");
     println!();
 
     let options = vec![
-        "Change Provider",
-        "Change Model",
-        "Change Base URL",
-        "Change API Key",
-        "Test Connection",
-        "Back",
+        IterationsSettingsChoice::SetMaxIterations,
+        IterationsSettingsChoice::SetRateLimit,
+        IterationsSettingsChoice::Back,
     ];
 
-    loop {
-        let choice = InquireSelect::new("Endpoint Setup:", options.clone()).prompt()?;
+    let ans: Result<IterationsSettingsChoice, _> = InquireSelect::new(
+        "Select setting to change:",
+        options
+    ).prompt();
 
-        match choice {
-            "Change Provider" => {
-                let (provider_id, provider_display) = select_provider()?;
-                if let Ok(provider) = provider_id.parse::<Provider>() {
-                    // Auto-update base URL when provider changes
-                    let new_url = provider.default_url();
-                    config.endpoint.provider = provider;
-                    config.endpoint.base_url = Some(new_url);
-                    println!("✅ Provider updated to {}", provider_display);
-                    config.save_to_default_location()?;
-                }
-            }
-            "Change Model" => {
-                let method = InquireSelect::new("Model Selection:", vec!["Fetch from API", "Enter Manually"]).prompt()?;
-                
-                let new_model = if method == "Fetch from API" && config.get_endpoint_info().api_key_set {
-                    let base_url = config.endpoint.base_url.clone()
-                        .unwrap_or_else(|| config.endpoint.provider.default_url());
-                    let api_key = config.endpoint.api_key.clone().unwrap_or_default();
-                    
-                    match fetch_models(&base_url, &api_key).await {
-                        Ok(models) => {
-                            InquireSelect::new("Select Model:", models).prompt()?
-                        }
-                        Err(e) => {
-                            println!("⚠️  Failed to fetch models: {}. Falling back to manual entry.", e);
-                            Text::new("Model name:").with_initial_value(&config.endpoint.model).prompt()?
-                        }
-                    }
-                } else {
-                    Text::new("Model name:").with_initial_value(&config.endpoint.model).prompt()?
-                };
-                
-                config.endpoint.model = new_model;
-                println!("✅ Model updated!");
-                config.save_to_default_location()?;
-            }
-            "Change Base URL" => {
-                let current_url = config.endpoint.base_url.clone()
-                    .unwrap_or_else(|| config.endpoint.provider.default_url());
-                let new_url = Text::new("Base URL:")
-                    .with_initial_value(&current_url)
-                    .prompt()?;
-                config.endpoint.base_url = Some(new_url);
-                println!("✅ Base URL updated!");
-                config.save_to_default_location()?;
-            }
-            "Change API Key" => {
-                let new_key = Password::new()
-                    .with_prompt("API Key (leave empty to clear)")
-                    .allow_empty_password(true)
-                    .interact()?;
-                
-                config.endpoint.api_key = if new_key.is_empty() { None } else { Some(new_key) };
-                println!("✅ API Key updated!");
-                config.save_to_default_location()?;
-            }
-            "Test Connection" => {
-                let base_url = config.endpoint.base_url.clone()
-                    .unwrap_or_else(|| config.endpoint.provider.default_url());
-                let api_key = config.endpoint.api_key.clone().unwrap_or_default();
-                
-                println!("🔄 Testing connection to {}...", base_url);
-                match fetch_models(&base_url, &api_key).await {
-                    Ok(models) => {
-                        println!("✅ Connection successful! Found {} models.", models.len());
-                    }
-                    Err(e) => {
-                        println!("❌ Connection failed: {}", e);
-                    }
-                }
-            }
-            _ => break,
+    match ans {
+        Ok(choice) => Ok(choice),
+        Err(_) => Ok(IterationsSettingsChoice::Back),
+    }
+}
+
+/// Show PaCoRe settings submenu
+pub fn show_pacore_settings_menu(config: &Config) -> Result<PaCoReSettingsChoice> {
+    // Clear screen for clean display
+    print!("\x1B[2J\x1B[1;1H");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    
+    let status = if config.features.pacore.enabled { "On" } else { "Off" };
+    
+    println!("\n⚡ PaCoRe Settings");
+    println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
+    println!("  Current Values:");
+    println!("    PaCoRe:              {}", status);
+    println!("    Rounds:              {}", config.features.pacore.rounds);
+    println!();
+    println!("  PaCoRe uses parallel LLM calls to improve reasoning.");
+    println!("  Format: comma-separated numbers (e.g., '4,1' or '16,4,1')");
+    println!();
+
+    let options = vec![
+        PaCoReSettingsChoice::TogglePaCoRe,
+        PaCoReSettingsChoice::SetPaCoReRounds,
+        PaCoReSettingsChoice::Back,
+    ];
+
+    let ans: Result<PaCoReSettingsChoice, _> = InquireSelect::new(
+        "Select setting to change:",
+        options
+    ).prompt();
+
+    match ans {
+        Ok(choice) => Ok(choice),
+        Err(_) => Ok(PaCoReSettingsChoice::Back),
+    }
+}
+
+/// Handle changing max iterations
+pub fn handle_max_iterations(config: &mut Config) -> Result<bool> {
+    let current = config.resolve_profile().agent.max_iterations;
+    
+    let input = Text::new("Max iterations:")
+        .with_initial_value(&current.to_string())
+        .prompt()?;
+    
+    match input.parse::<usize>() {
+        Ok(iters) if iters > 0 && iters <= 100 => {
+            let profile_name = config.profile.clone();
+            config.set_profile_max_iterations(&profile_name, Some(iters))?;
+            config.save_to_default_location()?;
+            println!("✅ Max iterations set to: {}", iters);
+            Ok(true)
+        }
+        _ => {
+            println!("⚠️  Invalid value. Must be between 1 and 100.");
+            Ok(false)
         }
     }
+}
 
+/// Handle setting iteration rate limit
+pub fn handle_set_rate_limit(config: &mut Config) -> Result<bool> {
+    let current = config.resolve_profile().agent.iteration_rate_limit;
+    
+    let input = Text::new("Rate limit (ms between iterations):")
+        .with_help_message("0 = no delay, higher values add pause between actions")
+        .with_initial_value(&current.to_string())
+        .prompt()?;
+    
+    match input.parse::<u64>() {
+        Ok(ms) => {
+            let profile_name = config.profile.clone();
+            config.set_profile_iteration_rate_limit(&profile_name, Some(ms))?;
+            config.save_to_default_location()?;
+            if ms == 0 {
+                println!("✅ Rate limit disabled (no delay between iterations)");
+            } else {
+                println!("✅ Rate limit set to: {} ms between iterations", ms);
+            }
+            Ok(true)
+        }
+        _ => {
+            println!("⚠️  Invalid value. Must be a positive number.");
+            Ok(false)
+        }
+    }
+}
+
+/// Handle toggling PaCoRe
+pub fn handle_toggle_pacore(config: &mut Config) -> Result<bool> {
+    config.features.pacore.enabled = !config.features.pacore.enabled;
+    config.save_to_default_location()?;
+    let status = if config.features.pacore.enabled { "enabled" } else { "disabled" };
+    println!("✅ PaCoRe {}", status);
+    Ok(true)
+}
+
+/// Handle setting PaCoRe rounds
+pub fn handle_set_pacore_rounds(config: &mut Config) -> Result<bool> {
+    // Clear screen for clean display
+    print!("\x1B[2J\x1B[1;1H");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    
+    let current = config.features.pacore.rounds.clone();
+    
+    println!("\n📊 PaCoRe Rounds Configuration");
+    println!("{}", Style::new().blue().bold().apply_to("-".repeat(50)));
+    println!("Format: comma-separated numbers (e.g., '4,1' or '16,4,1')");
+    println!("  - First number: parallel calls in round 1");
+    println!("  - Last number: should be 1 for final synthesis");
+    println!("  - Example: 4,1 = 4 parallel calls, then 1 synthesis");
+    println!("  - Example: 16,4,1 = 16 calls → 4 synthesis → 1 final");
+    println!();
+    
+    let input = Text::new("Rounds:")
+        .with_initial_value(&current)
+        .prompt()?;
+    
+    // Validate format
+    let parts: Vec<&str> = input.split(',').collect();
+    let mut valid = true;
+    
+    for part in &parts {
+        if part.trim().parse::<usize>().is_err() {
+            valid = false;
+            break;
+        }
+    }
+    
+    if !valid || parts.is_empty() {
+        println!("⚠️  Invalid format. Use comma-separated numbers (e.g., 4,1)");
+        return Ok(false);
+    }
+    
+    // Warn if last number isn't 1
+    if let Some(last) = parts.last() {
+        if last.trim() != "1" {
+            println!("⚠️  Warning: Last round should be 1 for proper synthesis");
+        }
+    }
+    
+    config.features.pacore.rounds = input.clone();
+    config.save_to_default_location()?;
+    println!("✅ PaCoRe rounds set to: {}", input);
+    Ok(true)
+}
+
+/// Handle toggling tmux autostart
+pub fn handle_toggle_tmux_autostart(config: &mut Config) -> Result<bool> {
+    config.tmux_autostart = !config.tmux_autostart;
+    config.save_to_default_location()?;
+    println!("✅ Tmux autostart {}", 
+        if config.tmux_autostart { "enabled" } else { "disabled" });
     Ok(true)
 }
 
@@ -578,27 +1071,10 @@ pub async fn handle_setup_endpoint(config: &mut Config) -> Result<bool> {
 // HELPER FUNCTIONS
 // ============================================================================
 
-/// Select LLM provider
-fn select_provider() -> Result<(String, String)> {
-    let providers = vec!["OpenAI", "Google (Gemini)", "Ollama", "OpenRouter", "Kimi (Moonshot)", "Custom"];
-    let selection = InquireSelect::new("Select provider:", providers).prompt()?;
-
-    match selection {
-        "OpenAI" => Ok(("openai".to_string(), "OpenAI".to_string())),
-        "Google (Gemini)" => Ok(("google".to_string(), "Google (Gemini)".to_string())),
-        "Ollama" => Ok(("ollama".to_string(), "Ollama".to_string())),
-        "OpenRouter" => Ok(("openrouter".to_string(), "OpenRouter".to_string())),
-        "Kimi (Moonshot)" => Ok(("kimi".to_string(), "Kimi (Moonshot)".to_string())),
-        _ => Ok(("custom".to_string(), "Custom".to_string())),
-    }
-}
-
 /// Fetch models from the API
 async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<String>> {
-    println!("🔄 Fetching models from {}...", base_url);
     let client = reqwest::Client::new();
     
-    // Construct URL - handle trailing slashes and ensure /models is attached correctly
     let url = if base_url.ends_with('/') {
         format!("{}models", base_url)
     } else {
@@ -611,13 +1087,12 @@ async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<String>> {
         request = request.header("Authorization", format!("Bearer {}", api_key));
     }
     
-    // Add User-Agent as some APIs require it
     request = request.header("User-Agent", "mylm-cli/0.1.0");
 
     let response = request.send().await?;
     
     if !response.status().is_success() {
-        return Err(anyhow::anyhow!("API request failed with status: {}", response.status()));
+        return Err(anyhow::anyhow!("API request failed: {}", response.status()));
     }
 
     let body: Value = response.json().await?;
@@ -632,9 +1107,8 @@ async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<String>> {
     }
     
     if models.is_empty() {
-        // Fallback: Check if top level has "models" key (some proxies)
         if let Some(data) = body.get("models").and_then(|v| v.as_array()) {
-             for model in data {
+            for model in data {
                 if let Some(id) = model.get("id").and_then(|v| v.as_str()) {
                     models.push(id.to_string());
                 }
@@ -642,10 +1116,6 @@ async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<String>> {
         }
     }
 
-    if models.is_empty() {
-        return Err(anyhow::anyhow!("No models found in response"));
-    }
-    
     models.sort();
     Ok(models)
 }
@@ -655,11 +1125,12 @@ async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<String>> {
 // ============================================================================
 
 async fn print_banner(config: &Config) {
-    let blue = Style::new().blue().bold();
     let green = Style::new().green().bold();
     let cyan = Style::new().cyan();
     let dim = Style::new().dim();
+    let yellow = Style::new().yellow();
 
+    // ASCII art banner (7 lines)
     let banner = r#"
     __  ___  __  __  __     __  ___
    /  |/  / / / / / / /    /  |/  /
@@ -670,37 +1141,36 @@ async fn print_banner(config: &Config) {
     "#;
 
     println!("{}", green.apply_to(banner));
-    println!("          {}", cyan.apply_to("My Language Model"));
-    println!("          {}", dim.apply_to("Rust-Powered Terminal AI"));
-    println!();
+    
+    // Version info on subtitle line
+    println!("          {} {}", 
+        dim.apply_to("My Language Model"),
+        cyan.apply_to(format!("v{}-{} ({})", env!("CARGO_PKG_VERSION"), env!("BUILD_NUMBER"), env!("GIT_HASH")))
+    );
 
-    // Compact Provider/Context Info
+    // Ultra-compact status line (single line, truncated model if needed)
     let effective = config.get_effective_endpoint_info();
-    let profile_name = &config.profile;
-
-    let llm_info = if config.is_initialized() {
-        format!("{} @ {} ({})", effective.model, effective.provider, profile_name)
+    let llm_short = if config.is_initialized() {
+        let model = if effective.model.len() > 20 {
+            format!("{}...", &effective.model[..17])
+        } else {
+            effective.model.clone()
+        };
+        format!("{}@{}", model, effective.provider)
     } else {
         "Not Configured".to_string()
     };
 
     let ctx = mylm_core::context::TerminalContext::collect_sync();
-    let cwd = ctx.cwd().unwrap_or_else(|| "unknown".to_string());
-    let branch = ctx.git_branch().unwrap_or_else(|| "none".to_string());
-    let tmux_status = if mylm_core::context::terminal::TerminalContext::is_inside_tmux() {
-        green.apply_to("Active")
-    } else {
-        Style::new().yellow().apply_to("Inactive (No Scrollback)")
-    };
+    let cwd = ctx.cwd().unwrap_or_else(|| "~".to_string());
+    let branch = ctx.git_branch().unwrap_or_else(|| "-".to_string());
+    let tmux_icon = if mylm_core::context::terminal::TerminalContext::is_inside_tmux() { "●" } else { "○" };
 
-    println!("  {} [{}] | {} [{}]",
-        dim.apply_to("Profile:"), blue.apply_to(profile_name),
-        dim.apply_to("Model:"), green.apply_to(llm_info)
+    println!("  {} {} {} {} {} {} {} {} {} {}",
+        dim.apply_to("Model:"), yellow.apply_to(llm_short),
+        dim.apply_to("│"), dim.apply_to("Ctx:"), dim.apply_to(&cwd),
+        dim.apply_to("│"), dim.apply_to("Git:"), cyan.apply_to(branch),
+        dim.apply_to("│"), green.apply_to(tmux_icon)
     );
-    println!("  {} [{}] | {} [{}] | {} [{}]",
-        dim.apply_to("Context:"), cyan.apply_to(cwd),
-        dim.apply_to("Git:"), cyan.apply_to(branch),
-        dim.apply_to("Tmux:"), tmux_status
-    );
-    println!("  {}", dim.apply_to("-".repeat(60).as_str()));
+    println!();
 }

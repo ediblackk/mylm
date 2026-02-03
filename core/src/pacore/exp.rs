@@ -1,14 +1,27 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Semaphore;
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use crate::pacore::client::ChatClient;
 use crate::pacore::error::Error;
-use crate::pacore::model::{ChatRequest, ChatResponse, Message};
+use crate::pacore::model::{ChatRequest, ChatResponse, Message, Choice};
 use crate::pacore::template::TemplateEngine;
 use futures_util::Stream;
 use std::pin::Pin;
+
+
+#[derive(Debug, Clone)]
+pub enum PaCoReProgressEvent {
+    RoundStarted { round: usize, total_rounds: usize, calls_in_round: usize },
+    BatchStarted { round: usize, batch: usize, total_batches: usize },
+    CallCompleted { round: usize, call_index: usize, total_calls: usize },
+    RoundCompleted { round: usize, responses_received: usize },
+    SynthesisStarted { round: usize },
+    StreamingStarted,
+    Error { round: usize, error: String },
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RoundResult {
@@ -42,6 +55,8 @@ pub struct Exp {
     pub client: ChatClient,
     pub template: TemplateEngine,
     pub random_seed: Option<u64>,
+    // Progress callback for UI feedback
+    pub progress_callback: Option<Arc<dyn Fn(PaCoReProgressEvent) + Send + Sync>>,
 }
 
 impl Exp {
@@ -58,7 +73,16 @@ impl Exp {
             client,
             template: TemplateEngine::new(),
             random_seed: None,
+            progress_callback: None,
         }
+    }
+
+    pub fn with_progress_callback<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(PaCoReProgressEvent) + Send + Sync + 'static,
+    {
+        self.progress_callback = Some(Arc::new(callback));
+        self
     }
 
     pub async fn process_single(
@@ -93,11 +117,28 @@ impl Exp {
                 new_messages
             };
 
-            let responses = self.run_parallel_calls(current_messages, num_calls).await?;
+            // Emit round started event
+            if let Some(cb) = &self.progress_callback {
+                cb(PaCoReProgressEvent::RoundStarted { 
+                    round: round_idx, 
+                    total_rounds: self.num_responses_per_round.len(), 
+                    calls_in_round: num_calls 
+                });
+            }
+
+            let responses = self.run_parallel_calls(current_messages, num_calls, round_idx).await?;
             all_rounds.push(RoundResult {
                 round_idx,
-                responses,
+                responses: responses.clone(),
             });
+
+            // Emit round completed event
+            if let Some(cb) = &self.progress_callback {
+                cb(PaCoReProgressEvent::RoundCompleted { 
+                    round: round_idx, 
+                    responses_received: responses.len() 
+                });
+            }
         }
 
         let final_response = all_rounds.last()
@@ -123,9 +164,23 @@ impl Exp {
         let num_rounds = self.num_responses_per_round.len();
 
         for (round_idx, &num_calls) in self.num_responses_per_round.iter().enumerate() {
+            // Emit round started event
+            if let Some(cb) = &self.progress_callback {
+                cb(PaCoReProgressEvent::RoundStarted { 
+                    round: round_idx, 
+                    total_rounds: num_rounds, 
+                    calls_in_round: num_calls 
+                });
+            }
+
             let current_messages = if round_idx == 0 {
                 messages.clone()
             } else {
+                // Emit synthesis started event
+                if let Some(cb) = &self.progress_callback {
+                    cb(PaCoReProgressEvent::SynthesisStarted { round: round_idx });
+                }
+
                 let prev_answers: Vec<String> = all_rounds.last()
                     .unwrap()
                     .responses
@@ -147,26 +202,112 @@ impl Exp {
             };
 
             // If it's the last round, we stream it
-            if round_idx == num_rounds - 1 && num_calls == 1 {
-                 let request = ChatRequest {
-                    model: self.model.clone(),
-                    messages: current_messages,
-                    stream: Some(true),
-                    max_tokens: None,
-                    temperature: Some(0.7),
-                    top_p: None,
-                };
-                return self.client.stream_chat(request).await;
+            if round_idx == num_rounds - 1 {
+                // Emit streaming started event
+                if let Some(cb) = &self.progress_callback {
+                    cb(PaCoReProgressEvent::StreamingStarted);
+                }
+
+                if num_calls == 1 {
+                    // Single call - stream directly from API
+                    let request = ChatRequest {
+                        model: self.model.clone(),
+                        messages: current_messages,
+                        stream: Some(true),
+                        max_tokens: None,
+                        temperature: Some(0.7),
+                        top_p: None,
+                    };
+                    return self.client.stream_chat(request).await;
+                } else {
+                    // Multiple calls in final round - run them and synthesize
+                    let responses = self.run_parallel_calls(current_messages, num_calls, round_idx).await?;
+                    all_rounds.push(RoundResult {
+                        round_idx,
+                        responses: responses.clone(),
+                    });
+
+                    // Emit round completed event
+                    if let Some(cb) = &self.progress_callback {
+                        cb(PaCoReProgressEvent::RoundCompleted { 
+                            round: round_idx, 
+                            responses_received: responses.len() 
+                        });
+                    }
+
+                    // Synthesize final answer from all responses
+                    let final_content = self.synthesize_final_answer(&responses)?;
+
+                    // Return as synthetic stream
+                    return Ok(Box::pin(tokio_stream::iter(vec![
+                        Ok(ChatResponse {
+                            id: "pacore_synthesized".to_string(),
+                            object: "chat.completion".to_string(),
+                            created: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                            model: self.model.clone(),
+                            choices: vec![Choice {
+                                index: 0,
+                                message: Some(Message {
+                                    role: "assistant".to_string(),
+                                    content: final_content,
+                                    name: None,
+                                    tool_calls: None,
+                                }),
+                                delta: None,
+                                finish_reason: Some("stop".to_string()),
+                            }],
+                            usage: None,
+                        })
+                    ])));
+                }
             }
 
-            let responses = self.run_parallel_calls(current_messages, num_calls).await?;
+            let responses = self.run_parallel_calls(current_messages, num_calls, round_idx).await?;
             all_rounds.push(RoundResult {
                 round_idx,
-                responses,
+                responses: responses.clone(),
             });
+
+            // Emit round completed event
+            if let Some(cb) = &self.progress_callback {
+                cb(PaCoReProgressEvent::RoundCompleted { 
+                    round: round_idx, 
+                    responses_received: responses.len() 
+                });
+            }
         }
 
+        // This should not be reached, but return an error just in case
         Err(Error::Internal("Unexpected end of process_single_stream".to_string()))
+    }
+
+    /// Synthesize a final answer from multiple responses
+    fn synthesize_final_answer(&self, responses: &[ChatResponse]) -> Result<String, Error> {
+        // Extract all response contents
+        let answers: Vec<String> = responses
+            .iter()
+            .filter_map(|resp| {
+                resp.choices.first()
+                    .and_then(|choice| choice.message.as_ref())
+                    .map(|msg| msg.content.clone())
+            })
+            .collect();
+
+        if answers.is_empty() {
+            return Err(Error::Internal("No valid responses to synthesize".to_string()));
+        }
+
+        if answers.len() == 1 {
+            return Ok(answers[0].clone());
+        }
+
+        // Simple synthesis: take the most common answer (voting)
+        // For now, return the first answer as a placeholder for more sophisticated synthesis
+        // TODO: Implement proper synthesis using LLM or consensus algorithm
+        Ok(answers[0].clone())
     }
 
     pub async fn run_batch(
@@ -206,29 +347,62 @@ impl Exp {
         &self,
         messages: Vec<Message>,
         num_calls: usize,
+        round_idx: usize,
     ) -> Result<Vec<ChatResponse>, Error> {
         let semaphore = Arc::new(Semaphore::new(self.max_concurrent));
         let mut tasks = Vec::new();
+        let completed = Arc::new(AtomicUsize::new(0));
+        
+        let num_batches = (num_calls + self.max_concurrent - 1) / self.max_concurrent;
 
-        for _ in 0..num_calls {
-            let permit = semaphore.clone().acquire_owned().await.map_err(|e| Error::Internal(e.to_string()))?;
-            let messages = messages.clone();
-            let client = self.client.clone();
-            let model = self.model.clone();
+        for batch_idx in 0..num_batches {
+            // Emit batch started event
+            if let Some(cb) = &self.progress_callback {
+                cb(PaCoReProgressEvent::BatchStarted { 
+                    round: round_idx, 
+                    batch: batch_idx + 1, 
+                    total_batches: num_batches 
+                });
+            }
 
-            let task = tokio::spawn(async move {
-                let _permit = permit;
-                let request = ChatRequest {
-                    model,
-                    messages,
-                    stream: Some(false),
-                    max_tokens: None,
-                    temperature: Some(0.7),
-                    top_p: None,
-                };
-                client.chat_completion(request).await
-            });
-            tasks.push(task);
+            let start = batch_idx * self.max_concurrent;
+            let end = ((batch_idx + 1) * self.max_concurrent).min(num_calls);
+
+            for i in start..end {
+                let permit = semaphore.clone().acquire_owned().await.map_err(|e| Error::Internal(e.to_string()))?;
+                let messages = messages.clone();
+                let client = self.client.clone();
+                let model = self.model.clone();
+                let callback = self.progress_callback.clone();
+                let completed = completed.clone();
+                let call_index = i;
+
+                let task = tokio::spawn(async move {
+                    let _permit = permit;
+                    let request = ChatRequest {
+                        model,
+                        messages,
+                        stream: Some(false),
+                        max_tokens: None,
+                        temperature: Some(0.7),
+                        top_p: None,
+                    };
+                    let result = client.chat_completion(request).await;
+                    
+                    // Increment and emit progress
+                    let _count = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if let Some(cb) = callback {
+                        cb(PaCoReProgressEvent::CallCompleted { 
+                            round: round_idx, 
+                            call_index: call_index, 
+                            total_calls: num_calls 
+                        });
+                    }
+                    
+                    result
+                });
+                tasks.push(task);
+            }
         }
 
         let mut results = Vec::new();

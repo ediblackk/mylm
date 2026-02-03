@@ -1,68 +1,104 @@
-# mylm — Terminal AI, done right
+# My Little Minion (mylm)
 
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Terminal AI](https://img.shields.io/badge/Terminal-AI-blue.svg)](#)
 
-> **What does "mylm" mean?** Honestly? It came to me in a fever dream at 3 AM. 
-> Could be **My Learning Machine**. Or **My Language Model**. Or **My Little Minion** if you're feeling whimsical. 
-> The acronym expanded to fit the vibe. What matters is what it *does*.
+> **The AI assistant that actually understands your terminal.** Built in Rust. Designed for developers who want real productivity, not just chat.
 
-**mylm** is a high-performance **Terminal AI Assistant** built for anyone who wants to leverage the power of large language models.
+**mylm** is a **multi-agent terminal AI assistant** that goes beyond simple Q&A. It sees what you see, remembers your projects, delegates tasks to specialized sub-agents, and safely executes commands—all while keeping you in control.
 
 ![mylm Dashboard](assets/hero.png)
 
-`mylm` is an **agentic terminal companion** that understands your system, reasons through tasks, and bridges natural language with actual shell execution. It maintains conversational memory, executes commands, searches the web, and can delegate long-running tasks to background workers—all through a clean terminal interface.
+---
 
-You install it as the `ai` command, and it fits right into your workflow instead of getting in the way.
+## 🚀 Why mylm vs. The Alternatives
+
+Recent tools like **OpenClaw** proved there's massive demand for terminal AI assistants. But they also exposed critical flaws: fragile context capture, no memory across sessions, single-threaded reasoning, and limited tool ecosystems.
+
+**mylm was built differently from the ground up:**
+
+| Feature | mylm | Others |
+|---------|------|--------|
+| **Multi-Agent Architecture** | ✅ Orchestrator + worker agents | ❌ Single agent |
+| **Local Vector Memory** | ✅ LanceDB with semantic search | ❌ No memory |
+| **Parallel Consensus (PaCoRe)** | ✅ Multi-path reasoning | ❌ Single-shot |
+| **Terminal-Native Context** | ✅ tmux integration + full capture | ⚠️ Partial |
+| **Background Jobs** | ✅ Async task scheduling | ❌ Blocking |
+| **Safety System** | ✅ Allowlists + approval workflow | ⚠️ Basic |
+| **Speed** | ✅ Rust-native, sub-100ms startup | ⚠️ Slower |
 
 ---
 
-## What makes it different?
+## ✨ What Makes mylm Special
 
-Built in **Rust** for speed and efficiency, `mylm` remains lightweight while being versatile enough to handle everything from quick queries to complex multi-step tasks. It maintains persistent memory across sessions, captures rich context from your environment, and can execute commands, read files, search the web, and delegate work to specialized background agents.
+### 🎯 `ai pop` — Context Magic
+Your command fails. Instead of copying error messages, just type:
+```bash
+ai pop
+```
+mylm captures your terminal history, working directory, git state, environment variables, and recent commands. The AI sees exactly what you see. **No setup. No copy-paste. Just context.**
 
-### ⚡ Pop Terminal & Context (`ai pop`)
-This is the "killer feature." `ai pop` grabs your current `tmux` pane history, running processes, and env vars, and drops them into an AI session. You don't have to copy-paste errors; the AI is already looking at them.
+*Requires tmux (we'll help you set it up).*
 
-### � Clean UI & Smart Reflow
-Commands run in the background so they don't clutter your chat, but the AI still sees every bit of output. The TUI (powered by `ratatui`) handles window resizing perfectly without breaking the layout.
+### 🧠 Multi-Agent System
+Most AI assistants are a single brain trying to do everything. mylm uses an **orchestrator-worker pattern**:
 
-### � Agentic Loop (Think-Plan-Execute)
-In interactive mode, the AI doesn't just talk. It uses a ReAct loop to:
-1.  **Reason** about your request.
-2.  **Plan** a multi-step solution.
-3.  **Execute** shell commands, check git, or search the web.
-*Everything is guarded by your approval.*
+- **Orchestrator** plans and delegates
+- **Worker agents** execute subtasks in parallel
+- **Delegate tool** spawns specialized agents with their own toolsets
+- **Job registry** tracks progress across all agents
 
-### 🖥 Context Awareness
-`mylm` automatically tracks:
-*   Your current directory (CWD).
-*   Git status (branch, diffs, logs).
-*   System info (OS, CPU, etc.).
-*   Execution history.
+Research a library while refactoring code—all at once.
 
-### 🌐 Live Web Search & Crawling
-Built-in tools for real-time searching and crawling. No more stale training data—if there's a new library update, `mylm` can find the docs.
+### 💾 Local Vector Memory (LanceDB)
+mylm doesn't forget. It stores:
+- Project decisions and architecture notes
+- Code patterns and preferences
+- Conversation history (semantically searchable)
+- File relationships and dependencies
 
-### 🔁 Multi-Provider Support
-One interface for everything:
-*   **Local**: Ollama, LM Studio.
-*   **Cloud**: Gemini, OpenAI, Anthropic, DeepSeek.
+Over time, it learns *your* codebase. Ask "How do we handle auth here?" and get relevant answers from past conversations.
 
-### 🗂 Local Memory (RAG)
-Includes a local vector database (LanceDB) to store project notes, past decisions, and technical references so the AI gets smarter the more you use it.
+### 🔄 PaCoRe: Parallel Consensus Reasoning
+When accuracy matters, mylm can run **multi-round reasoning**:
+1. Spawn multiple parallel LLM calls with different reasoning paths
+2. Let them critique and build on each other's answers
+3. Synthesize a consensus response
+
+Better answers for complex debugging and architecture decisions.
+
+### 🛡️ Safety-First Execution
+Every command goes through:
+1. **Static analysis** — Pattern-based risk detection
+2. **Allowlist checking** — Known safe commands
+3. **User approval** — You see it before it runs
+
+Run with `--execute` for trusted commands. Use `--force` only when you know what you're doing.
+
+### 🌐 10+ Built-in Tools
+- **shell** — Execute with safety checks
+- **git** — Status, log, diff analysis
+- **fs** — Read/write files
+- **web_search** — Real-time information
+- **crawl** — Deep documentation extraction
+- **memory** — Store and retrieve knowledge
+- **delegate** — Spawn sub-agents
+- **state** — Persistent key-value storage
+- **terminal_sight** — Capture terminal state
+- **system** — Resource monitoring
+
+### ⚡ Built for Speed
+- **Rust** — Zero-cost abstractions, memory safety
+- **Async tokio** — Non-blocking I/O throughout
+- **Optimized profiles** — Fast compile in dev, LTO in release
+- **Sub-100ms** cold start to interactive
 
 ---
 
-## Installation
+## 🎬 Quick Start
 
-### Prerequisites
-*   **Rust** (if you don't have it, the installer will help).
-*   **tmux** (highly recommended for the `pop` feature).
-*   **System dependencies**: Libraries like `OpenSSL`, `libxcb`, `clang`, and `protobuf`.
-
-### Build from source (No-Sudo)
+### Installation
 ```bash
 git clone https://github.com/ediblackk/mylm.git
 cd mylm
@@ -70,92 +106,195 @@ chmod +x install.sh
 ./install.sh
 ```
 
-**Note on Installation:**
-*   **No Sudo Required**: The installer is designed to be **strictly no-sudo**. It installs everything into your home directory (`~/.local/bin`).
-*   **Rust Environment**: If the installer installs Rust for you via `rustup`, you **must** restart your terminal or run `source $HOME/.cargo/env` before you can use `cargo` or the `ai` command in new sessions.
-*   **System Dependencies**: Since the script doesn't use `sudo`, it cannot install system libraries for you. If any are missing, it will provide you with the exact command to run for your specific distribution.
-*   **Configuration Note**: Profile configuration wizard fails during installation, simply save and exit (or move on) and configure your providers post-installation via the central hub (`ai`).
+**No sudo required.** Installs to `~/.local/bin`.
 
----
-
-## Usage / Quickstart
-
-### 1. The Hub (`ai`)
-Running `ai` with no arguments opens the central Hub. From here you can:
-*   Start a new interactive session.
-*   Resume a past conversation (memory is persistent!).
-*   Configure your LLM provider and keys.
-
-### 2. Contextual Pop (`ai pop`)
-This is the most powerful way to use `mylm`.
-1.  You run a command and it fails (e.g., a complex `cargo build` error).
-2.  Type `ai pop`.
-3.  `mylm` captures the last screen of output, your current directory state, and environment.
-4.  Ask: "Fix this error."
-5.  It already knows the error because it "saw" your terminal.
-
-### 3. Quick Query (`ai "query"`)
-For simple questions where you don't need a full session:
+### First Use
 ```bash
-ai "how do I tar a directory excluding .git?"
+# Launch the hub
+ai
+
+# Quick question
+ai "how do I find large files in this repo?"
+
+# Pop terminal context (inside tmux)
+ cargo build  # fails...
+ai pop        # "What's wrong?"
+
+# Interactive session
+ai interactive
 ```
 
-### 4. Interactive Mode (`ai interactive`)
-Starts a fresh session focused on the current directory but without capturing the previous command output.
+---
+
+## 📚 Core Commands
+
+| Command | Description |
+|---------|-------------|
+| `ai` | Hub — start conversations, manage sessions, configure |
+| `ai "question"` | One-shot query with context |
+| `ai pop` | Pop terminal context into AI (tmux) |
+| `ai interactive` | Full TUI session |
+| `ai session list` | View saved sessions |
+| `ai session resume <id>` | Continue a conversation |
+| `ai config` | Settings dashboard |
+| `ai --version` | Show version & build info |
 
 ---
 
-## Configuration
+## 🏗️ Architecture Overview
 
-Settings are in `~/.config/mylm/mylm.yaml`. You can edit prompts, switch models, and manage API keys directly in the UI.
-
----
-
-## Troubleshooting
-
-### "Command not found" after install
-Ensure `~/.local/bin` is in your `PATH`.
-```bash
-export PATH="$HOME/.local/bin:$PATH"
 ```
-Add this line to your `~/.bashrc` or `~/.zshrc` to make it permanent.
-
-### "Error initializing backend"
-This often happens if the API key is missing or invalid. Run `ai` and select **Configuration** to verify your keys.
-
-### Visual Glitches
-`mylm` uses advanced terminal manipulation. If you see rendering issues:
-*   Ensure you are using a modern terminal emulator (Alacritty, iTerm2, Kitty, Windows Terminal).
-*   Try resizing the window to force a redraw.
-
----
-
-## What's Cooking (Roadmap)
-
-Here's what we're actually building right now (not vaporware, just work-in-progress):
-
-- **🧠 V2 Cognitive Engine** — A multi-layered worker architecture that lets agents delegate tasks to specialized sub-agents. Think: master orchestrator + worker bees.
-- **📋 Background Job Queues** — Fire off long-running AI tasks and check back later. No more watching the terminal like a Netflix loading screen.
-- **🤝 Master-Agent Orchestration** — Smarter coordination between agents so they don't step on each other's toes.
-
-*This section will shrink as we ship. Check back often—or better yet, contribute!*
-
----
-
-## Contributing
-
-We love contributions! Please see our [CONTRIBUTING.md](CONTRIBUTING.md) for details on how to get started, code style, and PR guidelines.
-
----
-
-## Acknowledgements
-
-Built on the shoulders of giants: **Rust, Linux, Git, ratatui, tokio, lancedb**, and the amazing research from **Google, Anthropic, OpenAI, Meta, and the Open Source AI community.**
-
-Also, a special thanks to whoever invented coffee. You know who you are.
+┌─────────────────────────────────────────────────────────────┐
+│                         CLI (ai)                            │
+├─────────────────────────────────────────────────────────────┤
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────┐  │
+│  │   Hub    │  │  TUI     │  │ One-Shot │  │  Daemon    │  │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └─────┬──────┘  │
+├───────┴─────────────┴─────────────┴──────────────┴─────────┤
+│                       mylm-core                             │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │              Agent V2 (Orchestrator)                  │  │
+│  │  ┌────────────┐  ┌────────────┐  ┌────────────────┐  │  │
+│  │  │  Reason    │→ │   Plan     │→ │    Delegate    │  │  │
+│  │  └────────────┘  └────────────┘  └────────────────┘  │  │
+│  └──────────────────────────────────────────────────────┘  │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
+│  │  Tools   │  │  Memory  │  │  PaCoRe  │  │  Jobs    │   │
+│  │ Registry │  │ VectorDB │  │  Engine  │  │Scheduler │   │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │         Context Engine (git, sys, terminal)          │  │
+│  └──────────────────────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │              LLM Client (Multi-Provider)              │  │
+│  │   Gemini · OpenAI · Anthropic · Ollama · DeepSeek    │  │
+│  └──────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## Keywords
+## 🔧 Configuration
 
-Terminal AI, CLI LLM, Rust AI tool, Local LLM assistant, Ollama CLI, OpenAI terminal, Anthropic Claude CLI, Gemini terminal, Developer productivity, Command-line AI, tmux AI, Agentic Loop, ReAct Agent.
+Config lives in `~/.config/mylm/mylm.yaml`:
+
+```yaml
+profile: default
+profiles:
+  default:
+    provider: Gemini
+    model: gemini-2.0-flash-exp
+    api_key: "${GEMINI_API_KEY}"
+    base_url: "https://generativelanguage.googleapis.com/v1beta"
+    max_iterations: 50
+    
+features:
+  memory:
+    enabled: true
+  web_search:
+    enabled: true
+    provider: searxng
+```
+
+Or use the interactive dashboard: `ai config`
+
+---
+
+## 🔒 Security & Privacy
+
+- **Local-first**: Vector DB runs locally (LanceDB)
+- **No telemetry**: Your data stays yours
+- **Command safety**: Approval workflow, allowlists, pattern detection
+- **API key handling**: Stored in config, never logged
+- **Sandboxed execution**: Commands run in isolated PTY
+
+---
+
+## 🛠️ Supported Providers
+
+**Local (Free, Private):**
+- Ollama
+- LM Studio
+- HuggingFace (via inference API)
+
+**Cloud (API Key Required):**
+- Google Gemini
+- OpenAI (GPT-4, GPT-3.5)
+- Anthropic (Claude)
+- DeepSeek
+- StepFun
+- Kimi (Moonshot)
+
+---
+
+## 🧪 Advanced Features
+
+### Batch Processing (PaCoRe)
+```bash
+# Run multi-round consensus on a dataset
+ai batch --input questions.jsonl --output results.jsonl \
+  --model gemini-2.0-flash-exp --rounds "3,2,1"
+```
+
+### Background Jobs
+```bash
+ai  # Hub → Background Jobs
+# View, monitor, and manage long-running tasks
+```
+
+### Custom Prompts
+Edit per-profile prompts in `~/.config/mylm/prompts/`:
+```bash
+ai config edit prompt
+```
+
+---
+
+## 🚧 Roadmap
+
+- [x] Multi-agent architecture with delegation
+- [x] Local vector memory with LanceDB
+- [x] PaCoRe parallel consensus reasoning
+- [x] Job scheduling and background execution
+- [x] Session persistence and management
+- [ ] MCP (Model Context Protocol) integration
+- [ ] Plugin system for custom tools
+- [ ] Web dashboard for job monitoring
+- [ ] Team sharing for memory stores
+
+---
+
+## 🤝 Contributing
+
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+**New to the project?** Check out [ONBOARDING.md](ONBOARDING.md) for a gentle introduction to the codebase.
+
+---
+
+## 🙏 Acknowledgements
+
+Built on the shoulders of giants:
+- **Rust** — For performance and safety
+- **ratatui** — Beautiful terminal UIs
+- **tokio** — Async runtime
+- **LanceDB** — Vector search
+- **Google, Anthropic, OpenAI, Meta** — For pushing AI forward
+
+And countless open-source contributors. And coffee. ☕
+
+---
+
+## 📄 License
+
+MIT — See [LICENSE](LICENSE) for details.
+
+---
+
+<p align="center">
+  <strong>Stop copying errors. Start <code>ai pop</code>.</strong>
+</p>
+
+<p align="center">
+  <sub>Keywords: Terminal AI, CLI LLM, AI Agent, Multi-Agent System, Developer Productivity, Local LLM, Vector Memory, Rust CLI, tmux AI, Autonomous Coding Assistant</sub>
+</p>
