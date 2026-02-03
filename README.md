@@ -4,9 +4,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Terminal AI](https://img.shields.io/badge/Terminal-AI-blue.svg)](#)
 
-> **The AI assistant that actually understands your terminal.** Built in Rust. Designed for developers who want real productivity, not just chat.
+> **The AI assistant that actually understands your terminal.** Built in Rust. Designed for people who want real productivity, not just chat.
 
-**mylm** is a **multi-agent terminal AI assistant** that goes beyond simple Q&A. It sees what you see, remembers your projects, delegates tasks to specialized sub-agents, and safely executes commands—all while keeping you in control.
+**mylm** is a privacy-focused **multi-agent terminal AI assistant** that goes beyond simple Q&A. It sees what you see, remembers your projects, delegates tasks to specialized sub-agents, and safely executes commands—all while keeping you in control.
 
 ![mylm Dashboard](assets/hero.png)
 
@@ -14,7 +14,7 @@
 
 ## 🚀 Why mylm vs. The Alternatives
 
-Recent tools like **OpenClaw** proved there's massive demand for terminal AI assistants. But they also exposed critical flaws: fragile context capture, no memory across sessions, single-threaded reasoning, and limited tool ecosystems.
+Recent tools proved there's massive demand for terminal AI assistants. But they also exposed critical flaws: fragile context capture, no memory across sessions, single-threaded reasoning, and limited tool ecosystems.
 
 **mylm was built differently from the ground up:**
 
@@ -34,9 +34,9 @@ Recent tools like **OpenClaw** proved there's massive demand for terminal AI ass
 
 ### 🎯 `ai pop` — Context Magic
 Your command fails. Instead of copying error messages, just type:
-```bash
+
 ai pop
-```
+
 mylm captures your terminal history, working directory, git state, environment variables, and recent commands. The AI sees exactly what you see. **No setup. No copy-paste. Just context.**
 
 *Requires tmux (we'll help you set it up).*
@@ -61,6 +61,7 @@ mylm doesn't forget. It stores:
 Over time, it learns *your* codebase. Ask "How do we handle auth here?" and get relevant answers from past conversations.
 
 ### 🔄 PaCoRe: Parallel Consensus Reasoning
+(https://github.com/stepfun-ai/PaCoRe)
 When accuracy matters, mylm can run **multi-round reasoning**:
 1. Spawn multiple parallel LLM calls with different reasoning paths
 2. Let them critique and build on each other's answers
@@ -99,7 +100,6 @@ Run with `--execute` for trusted commands. Use `--force` only when you know what
 ## 🎬 Quick Start
 
 ### Installation
-```bash
 git clone https://github.com/ediblackk/mylm.git
 cd mylm
 chmod +x install.sh
@@ -109,7 +109,6 @@ chmod +x install.sh
 **No sudo required.** Installs to `~/.local/bin`.
 
 ### First Use
-```bash
 # Launch the hub
 ai
 
@@ -117,8 +116,7 @@ ai
 ai "how do I find large files in this repo?"
 
 # Pop terminal context (inside tmux)
- cargo build  # fails...
-ai pop        # "What's wrong?"
+ai pop
 
 # Interactive session
 ai interactive
@@ -141,65 +139,6 @@ ai interactive
 
 ---
 
-## 🏗️ Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                         CLI (ai)                            │
-├─────────────────────────────────────────────────────────────┤
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────────┐  │
-│  │   Hub    │  │  TUI     │  │ One-Shot │  │  Daemon    │  │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └─────┬──────┘  │
-├───────┴─────────────┴─────────────┴──────────────┴─────────┤
-│                       mylm-core                             │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │              Agent V2 (Orchestrator)                  │  │
-│  │  ┌────────────┐  ┌────────────┐  ┌────────────────┐  │  │
-│  │  │  Reason    │→ │   Plan     │→ │    Delegate    │  │  │
-│  │  └────────────┘  └────────────┘  └────────────────┘  │  │
-│  └──────────────────────────────────────────────────────┘  │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
-│  │  Tools   │  │  Memory  │  │  PaCoRe  │  │  Jobs    │   │
-│  │ Registry │  │ VectorDB │  │  Engine  │  │Scheduler │   │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │         Context Engine (git, sys, terminal)          │  │
-│  └──────────────────────────────────────────────────────┘  │
-│  ┌──────────────────────────────────────────────────────┐  │
-│  │              LLM Client (Multi-Provider)              │  │
-│  │   Gemini · OpenAI · Anthropic · Ollama · DeepSeek    │  │
-│  └──────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 🔧 Configuration
-
-Config lives in `~/.config/mylm/mylm.yaml`:
-
-```yaml
-profile: default
-profiles:
-  default:
-    provider: Gemini
-    model: gemini-2.0-flash-exp
-    api_key: "${GEMINI_API_KEY}"
-    base_url: "https://generativelanguage.googleapis.com/v1beta"
-    max_iterations: 50
-    
-features:
-  memory:
-    enabled: true
-  web_search:
-    enabled: true
-    provider: searxng
-```
-
-Or use the interactive dashboard: `ai config`
-
----
-
 ## 🔒 Security & Privacy
 
 - **Local-first**: Vector DB runs locally (LanceDB)
@@ -218,70 +157,21 @@ Or use the interactive dashboard: `ai config`
 - HuggingFace (via inference API)
 
 **Cloud (API Key Required):**
-- Google Gemini
-- OpenAI (GPT-4, GPT-3.5)
-- Anthropic (Claude)
-- DeepSeek
-- StepFun
-- Kimi (Moonshot)
-
----
-
-## 🧪 Advanced Features
-
-### Batch Processing (PaCoRe)
-```bash
-# Run multi-round consensus on a dataset
-ai batch --input questions.jsonl --output results.jsonl \
-  --model gemini-2.0-flash-exp --rounds "3,2,1"
-```
-
-### Background Jobs
-```bash
-ai  # Hub → Background Jobs
-# View, monitor, and manage long-running tasks
-```
-
-### Custom Prompts
-Edit per-profile prompts in `~/.config/mylm/prompts/`:
-```bash
-ai config edit prompt
-```
-
----
-
-## 🚧 Roadmap
-
-- [x] Multi-agent architecture with delegation
-- [x] Local vector memory with LanceDB
-- [x] PaCoRe parallel consensus reasoning
-- [x] Job scheduling and background execution
-- [x] Session persistence and management
-- [ ] MCP (Model Context Protocol) integration
-- [ ] Plugin system for custom tools
-- [ ] Web dashboard for job monitoring
-- [ ] Team sharing for memory stores
-
----
-
-## 🤝 Contributing
-
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-**New to the project?** Check out [ONBOARDING.md](ONBOARDING.md) for a gentle introduction to the codebase.
+- Any OpenAI Compatible endpoint
+- Google Gemini 3
+- OpenAI (GPT-5.2)
+- Anthropic (Claude Sonnet 4.5)
+- DeepSeek V3.2
+- StepFun 3.5 Flash
+- Kimi K2.5 (Moonshot)
 
 ---
 
 ## 🙏 Acknowledgements
 
-Built on the shoulders of giants:
-- **Rust** — For performance and safety
-- **ratatui** — Beautiful terminal UIs
-- **tokio** — Async runtime
-- **LanceDB** — Vector search
-- **Google, Anthropic, OpenAI, Meta** — For pushing AI forward
-
-And countless open-source contributors. And coffee. ☕
+Built with assistance from every AI that would talk to me: Claude, GPT, Gemini,
+Kimi, DeepSeek, StepFun, Z.AI, MiniMax and probably others I've forgotten. Also 147 Rust crates
+I didn't write. And Linux/Debian.And VS Code. And ASUS. And liters of coffee.
 
 ---
 

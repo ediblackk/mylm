@@ -187,14 +187,14 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
 
         Some(Commands::Interactive) => {
             let update_available = check_for_updates_fast();
-            terminal::run_tui(None, None, None, None, update_available, false).await?;
+            let _ = terminal::run_tui(None, None, None, None, update_available, false).await?;
         }
 
         Some(Commands::Pop) => {
             if crate::cli::hub::is_tmux_available() {
                 let context = TerminalContext::collect().await;
                 let update_available = check_for_updates_fast();
-                terminal::run_tui(None, None, Some(context), Some(initial_context.terminal), update_available, false).await?;
+                let _ = terminal::run_tui(None, None, Some(context), Some(initial_context.terminal), update_available, false).await?;
             } else {
                 println!("\n❌ {} is required for the 'Pop Terminal' feature.", Style::new().bold().apply_to("tmux"));
                 println!("   This feature uses tmux to capture your current terminal session history and provide seamless context.");
@@ -425,8 +425,10 @@ async fn handle_hub(config: &mut Config, formatter: &OutputFormatter, initial_co
             HubChoice::PopTerminal => {
                 let context = mylm_core::context::TerminalContext::collect().await;
                 let update_available = check_for_updates_fast();
-                terminal::run_tui(None, None, Some(context), Some(initial_context.terminal), update_available, false).await?;
-                break;
+                match terminal::run_tui(None, None, Some(context), Some(initial_context.terminal.clone()), update_available, false).await? {
+                    terminal::TuiResult::ReturnToHub => continue,
+                    terminal::TuiResult::Exit => break,
+                }
             }
             HubChoice::PopTerminalMissing => {
                 println!("\n❌ {} is required for the 'Pop Terminal' feature.", Style::new().bold().apply_to("tmux"));
@@ -445,8 +447,10 @@ async fn handle_hub(config: &mut Config, formatter: &OutputFormatter, initial_co
                 match App::load_session(None).await {
                     Ok(session) => {
                         let update_available = check_for_updates_fast();
-                        terminal::run_tui(Some(session), None, None, None, update_available, false).await?;
-                        break;
+                        match terminal::run_tui(Some(session), None, None, None, update_available, false).await? {
+                            terminal::TuiResult::ReturnToHub => continue,
+                            terminal::TuiResult::Exit => break,
+                        }
                     }
                     Err(e) => {
                         println!("❌ Failed to load session: {}", e);
@@ -455,13 +459,17 @@ async fn handle_hub(config: &mut Config, formatter: &OutputFormatter, initial_co
             }
             HubChoice::StartTui => {
                 let update_available = check_for_updates_fast();
-                terminal::run_tui(None, None, None, None, update_available, false).await?;
-                break;
+                match terminal::run_tui(None, None, None, None, update_available, false).await? {
+                    terminal::TuiResult::ReturnToHub => continue,
+                    terminal::TuiResult::Exit => break,
+                }
             }
             HubChoice::StartIncognito => {
                 let update_available = check_for_updates_fast();
-                terminal::run_tui(None, None, None, None, update_available, true).await?;
-                break;
+                match terminal::run_tui(None, None, None, None, update_available, true).await? {
+                    terminal::TuiResult::ReturnToHub => continue,
+                    terminal::TuiResult::Exit => break,
+                }
             }
             HubChoice::QuickQuery => {
                 let query = inquire::Text::new("⚡ Quick Query:").prompt()?;
@@ -494,8 +502,10 @@ async fn handle_hub(config: &mut Config, formatter: &OutputFormatter, initial_co
                     match App::load_session(Some(id)).await {
                         Ok(session) => {
                             let update_available = check_for_updates_fast();
-                            terminal::run_tui(Some(session), None, None, None, update_available, false).await?;
-                            break;
+                            match terminal::run_tui(Some(session), None, None, None, update_available, false).await? {
+                                terminal::TuiResult::ReturnToHub => continue,
+                                terminal::TuiResult::Exit => break,
+                            }
                         }
                         Err(e) => println!("❌ Failed to load session: {}", e),
                     }
@@ -560,7 +570,7 @@ async fn handle_session_command(cmd: &SessionCommand, _config: &Config) -> Resul
             match App::load_session(Some(id)).await {
                 Ok(session) => {
                     let update_available = check_for_updates_fast();
-                    terminal::run_tui(Some(session), None, None, None, update_available, false).await?;
+                    let _ = terminal::run_tui(Some(session), None, None, None, update_available, false).await?;
                 }
                 Err(e) => println!("❌ Failed to load session: {}", e),
             }

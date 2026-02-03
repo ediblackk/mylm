@@ -145,18 +145,4 @@ impl SessionMonitor {
     pub fn duration(&self) -> Duration {
         self.stats.base_duration + self.stats.start_time.elapsed()
     }
-
-    /// Format duration as MM:SS or HH:MM:SS
-    pub fn format_duration(&self) -> String {
-        let elapsed = self.duration().as_secs();
-        let hours = elapsed / 3600;
-        let minutes = (elapsed % 3600) / 60;
-        let seconds = elapsed % 60;
-
-        if hours > 0 {
-            format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
-        } else {
-            format!("{:02}:{:02}", minutes, seconds)
-        }
-    }
 }

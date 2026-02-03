@@ -34,7 +34,12 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc, Mutex};
 use std::sync::atomic::Ordering;
 
-pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>, initial_query: Option<String>, initial_context: Option<TerminalContext>, initial_terminal_context: Option<mylm_core::context::terminal::TerminalContext>, update_available: bool, incognito: bool) -> Result<()> {
+pub enum TuiResult {
+    Exit,
+    ReturnToHub,
+}
+
+pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>, initial_query: Option<String>, initial_context: Option<TerminalContext>, initial_terminal_context: Option<mylm_core::context::terminal::TerminalContext>, update_available: bool, incognito: bool) -> Result<TuiResult> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -295,7 +300,7 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
         }
     });
 
-    let res = run_loop(
+    let result = run_loop(
         &mut terminal,
         &mut app,
         &mut event_rx,
@@ -303,10 +308,11 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
         executor,
         store,
         state_store,
+        incognito,
     ).await;
 
     // Save session on exit as fallback (only if not already handled and not incognito)
-    if !app.should_quit && !incognito {
+    if !app.should_quit && !app.return_to_hub && !incognito {
         let _ = app.save_session(None).await;
     }
 
@@ -327,11 +333,7 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
     )?;
     terminal.show_cursor()?;
 
-    if let Err(_err) = res {
-        // Silently exit or log to file in the future
-    }
-
-    Ok(())
+    result
 }
 
 async fn run_loop(
@@ -342,7 +344,8 @@ async fn run_loop(
     _executor: std::sync::Arc<CommandExecutor>,
     store: std::sync::Arc<mylm_core::memory::VectorStore>,
     state_store: std::sync::Arc<std::sync::RwLock<mylm_core::state::StateStore>>,
-) -> io::Result<()> {
+    incognito: bool,
+) -> Result<TuiResult> {
     static ANSI_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = ANSI_RE.get_or_init(|| regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap());
     let mut pending_copy_chord = false;
@@ -1054,7 +1057,7 @@ async fn run_loop(
                                             }
                                             KeyCode::Char('e') | KeyCode::Char('E') => {
                                                 app.should_quit = true; // We set this to avoid the fallback save
-                                                return Ok(());
+                                                return Ok(TuiResult::Exit);
                                             }
                                             KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
                                                 app.set_state(AppState::Idle);
@@ -1071,7 +1074,7 @@ async fn run_loop(
                                         };
                                         let _ = app.save_session(name).await;
                                         app.should_quit = true;
-                                        return Ok(());
+                                        return Ok(TuiResult::Exit);
                                     }
                                             KeyCode::Esc => {
                                                 app.set_state(AppState::ConfirmExit);
@@ -1087,11 +1090,17 @@ async fn run_loop(
                                     } else {
                                         match key.code {
                                             KeyCode::Esc => {
+                                                // Interrupt any active task
                                                 if app.state != AppState::Idle && app.state != AppState::WaitingForUser {
                                                      app.interrupt_flag.store(true, Ordering::SeqCst);
-                                                } else {
-                                                     app.set_state(AppState::ConfirmExit);
+                                                     app.abort_current_task();
                                                 }
+                                                // Save session and return to hub
+                                                if !incognito {
+                                                    let _ = app.save_session(None).await;
+                                                }
+                                                app.return_to_hub = true;
+                                                return Ok(TuiResult::ReturnToHub);
                                             }
                                             KeyCode::Up => app.scroll_chat_up(),
                                             KeyCode::Down => app.scroll_chat_down(),

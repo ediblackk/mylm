@@ -13,11 +13,9 @@ use ratatui::{
 use tui_term::widget::PseudoTerminal;
 
 pub fn render(frame: &mut Frame, app: &mut App) {
-    // Estimate top bar height based on width and content
-    let width = frame.area().width;
-    let stats_len = 210; // Estimated length for Profile + Prompt + Tokens + Cost + Time + Flags + State
-    let stats_rows = (stats_len as f32 / width as f32).ceil() as u16;
-    let top_bar_height = 1 + stats_rows.max(1);
+    // Fixed heights: top bar (2 lines) + bottom bar (1 line)
+    let top_bar_height = 2u16;
+    let bottom_bar_height = 1u16;
 
     // Job panel height (fixed at 6 rows when visible, 0 when hidden)
     let job_panel_height = if app.show_jobs_panel { 6u16 } else { 0u16 };
@@ -27,6 +25,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         .constraints([
             Constraint::Length(top_bar_height),
             Constraint::Min(0),
+            Constraint::Length(bottom_bar_height),
             Constraint::Length(job_panel_height),
         ])
         .split(frame.area());
@@ -69,9 +68,12 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_chat(frame, app, chunks[1]);
     }
 
+    // Bottom bar with F-keys and toggles
+    render_bottom_bar(frame, app, main_layout[2]);
+
     // Render job panel at bottom if visible
     if app.show_jobs_panel {
-        render_jobs_panel(frame, app, main_layout[2]);
+        render_jobs_panel(frame, app, main_layout[3]);
     }
 
     if app.state == AppState::ConfirmExit || app.state == AppState::NamingSession {
@@ -245,29 +247,9 @@ pub fn render_help_panel(frame: &mut Frame, app: &mut App) {
 
 fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
     let stats = app.session_monitor.get_stats();
-    let duration = app.session_monitor.format_duration();
-
-    // V2: use profile field (just the name) - no separate prompt field
-    let active_profile = app.config.profile.clone();
-    let prompt_name = "default"; // V2 doesn't have per-profile prompts
-
-    let (verbose_text, verbose_color) = if app.verbose_mode {
-        (" [VERBOSE: ON (Ctrl+v)] ", Color::Magenta)
-    } else {
-        (" [VERBOSE: OFF (Ctrl+v)] ", Color::DarkGray)
-    };
     let auto_approve = app.auto_approve.load(Ordering::SeqCst);
-    let auto_approve_text = if auto_approve { " [AUTO-APPROVE: ON] " } else { " [AUTO-APPROVE: OFF] " };
-    
-    // PaCoRe status indicator
-    let pacore_text = if app.pacore_enabled {
-        format!(" [PACORE: ON ({})] ", app.pacore_rounds)
-    } else {
-        " [PACORE: OFF] ".to_string()
-    };
-    let pacore_color = if app.pacore_enabled { Color::Green } else { Color::DarkGray };
 
-    // Agent state indicator (moved into top header to avoid duplicated status bars).
+    // Agent state indicator
     let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let frame_char = spinner[(app.tick_count % spinner.len() as u64) as usize];
 
@@ -284,56 +266,58 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
         AppState::Thinking(info) => (format!("Thinking ({})", info), Color::Yellow),
         AppState::Streaming(info) => (format!("Streaming ({})", info), Color::Green),
         AppState::ExecutingTool(tool) => (format!("Executing ({})", tool), Color::Cyan),
-        AppState::WaitingForUser => ("Waiting for approval".to_string(), Color::Magenta),
+        AppState::WaitingForUser => ("Waiting".to_string(), Color::Magenta),
         AppState::Error(err) => (format!("Error ({})", err), Color::Red),
-        AppState::ConfirmExit => ("Confirm Exit".to_string(), Color::Yellow),
-        AppState::NamingSession => ("Naming Session".to_string(), Color::Cyan),
+        AppState::ConfirmExit => ("Exit?".to_string(), Color::Yellow),
+        AppState::NamingSession => ("Naming".to_string(), Color::Cyan),
     };
     let state_prefix = if app.state == AppState::Idle { "●" } else { frame_char };
 
-    let spans = vec![
-        Span::styled(" 👤 ", Style::default().bg(Color::Blue).fg(Color::White)),
-        Span::styled(format!(" {} ", active_profile), Style::default().bg(Color::DarkGray).fg(Color::White).add_modifier(Modifier::BOLD)),
-        Span::raw(" "),
-        Span::styled(" 📜 ", Style::default().bg(Color::Cyan).fg(Color::Black)),
-        Span::styled(format!(" {} ", prompt_name), Style::default().bg(Color::DarkGray).fg(Color::White)),
-        Span::raw(" "),
-        Span::styled(" 💰 ", Style::default().bg(Color::Green).fg(Color::Black)),
-        Span::styled(format!(" ${:.2} ", stats.cost), Style::default().bg(Color::DarkGray).fg(Color::Green)),
-        Span::raw(" "),
-        Span::styled(" 🕒 ", Style::default().bg(Color::White).fg(Color::Black)),
-        Span::styled(format!(" {} ", duration), Style::default().bg(Color::DarkGray).fg(Color::White)),
-        Span::raw(" "),
-        Span::styled(verbose_text, Style::default().fg(verbose_color).add_modifier(Modifier::BOLD)),
-        Span::styled(auto_approve_text, Style::default().fg(if auto_approve { Color::Green } else { Color::Red }).add_modifier(Modifier::BOLD)),
-        Span::styled(pacore_text, Style::default().fg(pacore_color).add_modifier(Modifier::BOLD)),
-        Span::styled(" [F1: Help] ", Style::default().fg(if app.show_help_view { Color::Green } else { Color::Yellow }).add_modifier(Modifier::BOLD)),
-        Span::styled(" [F2: Focus] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled(" [F3: Memory] ", Style::default().fg(if app.show_memory_view { Color::Green } else { Color::Yellow }).add_modifier(Modifier::BOLD)),
-        Span::styled(" [F4: Jobs] ", Style::default().fg(if app.show_jobs_panel { Color::Green } else { Color::Yellow }).add_modifier(Modifier::BOLD)),
-        Span::styled(" [Esc: Exit] ", Style::default().fg(if app.focus == Focus::Chat { Color::Yellow } else { Color::DarkGray }).add_modifier(Modifier::BOLD)),
-        if !app.show_terminal || app.chat_width_percent >= 100 {
-            let msg = if app.chat_width_percent >= 100 {
-                " [⚠️ TERMINAL HIDDEN - Chat 100%] "
-            } else {
-                " [⚠️ TERMINAL HIDDEN] "
-            };
-            Span::styled(msg, Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD))
-        } else {
-            Span::raw("")
-        },
-        Span::styled(format!(" [Chat: {}%] ", app.chat_width_percent), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+    // Top row: version | toggles | F-keys | state
+    let left_spans = vec![
+        Span::styled(" mylm ", Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("v{} ", env!("CARGO_PKG_VERSION")), Style::default().fg(Color::DarkGray)),
+    ];
 
-        // Agent State
-        Span::raw(" | "),
+    // Center: toggles + F-keys
+    let center_spans = vec![
+        // Auto-Approve toggle
+        Span::styled(
+            if auto_approve { "[AUTO✓]" } else { "[AUTO✗]" },
+            Style::default().fg(if auto_approve { Color::Green } else { Color::DarkGray }),
+        ),
+        Span::raw(" "),
+        // PaCoRe toggle
+        Span::styled(
+            if app.pacore_enabled { format!("[PACORE:{}]", app.pacore_rounds) } else { "[PACORE✗]".to_string() },
+            Style::default().fg(if app.pacore_enabled { Color::Green } else { Color::DarkGray }),
+        ),
+        Span::raw(" "),
+        // F-keys
+        Span::styled(
+            "[F1:Help]",
+            Style::default().fg(if app.show_help_view { Color::Green } else { Color::Yellow }),
+        ),
+        Span::styled("[F2:Focus]", Style::default().fg(Color::Yellow)),
+        Span::styled(
+            "[F3:Mem]",
+            Style::default().fg(if app.show_memory_view { Color::Green } else { Color::Yellow }),
+        ),
+        Span::styled(
+            "[F4:Jobs]",
+            Style::default().fg(if app.show_jobs_panel { Color::Green } else { Color::Yellow }),
+        ),
+        Span::styled("[Esc:Hub]", Style::default().fg(Color::Red)),
+    ];
+
+    // Right side: state + elapsed
+    let right_spans = vec![
         Span::styled(
             format!("{} {}", state_prefix, state_label),
             Style::default().fg(state_color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!(" ({})", elapsed_text), Style::default().fg(Color::DarkGray)),
     ];
-
-    let stats_text = Line::from(spans);
 
     let ratio = app.session_monitor.get_context_ratio();
     let gauge_color = if ratio >= 0.8 {
@@ -344,7 +328,9 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
         Color::Green
     };
 
-    let label = format!("Context: {} / {} ({:.0}%)",
+    // Gauge label includes cost + context
+    let label = format!("💰${:.2} | Ctx: {} / {} ({:.0}%)",
+        stats.cost,
         stats.active_context_tokens,
         stats.max_context_tokens,
         (ratio * 100.0).clamp(0.0, 100.0)
@@ -353,20 +339,20 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0),    // Session Stats
-            Constraint::Length(1), // Gauge row
+            Constraint::Length(1), // Status line with toggles/F-keys
+            Constraint::Length(1), // Gauge with cost+context
         ])
         .split(area);
 
-    let update_warning_width = if app.update_available { 22 } else { 0 };
-
-    let bottom_row_chunks = Layout::default()
+    // Split top row into left/center/right
+    let top_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(0),     // Gauge
-            Constraint::Length(update_warning_width), // Update Warning
-        ])
-        .split(rows[1]);
+        .constraints([Constraint::Min(12), Constraint::Min(60), Constraint::Min(20)])
+        .split(rows[0]);
+
+    let left_text = Line::from(left_spans);
+    let center_text = Line::from(center_spans).alignment(ratatui::layout::Alignment::Center);
+    let right_text = Line::from(right_spans).alignment(ratatui::layout::Alignment::Right);
 
     let gauge = Gauge::default()
         .block(Block::default())
@@ -374,20 +360,15 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
         .ratio(ratio.clamp(0.0, 1.0))
         .label(label);
 
-    let stats_p = Paragraph::new(stats_text)
-        .alignment(ratatui::layout::Alignment::Right)
-        .wrap(Wrap { trim: true });
+    frame.render_widget(Paragraph::new(left_text), top_chunks[0]);
+    frame.render_widget(Paragraph::new(center_text), top_chunks[1]);
+    frame.render_widget(Paragraph::new(right_text), top_chunks[2]);
+    frame.render_widget(gauge, rows[1]);
+}
 
-    frame.render_widget(stats_p, rows[0]);
-    frame.render_widget(gauge, bottom_row_chunks[0]);
-
-    if app.update_available {
-        let update_p = Paragraph::new(Span::styled(
-            " 🔥 [UPDATE AVAILABLE] ",
-            Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK)
-        ));
-        frame.render_widget(update_p, bottom_row_chunks[1]);
-    }
+/// Render bottom bar - now empty since everything moved to top
+fn render_bottom_bar(_frame: &mut Frame, _app: &mut App, _area: Rect) {
+    // All controls moved to top bar
 }
 
 fn render_terminal(frame: &mut Frame, app: &mut App, area: Rect) {

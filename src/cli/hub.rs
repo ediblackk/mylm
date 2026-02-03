@@ -25,19 +25,19 @@ impl std::fmt::Display for HubChoice {
         match self {
             HubChoice::PopTerminal => {
                 if mylm_core::context::terminal::TerminalContext::is_inside_tmux() {
-                    write!(f, "🚀 Pop Terminal with Seamless Context")
+                    write!(f, "🚀 Pop Terminal (tmux)")
                 } else {
-                    write!(f, "🚀 Pop Terminal (Limited Context - Not in tmux)")
+                    write!(f, "🚀 Pop Terminal (no tmux)")
                 }
             },
-            HubChoice::PopTerminalMissing => write!(f, "🚀 Pop Terminal (tmux Required)"),
-            HubChoice::ResumeSession => write!(f, "🔄 Resume Latest Session"),
-            HubChoice::StartTui => write!(f, "✨ Start Fresh TUI Session"),
-            HubChoice::StartIncognito => write!(f, "🕵️  Start Incognito Session"),
+            HubChoice::PopTerminalMissing => write!(f, "🚀 Pop Terminal (install tmux)"),
+            HubChoice::ResumeSession => write!(f, "🔄 Resume Session"),
+            HubChoice::StartTui => write!(f, "✨ TUI Session"),
+            HubChoice::StartIncognito => write!(f, "🕵️  Incognito"),
             HubChoice::QuickQuery => write!(f, "⚡ Quick Query"),
-            HubChoice::Configuration => write!(f, "⚙️  Configuration"),
-            HubChoice::ManageSessions => write!(f, "📂 Manage Sessions"),
-            HubChoice::BackgroundJobs => write!(f, "🕒 Background Jobs"),
+            HubChoice::Configuration => write!(f, "⚙️  Config"),
+            HubChoice::ManageSessions => write!(f, "📂 Sessions"),
+            HubChoice::BackgroundJobs => write!(f, "🕒 Jobs"),
             HubChoice::Exit => write!(f, "❌ Exit"),
         }
     }
@@ -173,8 +173,10 @@ pub fn is_tmux_available() -> bool {
 
 /// Show the interactive hub menu
 pub async fn show_hub(config: &Config) -> Result<HubChoice> {
-    // Clear screen for clean display
-    print!("\x1B[2J\x1B[1;1H");
+    // Clear the loading line, then use alternate screen buffer
+    print!("\r\x1B[K");  // Clear current line
+    print!("\x1B[?1049h");  // Enter alternate screen
+    let _ = std::io::Write::flush(&mut std::io::stdout());
     
     print_banner(config).await;
 
@@ -205,12 +207,20 @@ pub async fn show_hub(config: &Config) -> Result<HubChoice> {
         HubChoice::Exit,
     ]);
 
-    let ans: Result<HubChoice, _> = InquireSelect::new("Welcome to mylm! What would you like to do?", options).prompt();
+    let ans: Result<HubChoice, _> = InquireSelect::new("Welcome to mylm! What would you like to do?", options)
+        .with_page_size(20)
+        .prompt();
 
-    match ans {
+    let result = match ans {
         Ok(choice) => Ok(choice),
         Err(_) => Ok(HubChoice::Exit),
-    }
+    };
+    
+    // Exit alternate screen buffer
+    print!("\x1B[?1049l");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    
+    result
 }
 
 /// Show session selection menu
@@ -1124,13 +1134,12 @@ async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<String>> {
 // BANNER & UTILS
 // ============================================================================
 
-async fn print_banner(config: &Config) {
+async fn print_banner(_config: &Config) {
     let green = Style::new().green().bold();
     let cyan = Style::new().cyan();
     let dim = Style::new().dim();
-    let yellow = Style::new().yellow();
 
-    // ASCII art banner (7 lines)
+    // Full mylm ASCII art banner (7 lines)
     let banner = r#"
     __  ___  __  __  __     __  ___
    /  |/  / / / / / / /    /  |/  /
@@ -1142,35 +1151,11 @@ async fn print_banner(config: &Config) {
 
     println!("{}", green.apply_to(banner));
     
-    // Version info on subtitle line
-    println!("          {} {}", 
-        dim.apply_to("My Language Model"),
-        cyan.apply_to(format!("v{}-{} ({})", env!("CARGO_PKG_VERSION"), env!("BUILD_NUMBER"), env!("GIT_HASH")))
+    // Just version info - no model/ctx/git
+    println!("           {} {}-{} {}", 
+        dim.apply_to("mylm"),
+        cyan.apply_to(format!("v{}", env!("CARGO_PKG_VERSION"))),
+        cyan.apply_to(format!("{} ({})", env!("BUILD_NUMBER"), env!("GIT_HASH"))),
+        dim.apply_to("— Terminal AI, Built in Rust")
     );
-
-    // Ultra-compact status line (single line, truncated model if needed)
-    let effective = config.get_effective_endpoint_info();
-    let llm_short = if config.is_initialized() {
-        let model = if effective.model.len() > 20 {
-            format!("{}...", &effective.model[..17])
-        } else {
-            effective.model.clone()
-        };
-        format!("{}@{}", model, effective.provider)
-    } else {
-        "Not Configured".to_string()
-    };
-
-    let ctx = mylm_core::context::TerminalContext::collect_sync();
-    let cwd = ctx.cwd().unwrap_or_else(|| "~".to_string());
-    let branch = ctx.git_branch().unwrap_or_else(|| "-".to_string());
-    let tmux_icon = if mylm_core::context::terminal::TerminalContext::is_inside_tmux() { "●" } else { "○" };
-
-    println!("  {} {} {} {} {} {} {} {} {} {}",
-        dim.apply_to("Model:"), yellow.apply_to(llm_short),
-        dim.apply_to("│"), dim.apply_to("Ctx:"), dim.apply_to(&cwd),
-        dim.apply_to("│"), dim.apply_to("Git:"), cyan.apply_to(branch),
-        dim.apply_to("│"), green.apply_to(tmux_icon)
-    );
-    println!();
 }
