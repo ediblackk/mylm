@@ -3,6 +3,7 @@ use crate::agent::v2::core::AgentV2;
 use crate::agent::v2::jobs::JobRegistry;
 use crate::llm::LlmClient;
 use crate::memory::{MemoryCategorizer, scribe::Scribe};
+use crate::config::ConfigManager;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::error::Error as StdError;
@@ -33,6 +34,7 @@ pub struct DelegateTool {
     memory_store: Option<Arc<crate::memory::store::VectorStore>>,
     categorizer: Option<Arc<MemoryCategorizer>>,
     event_tx: Option<mpsc::UnboundedSender<crate::agent::event::RuntimeEvent>>,
+    config_manager: Option<Arc<ConfigManager>>,
 }
 
 impl DelegateTool {
@@ -52,7 +54,29 @@ impl DelegateTool {
             memory_store,
             categorizer,
             event_tx,
+            config_manager: None,
         }
+    }
+
+    /// Set the config manager for worker limit checking
+    pub fn with_config_manager(mut self, config_manager: Arc<ConfigManager>) -> Self {
+        self.config_manager = Some(config_manager);
+        self
+    }
+
+    /// Check if we can spawn a new worker based on worker_limit
+    async fn check_worker_limit(&self) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        if let Some(cm) = &self.config_manager {
+            let worker_limit = cm.get_worker_limit().await;
+            let active_jobs = self.job_registry.list_active_jobs().len();
+            if active_jobs >= worker_limit {
+                return Err(format!(
+                    "Worker limit exceeded: {}/{}. Cannot spawn new sub-agent.",
+                    active_jobs, worker_limit
+                ).into());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -119,6 +143,13 @@ impl Tool for DelegateTool {
 
     async fn call(&self, args: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
         crate::info_log!("DelegateTool::call execution started: {}", args);
+
+        // Check worker limit before spawning
+        if let Err(e) = self.check_worker_limit().await {
+            return Ok(ToolOutput::Immediate(serde_json::json!({
+                "error": format!("Delegation failed: {}", e)
+            })));
+        }
 
         // Parse arguments
         let delegate_args = if let Ok(parsed) = serde_json::from_str::<DelegateArgs>(args) {
@@ -216,16 +247,21 @@ impl Tool for DelegateTool {
                 ))
             ];
 
-            // Run the sub-agent event-driven loop
-            match sub_agent.run_event_driven(
-                history,
-                sub_event_tx,
-                interrupt_rx,
-                approval_rx,
-            ).await {
-                Ok((result, usage)) => {
+            // Run the sub-agent event-driven loop with panic catching
+            // Spawn the sub-agent in a separate task so we can catch panics via JoinHandle
+            let sub_task = tokio::spawn(async move {
+                sub_agent.run_event_driven(
+                    history,
+                    sub_event_tx,
+                    interrupt_rx,
+                    approval_rx,
+                ).await
+            });
+
+            match sub_task.await {
+                Ok(Ok((result, usage))) => {
                     crate::info_log!("Sub-agent completed task: {} with result: {}", objective_clone, result);
-                    
+
                     // Update job with success
                     job_registry.complete_job(
                         &job_id_clone,
@@ -239,7 +275,7 @@ impl Tool for DelegateTool {
                             }
                         })
                     );
-                    
+
                     // Send completion event if we have an event channel
                     if let Some(tx) = &event_tx {
                         let _ = tx.send(crate::agent::event::RuntimeEvent::StatusUpdate {
@@ -247,17 +283,58 @@ impl Tool for DelegateTool {
                         });
                     }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     let error_msg = format!("Sub-agent failed: {}", e);
                     crate::error_log!("{}", error_msg);
-                    
+
                     // Update job with failure
                     job_registry.fail_job(&job_id_clone, &error_msg);
-                    
+
                     // Send failure event if we have an event channel
                     if let Some(tx) = &event_tx {
                         let _ = tx.send(crate::agent::event::RuntimeEvent::StatusUpdate {
                             message: format!("❌ Sub-agent failed: {}", error_msg),
+                        });
+                    }
+                }
+                Err(e) if e.is_panic() => {
+                    // Panic occurred - extract panic message
+                    let panic_msg = if let Ok(panic) = e.try_into_panic() {
+                        if let Some(s) = panic.downcast_ref::<String>() {
+                            s.clone()
+                        } else if let Some(s) = panic.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else {
+                            "Unknown panic".to_string()
+                        }
+                    } else {
+                        "Unknown panic (could not extract)".to_string()
+                    };
+                    let error_msg = format!("Sub-agent panic: {}", panic_msg);
+                    crate::error_log!("{}", error_msg);
+
+                    // Update job with failure
+                    job_registry.fail_job(&job_id_clone, &error_msg);
+
+                    // Send failure event if we have an event channel
+                    if let Some(tx) = &event_tx {
+                        let _ = tx.send(crate::agent::event::RuntimeEvent::StatusUpdate {
+                            message: format!("❌ Sub-agent panic: {}", error_msg),
+                        });
+                    }
+                }
+                Err(e) => {
+                    // Task was cancelled or other error
+                    let error_msg = format!("Sub-agent task error: {}", e);
+                    crate::error_log!("{}", error_msg);
+
+                    // Update job with failure
+                    job_registry.fail_job(&job_id_clone, &error_msg);
+
+                    // Send failure event if we have an event channel
+                    if let Some(tx) = &event_tx {
+                        let _ = tx.send(crate::agent::event::RuntimeEvent::StatusUpdate {
+                            message: format!("❌ Sub-agent task error: {}", error_msg),
                         });
                     }
                 }

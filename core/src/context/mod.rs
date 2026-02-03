@@ -5,6 +5,7 @@
 //! - Git status and repository information
 //! - System information (CPU, memory, processes)
 //! - Shell history and command patterns
+//! - Conversation context management (token counting, pruning, condensation)
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,10 @@ pub mod git;
 pub mod system;
 pub mod terminal;
 pub mod pack;
+pub mod manager;
+
+// Re-export context manager types
+pub use manager::{ContextConfig, ContextManager, ContextError, Message, TokenCounter};
 
 /// Collected terminal context
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]

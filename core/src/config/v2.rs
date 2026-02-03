@@ -286,6 +286,40 @@ pub struct FeaturesConfig {
     /// Prompt template configuration
     #[serde(default)]
     pub prompts: PromptsConfig,
+
+    /// Parallel Consistency Reasoning (PaCoRe) settings
+    #[serde(default)]
+    pub pacore: PacoreConfig,
+}
+
+/// Parallel Consistency Reasoning (PaCoRe) configuration
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PacoreConfig {
+    /// Whether PaCoRe reasoning is enabled
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+
+    /// Reasoning rounds (e.g., "4,1" means 4 parallel samples then 1 synthesis)
+    #[serde(default = "default_pacore_rounds")]
+    pub rounds: String,
+
+    /// Optional specific model for reasoning (defaults to profile main model)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl Default for PacoreConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_false(),
+            rounds: default_pacore_rounds(),
+            model: None,
+        }
+    }
+}
+
+fn default_pacore_rounds() -> String {
+    "4,1".to_string()
 }
 
 /// Web search configuration
@@ -489,6 +523,8 @@ pub struct ResolvedConfig {
     pub timeout_secs: u64,
     /// Agent configuration (max_iterations, main_model, worker_model)
     pub agent: AgentConfig,
+    /// PaCoRe configuration
+    pub pacore: PacoreConfig,
 }
 
 /// Agent configuration for resolved config
@@ -761,6 +797,7 @@ impl ConfigV2 {
             api_key,
             timeout_secs,
             agent: agent_config,
+            pacore: self.features.pacore.clone(),
         }
     }
 

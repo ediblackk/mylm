@@ -8,6 +8,7 @@ use crate::agent::v2::recovery::{RecoveryWorker, RecoveryContext};
 use crate::agent::protocol::{AgentRequest, AgentResponse, AgentError};
 use crate::memory::{MemoryCategorizer, scribe::Scribe, journal::InteractionType};
 use crate::terminal::app::TuiEvent;
+use crate::context::ContextManager;
 use std::error::Error as StdError;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -292,13 +293,13 @@ pub struct AgentV2 {
     pub session_id: String,
     pub version: crate::config::AgentVersion,
     pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<RuntimeEvent>>,
-    
+
     // State maintained between steps
     pub history: Vec<ChatMessage>,
     pub iteration_count: usize,
     pub total_usage: TokenUsage,
     pub pending_decision: Option<AgentDecision>,
-    
+
     // Safety tracking
     last_tool_call: Option<(String, String)>,
     repetition_count: usize,
@@ -306,7 +307,7 @@ pub struct AgentV2 {
 
     pub recovery_worker: RecoveryWorker,
     parse_failure_count: usize,
-    
+
     // Budget and timeout controls
     pub budget: usize,                    // Maximum number of steps allowed
     pub max_steps: usize,                 // Current step limit (can be increased)
@@ -318,6 +319,9 @@ pub struct AgentV2 {
 
     /// Scratchpad for short-term working memory
     pub scratchpad: Arc<RwLock<String>>,
+
+    /// Context manager for token counting, pruning, and condensation
+    pub context_manager: ContextManager,
 }
 
 impl AgentV2 {
@@ -350,6 +354,9 @@ impl AgentV2 {
 
         let session_id = chrono::Utc::now().timestamp_millis().to_string();
 
+        // Initialize context manager from LLM client config
+        let context_manager = ContextManager::from_llm_client(&client);
+
         Self {
             llm_client: client.clone(),
             scribe,
@@ -377,6 +384,7 @@ impl AgentV2 {
             safety_timeout: std::time::Duration::from_secs(300), // 5 minute safety timeout
             capabilities_context,
             scratchpad,
+            context_manager,
         }
     }
 
@@ -553,10 +561,19 @@ impl AgentV2 {
             }
         }
 
-        // --- Context Pruning ---
-        let response_reserve = self.llm_client.config().max_tokens.unwrap_or(1000) as usize;
-        let context_limit = self.llm_client.config().max_context_tokens.saturating_sub(response_reserve);
-        self.history = self.prune_history(self.history.clone(), context_limit);
+        // --- Context Management (Pruning & Condensation) ---
+        // Update context manager with current history
+        self.context_manager.set_history(&self.history);
+        
+        // Prepare context (condense if needed, then prune)
+        match self.context_manager.prepare_context(Some(&self.llm_client)).await {
+            Ok(optimized_history) => {
+                self.history = optimized_history;
+            }
+            Err(e) => {
+                crate::info_log!("Context preparation failed: {}. Using original history.", e);
+            }
+        }
 
         // --- Memory Recall ---
         let query = self.history.iter().rev()
@@ -1193,95 +1210,25 @@ impl AgentV2 {
     }
 
     /// Prune history to stay within token limits.
-    fn prune_history(&self, history: Vec<ChatMessage>, limit: usize) -> Vec<ChatMessage> {
-        if history.len() <= 1 {
-            return history;
-        }
-
-        let mut total_chars = 0;
-        for msg in &history {
-            total_chars += msg.content.len();
-        }
-
-        let approx_tokens = total_chars / 4;
-        if approx_tokens <= limit {
-            return history;
-        }
-
-        let system_msg = history[0].clone();
-        let mut pruned = Vec::new();
-        pruned.push(system_msg.clone());
-
-        let mut current_tokens = system_msg.content.len() / 4;
-        let mut to_keep = Vec::new();
-
-        // Iterate backwards to keep most recent messages
-        for msg in history.iter().skip(1).rev() {
-            let msg_tokens = msg.content.len() / 4;
-            if current_tokens + msg_tokens < limit {
-                to_keep.push(msg.clone());
-                current_tokens += msg_tokens;
-            } else {
-                break;
-            }
-        }
-
-        to_keep.reverse();
-
-        // Gemini/Strict API Requirement: Ensure we don't start with an Assistant/Tool message
-        // after the system prompt.
-        while !to_keep.is_empty() && to_keep[0].role != MessageRole::User {
-            to_keep.remove(0);
-        }
-
-        pruned.extend(to_keep);
-        pruned
+    /// DEPRECATED: Use context_manager.prune_history() instead.
+    #[allow(dead_code)]
+    fn prune_history(&self, _history: Vec<ChatMessage>, _limit: usize) -> Vec<ChatMessage> {
+        // Delegate to context_manager
+        let mut manager = self.context_manager.clone();
+        manager.set_history(&_history);
+        manager.prune_history();
+        manager.history().iter().map(|m| m.to_chat_message()).collect()
     }
 
     /// Condense the conversation history by summarizing older messages.
-    pub async fn condense_history(&self, history: &[ChatMessage]) -> Result<Vec<ChatMessage>, Box<dyn StdError + Send + Sync>> {
-        if history.len() <= 5 {
-            return Ok(history.to_vec());
+    /// DEPRECATED: Use context_manager.condense_history() instead.
+    pub async fn condense_history(&self, _history: &[ChatMessage]) -> Result<Vec<ChatMessage>, Box<dyn StdError + Send + Sync>> {
+        // Delegate to context_manager
+        let manager = self.context_manager.clone();
+        match manager.condense_history(&self.llm_client).await {
+            Ok(result) => Ok(result),
+            Err(e) => Err(format!("Condensation failed: {}", e).into()),
         }
-
-        let system_prompt = if !history.is_empty() && history[0].role == MessageRole::System {
-            Some(history[0].clone())
-        } else {
-            None
-        };
-
-        let to_summarize = &history[1..history.len() - 3];
-        let latest = &history[history.len() - 3..];
-
-        let mut summary_input = String::from("Summarize the following conversation history into a concise summary that preserves all key facts, decisions, and context for an AI assistant to continue the task:\n\n");
-        for msg in to_summarize {
-            summary_input.push_str(&format!("{}: {}\n", match msg.role {
-                MessageRole::System => "System",
-                MessageRole::User => "User",
-                MessageRole::Assistant => "Assistant",
-                MessageRole::Tool => "Tool",
-            }, msg.content));
-        }
-
-        let summary_request = ChatRequest::new(
-            self.llm_client.model().to_string(),
-            vec![
-                ChatMessage::system("You are a helpful assistant that summarizes technical conversations."),
-                ChatMessage::user(&summary_input),
-            ],
-        );
-
-        let response = self.llm_client.chat(&summary_request).await?;
-        let summary = response.content();
-
-        let mut new_history = Vec::new();
-        if let Some(sys) = system_prompt {
-            new_history.push(sys);
-        }
-        new_history.push(ChatMessage::assistant(format!("[Context Summary]: {}", summary)));
-        new_history.extend_from_slice(latest);
-
-        Ok(new_history)
     }
 
     /// Generate the system prompt with available tools and Short-Key JSON instructions.
@@ -1392,6 +1339,8 @@ impl AgentV2 {
         let mut last_observation = None;
         let mut heartbeat_timer = tokio::time::interval(heartbeat_interval);
         heartbeat_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        let mut recovery_attempts = 0;
         
         loop {
             // Check safety timeout
@@ -1475,6 +1424,7 @@ impl AgentV2 {
                 result = self.step(last_observation.take()) => {
                     match result {
                         Ok(decision) => {
+                            recovery_attempts = 0; // Reset on success
                             match decision {
                                 AgentDecision::Message(msg, usage) => {
                                     let _ = event_tx.send(RuntimeEvent::AgentResponse {
@@ -1532,11 +1482,32 @@ impl AgentV2 {
                             }
                         }
                         Err(e) => {
-                            let error_msg = format!("❌ Step failed: {}", e);
+                            recovery_attempts += 1;
+                            if recovery_attempts > 3 {
+                                let error_msg = format!("❌ Recovery failed after 3 attempts. Last error: {}", e);
+                                let _ = event_tx.send(RuntimeEvent::StatusUpdate {
+                                    message: error_msg.clone()
+                                });
+                                return Ok((error_msg, self.total_usage.clone()));
+                            }
+
+                            let recovery_msg = format!("⚠️ Hard Error detected: {}. Entering Recovery Mode (60s cooldown). Attempt {}/3...", e, recovery_attempts);
                             let _ = event_tx.send(RuntimeEvent::StatusUpdate {
-                                message: error_msg.clone()
+                                message: recovery_msg.clone()
                             });
-                            return Ok((error_msg, self.total_usage.clone()));
+                            
+                            // Sleep for 60 seconds (interruptible)
+                            tokio::select! {
+                                _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
+                                    // Cooldown finished, loop will continue and retry
+                                }
+                                _ = interrupt_rx.recv() => {
+                                    let message = "🛑 Execution interrupted by user during recovery.".to_string();
+                                    let _ = event_tx.send(RuntimeEvent::StatusUpdate { message: message.clone() });
+                                    return Ok((message, self.total_usage.clone()));
+                                }
+                            }
+                            continue;
                         }
                     }
                 }

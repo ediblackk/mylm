@@ -8,6 +8,7 @@ use serde::Deserialize;
 use std::error::Error as StdError;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::{timeout, Duration};
 
 #[derive(Deserialize)]
 struct ShellArgs {
@@ -125,13 +126,16 @@ impl Tool for ShellTool {
                         return;
                     }
 
-                    match rx.await {
-                        Ok(output) => {
+                    match timeout(Duration::from_secs(30), rx).await {
+                        Ok(Ok(output)) => {
                             registry.update_job_output(&job_id_for_task, &output);
                             registry.complete_job(&job_id_for_task, serde_json::Value::String(output));
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             registry.fail_job(&job_id_for_task, &format!("Failed to receive output: {}", e));
+                        }
+                        Err(_) => {
+                            registry.fail_job(&job_id_for_task, "Command timed out after 30 seconds");
                         }
                     }
                 });

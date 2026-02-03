@@ -3,21 +3,25 @@
 //! TOML-based configuration with profile inheritance and environment overrides.
 
 pub mod v2;
-pub use v2::*;
+pub mod manager;
 
-// Re-export key types
+// Re-export manager types with aliases to avoid conflicts
+pub use manager::{ConfigManager, CostPerToken, RateLimitError};
+pub use manager::Config as ManagerConfig;
+pub use manager::ConfigError as ManagerConfigError;
+
+// Re-export v2 types
+pub use v2::{
+    AgentConfig, AgentOverride, ConfigError, ConfigV2, EndpointConfig,
+    EndpointOverride, FeaturesConfig, MemoryConfig, PacoreConfig, Profile,
+    PromptsConfig, Provider, ResolvedConfig, SearchProvider, WebSearchConfig,
+    build_system_prompt, build_system_prompt_with_capabilities, get_identity_prompt,
+    get_memory_protocol, get_prompts_dir, get_react_protocol, get_user_prompts_dir,
+    install_default_prompts, load_prompt, load_prompt_from_path,
+};
+
+// Keep backward-compatible Config alias
 pub use v2::ConfigV2 as Config;
-pub use v2::EndpointConfig;
-pub use v2::EndpointOverride;
-pub use v2::FeaturesConfig;
-pub use v2::MemoryConfig;
-pub use v2::Profile;
-pub use v2::Provider;
-pub use v2::ResolvedConfig;
-pub use v2::SearchProvider;
-pub use v2::WebSearchConfig;
-pub use v2::AgentOverride;
-pub use v2::ConfigError;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

@@ -305,10 +305,125 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
             }
         }
 
+        Some(Commands::Batch {
+            input,
+            output,
+            model,
+            rounds,
+            concurrent,
+        }) => {
+            handle_batch(input, output, model, rounds, *concurrent, &config).await?;
+        }
+
+        Some(Commands::Ask {
+            query,
+            model,
+            rounds,
+        }) => {
+            handle_ask(query, model.as_deref(), rounds, &config).await?;
+        }
+
         None => {
             handle_hub(&mut config, &formatter, initial_context).await?;
         }
     }
+
+    Ok(())
+}
+
+async fn handle_batch(
+    input: &str,
+    output: &str,
+    model: &str,
+    rounds: &str,
+    concurrent: usize,
+    config: &Config,
+) -> Result<()> {
+    use mylm_core::pacore::{Exp, ChatClient, load_jsonl, save_jsonl};
+
+    println!("🚀 Starting PaCoRe Batch Process...");
+    println!("📂 Input: {}", input);
+    println!("📂 Output: {}", output);
+
+    let resolved = config.resolve_profile();
+    let base_url = resolved.base_url.unwrap_or_else(|| resolved.provider.default_url());
+    let api_key = resolved.api_key.ok_or_else(|| anyhow::anyhow!("No API key configured"))?;
+
+    let client = ChatClient::new(base_url, api_key);
+    
+    let num_responses_per_round: Vec<usize> = rounds
+        .split(',')
+        .map(|s| s.trim().parse().unwrap_or(1))
+        .collect();
+
+    let exp = Exp::new(
+        model.to_string(),
+        num_responses_per_round,
+        10, // max_concurrent_per_request (parallel calls)
+        client,
+    );
+
+    let dataset = load_jsonl(input).await.map_err(|e| anyhow::anyhow!("Load error: {}", e))?;
+    println!("📊 Loaded {} items.", dataset.len());
+
+    let results = exp.run_batch(dataset, concurrent).await;
+    
+    save_jsonl(output, &results).await.map_err(|e| anyhow::anyhow!("Save error: {}", e))?;
+    println!("✅ Batch complete. Results saved to {}", output);
+
+    Ok(())
+}
+
+async fn handle_ask(
+    query: &str,
+    model: Option<&str>,
+    rounds: &str,
+    config: &Config,
+) -> Result<()> {
+    use mylm_core::pacore::{Exp, ChatClient, Message};
+    use futures_util::StreamExt;
+    use std::io::{Write, stdout};
+
+    let resolved = config.resolve_profile();
+    let base_url = resolved.base_url.unwrap_or_else(|| resolved.provider.default_url());
+    let api_key = resolved.api_key.ok_or_else(|| anyhow::anyhow!("No API key configured"))?;
+
+    let client = ChatClient::new(base_url, api_key);
+    
+    let num_responses_per_round: Vec<usize> = rounds
+        .split(',')
+        .map(|s| s.trim().parse().unwrap_or(1))
+        .collect();
+
+    let model_name = model.unwrap_or(&resolved.model).to_string();
+
+    let exp = Exp::new(
+        model_name.clone(),
+        num_responses_per_round,
+        10,
+        client,
+    );
+
+    let messages = vec![Message::user(query)];
+
+    println!("🤖 Thinking (using {} with rounds {})...", model_name, rounds);
+
+    let mut stream = exp.process_single_stream(messages, "ask").await?;
+
+    println!("\nFinal Answer:");
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result?;
+        if let Some(choice) = chunk.choices.first() {
+            if let Some(delta) = &choice.delta {
+                print!("{}", delta.content);
+                stdout().flush()?;
+            } else if let Some(message) = &choice.message {
+                print!("{}", message.content);
+                stdout().flush()?;
+            }
+        }
+    }
+    println!("\n");
 
     Ok(())
 }

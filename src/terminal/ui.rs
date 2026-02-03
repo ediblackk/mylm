@@ -1,4 +1,5 @@
 use crate::terminal::app::{App, Focus, AppState};
+use crate::terminal::help::HelpSystem;
 use mylm_core::llm::chat::MessageRole;
 use mylm_core::agent::v2::jobs::JobStatus;
 use std::sync::atomic::Ordering;
@@ -200,125 +201,43 @@ fn render_memory_view(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(scratchpad_p, right_chunks[1]);
 }
 
-fn render_help_view(frame: &mut Frame, _app: &mut App, area: Rect) {
+fn render_help_view(frame: &mut Frame, app: &mut App, area: Rect) {
+    let help_text = HelpSystem::generate_help_text(app, None);
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" [ myLM Keyboard Shortcuts Guide ] ")
+        .title(" [ myLM Help (F1 to close) ] ")
         .border_style(Style::default().fg(Color::Yellow));
 
-    let items = vec![
-        ListItem::new(Line::from(vec![
-            Span::styled(" GLOBAL SHORTCUTS ", Style::default().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD))
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  F1          ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw(" Toggle this Help Guide"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  F2          ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw(" Switch Focus between Terminal and AI Chat"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  F3          ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw(" Toggle Memory Relationship Graph"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  F4          ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw(" Toggle Background Jobs Panel"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  Ctrl+Shift+T", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw(" Toggle Terminal Visibility"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  Ctrl+Shift+←", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw(" Decrease Chat Width"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  Ctrl+Shift+→", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw(" Increase Chat Width"),
-        ])),
-        ListItem::new(Line::from("")),
+    let paragraph = Paragraph::new(help_text)
+        .block(block)
+        .wrap(Wrap { trim: false });
 
-        ListItem::new(Line::from(vec![
-            Span::styled(" AI CHAT SHORTCUTS (When Focused) ", Style::default().bg(Color::Green).fg(Color::Black).add_modifier(Modifier::BOLD))
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  Enter       ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" Submit message to AI"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  Ctrl+C      ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            Span::raw(" Abort current AI task"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  Ctrl+Y      ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" Copy last AI response (then U: copy conversation)"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  Ctrl+B      ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" Copy visible terminal buffer to clipboard"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  Ctrl+V      ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" Toggle Verbose Mode (Show command outputs/thoughts)"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  Ctrl+T      ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" Toggle showing AI Thoughts"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  Ctrl+A      ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" Toggle Auto-Approve (Always) / Home (while Idle/Waiting)"),
-        ])),
-        ListItem::new(Line::from("")),
+    frame.render_widget(paragraph, area);
+}
 
-        ListItem::new(Line::from(vec![
-            Span::styled(" READLINE INPUT (While Idle) ", Style::default().bg(Color::DarkGray).fg(Color::White).add_modifier(Modifier::BOLD))
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  Ctrl+A / Home  ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::raw(" Move cursor to start of line"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  Ctrl+E / End   ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::raw(" Move cursor to end of line"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  Ctrl+K         ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::raw(" Kill (delete) text from cursor to end of line"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  Ctrl+U         ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::raw(" Kill (delete) text from cursor to start of line"),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  Arrows         ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::raw(" Navigate cursor and chat history"),
-        ])),
-        ListItem::new(Line::from("")),
+/// Render help panel as a centered modal popup
+#[allow(dead_code)]
+pub fn render_help_panel(frame: &mut Frame, app: &mut App) {
+    let area = frame.area();
+    let help_text = HelpSystem::generate_help_text(app, None);
 
-        ListItem::new(Line::from(vec![
-            Span::styled(" TERMINAL SHORTCUTS (When Focused) ", Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD))
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::raw("  Direct Input is passed to the shell. Use "),
-            Span::styled("F2", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw(" to return to AI Chat."),
-        ])),
-        ListItem::new(Line::from(vec![
-            Span::styled("  PgUp / PgDn    ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::raw(" Scroll terminal history"),
-        ])),
-        ListItem::new(Line::from("")),
+    // Create a centered popup (80% width, 80% height)
+    let popup_area = centered_rect(80, 80, area);
 
-        ListItem::new(Line::from(vec![
-            Span::styled(" Note: Most shortcuts are editable in config/settings. Most Chat shortcuts require Chat focus. ", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC))
-        ])),
-    ];
+    // Clear the background
+    frame.render_widget(Clear, popup_area);
 
-    let list = List::new(items).block(block);
-    frame.render_widget(list, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" [ myLM Help (Press any key to close) ] ")
+        .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+
+    let paragraph = Paragraph::new(help_text)
+        .block(block)
+        .wrap(Wrap { trim: false });
+
+    frame.render_widget(paragraph, popup_area);
 }
 
 fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
@@ -336,6 +255,14 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
     };
     let auto_approve = app.auto_approve.load(Ordering::SeqCst);
     let auto_approve_text = if auto_approve { " [AUTO-APPROVE: ON] " } else { " [AUTO-APPROVE: OFF] " };
+    
+    // PaCoRe status indicator
+    let pacore_text = if app.pacore_enabled {
+        format!(" [PACORE: ON ({})] ", app.pacore_rounds)
+    } else {
+        " [PACORE: OFF] ".to_string()
+    };
+    let pacore_color = if app.pacore_enabled { Color::Green } else { Color::DarkGray };
 
     // Agent state indicator (moved into top header to avoid duplicated status bars).
     let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -376,6 +303,7 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
         Span::raw(" "),
         Span::styled(verbose_text, Style::default().fg(verbose_color).add_modifier(Modifier::BOLD)),
         Span::styled(auto_approve_text, Style::default().fg(if auto_approve { Color::Green } else { Color::Red }).add_modifier(Modifier::BOLD)),
+        Span::styled(pacore_text, Style::default().fg(pacore_color).add_modifier(Modifier::BOLD)),
         Span::styled(" [F1: Help] ", Style::default().fg(if app.show_help_view { Color::Green } else { Color::Yellow }).add_modifier(Modifier::BOLD)),
         Span::styled(" [F2: Focus] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::styled(" [F3: Memory] ", Style::default().fg(if app.show_memory_view { Color::Green } else { Color::Yellow }).add_modifier(Modifier::BOLD)),
@@ -1089,8 +1017,8 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
 }
 
 fn render_jobs_panel(frame: &mut Frame, app: &mut App, area: Rect) {
-    // Get all jobs from the registry
-    let jobs = app.job_registry.list_active_jobs();
+    // Get all jobs from the registry (including completed and failed)
+    let jobs = app.job_registry.list_all_jobs();
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1102,7 +1030,7 @@ fn render_jobs_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         });
 
     if jobs.is_empty() {
-        let empty_text = Paragraph::new("No active background jobs")
+        let empty_text = Paragraph::new("No background jobs")
             .block(block)
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(empty_text, area);
@@ -1123,8 +1051,8 @@ fn render_jobs_panel(frame: &mut Frame, app: &mut App, area: Rect) {
             JobStatus::Failed => Color::Red,
         };
 
-        // Truncate description to fit
-        let max_desc_len = area.width.saturating_sub(25) as usize;
+        // Truncate description to fit (accounting for status text)
+        let max_desc_len = area.width.saturating_sub(30) as usize;
         let desc = if job.description.len() > max_desc_len {
             format!("{}...", &job.description[..max_desc_len.saturating_sub(3)])
         } else {
@@ -1164,8 +1092,8 @@ fn render_job_detail(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
 
-    // Get all jobs and find the selected one
-    let jobs = app.job_registry.list_active_jobs();
+    // Get all jobs (including completed and failed) and find the selected one
+    let jobs = app.job_registry.list_all_jobs();
     let content = if let Some(selected_idx) = app.selected_job_index {
         if let Some(job) = jobs.get(selected_idx) {
             let mut lines = Vec::new();

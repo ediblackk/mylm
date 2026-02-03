@@ -2,6 +2,7 @@ pub mod app;
 pub mod pty;
 pub mod ui;
 pub mod session;
+pub mod help;
 
 use crate::terminal::app::{App, Focus, AppState, TuiEvent};
 use mylm_core::memory::graph::MemoryGraph;
@@ -833,8 +834,9 @@ async fn run_loop(
                                                 if !app.show_job_detail && app.selected_job_index.is_some() {
                                                     app.show_job_detail = true;
                                                     app.job_scroll = 0;
+                                                    continue; // Only consume Enter if we opened job details
                                                 }
-                                                continue;
+                                                // Otherwise fall through to chat input handling
                                             }
                                             _ => {}
                                         }

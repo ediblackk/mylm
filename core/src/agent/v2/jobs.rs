@@ -22,6 +22,7 @@ pub struct BackgroundJob {
     pub output: String,
     pub result: Option<serde_json::Value>,
     pub error: Option<String>,
+    pub observed: bool,
 }
 
 #[derive(Clone, Default)]
@@ -48,6 +49,7 @@ impl JobRegistry {
             output: String::new(),
             result: None,
             error: None,
+            observed: false,
         };
         self.jobs.write().unwrap().insert(id.clone(), job);
         id
@@ -86,9 +88,24 @@ impl JobRegistry {
             .collect()
     }
 
+    pub fn list_all_jobs(&self) -> Vec<BackgroundJob> {
+        let mut jobs: Vec<BackgroundJob> = self.jobs.read().unwrap().values().cloned().collect();
+        // Sort by creation time (newest first)
+        jobs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        jobs
+    }
+
     pub fn poll_updates(&self) -> Vec<BackgroundJob> {
-        // In a real implementation, we might track which jobs had updates since last poll
-        // For now, return all active jobs
-        self.list_active_jobs()
+        let mut jobs = self.jobs.write().unwrap();
+        let mut updates = Vec::new();
+
+        for (_, job) in jobs.iter_mut() {
+            if !job.observed || job.status != JobStatus::Running {
+                job.observed = true;
+                updates.push(job.clone());
+            }
+        }
+
+        updates
     }
 }

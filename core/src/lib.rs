@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod pacore;
 pub mod terminal;
 pub mod config;
 pub mod context;

@@ -8,7 +8,10 @@ use mylm_core::agent::{Agent, AgentDecision, ToolKind};
 use mylm_core::agent::v2::jobs::JobRegistry;
 use crate::terminal::session::SessionMonitor;
 use mylm_core::context::pack::ContextBuilder;
+use mylm_core::context::{ContextConfig, ContextManager};
 use vt100::Parser;
+use mylm_core::pacore::exp::Exp;
+use futures::StreamExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -105,6 +108,13 @@ pub struct App {
     pub is_selecting: bool,
     pub clipboard: Option<arboard::Clipboard>,
     pub scratchpad: Arc<RwLock<String>>,
+    // PaCoRe (Parallel Consistency Reasoning) engine
+    #[allow(dead_code)]
+    pub pacore_engine: Option<Arc<Mutex<Option<Exp>>>>,
+    pub pacore_enabled: bool,
+    pub pacore_rounds: String,
+    // Context manager for token tracking and condensation
+    pub context_manager: ContextManager,
 }
 
 impl App {
@@ -128,6 +138,14 @@ impl App {
         let clipboard = arboard::Clipboard::new().ok();
 
         let session_id = agent.session_id.clone();
+        
+        // Extract PaCoRe config before moving config
+        let pacore_enabled = config.features.pacore.enabled;
+        let pacore_rounds = config.features.pacore.rounds.clone();
+
+        // Initialize context manager with default config
+        // Will be updated with proper config from agent's LLM client when available
+        let context_manager = ContextManager::new(ContextConfig::new(max_ctx as usize));
 
         Self {
             terminal_parser: Parser::new(24, 80, 0), // Standard size, history handled separately
@@ -190,6 +208,11 @@ impl App {
             is_selecting: false,
             clipboard,
             scratchpad,
+            // Initialize PaCoRe as None (lazy load on first use if enabled)
+            pacore_engine: None,
+            pacore_enabled,
+            pacore_rounds,
+            context_manager,
         }
     }
 
@@ -341,44 +364,73 @@ impl App {
             self.chat_scroll = 0;
             self.chat_auto_scroll = true;
 
-            let agent = self.agent.clone();
-            let history = self.chat_history.clone();
-            let monitor_ratio = self.session_monitor.get_context_ratio();
-            let event_tx_clone = event_tx.clone();
-            let interrupt_flag = self.interrupt_flag.clone();
-            let auto_approve = self.auto_approve.clone();
-            // V2 doesn't have max_driver_loops, use default
-            let max_driver_loops = 30;
-            interrupt_flag.store(false, Ordering::SeqCst);
-
-            let task = tokio::spawn(async move {
-                {
-                    let mut agent_lock = agent.lock().await;
-                    
-                    // Automatic condensation check
-                    let final_history = if monitor_ratio > agent_lock.llm_client.config().condense_threshold {
-                        match agent_lock.condense_history(&history).await {
-                            Ok(new_history) => new_history,
-                            Err(_) => history,
-                        }
-                    } else {
-                        history
-                    };
-
-                    agent_lock.reset(final_history).await;
-                }
+            // Check if PaCoRe is enabled
+            if self.pacore_enabled {
+                // Spawn task to run PaCoRe reasoning
+                let agent = self.agent.clone();
+                let history = self.chat_history.clone();
+                let event_tx_clone = event_tx.clone();
+                let interrupt_flag = self.interrupt_flag.clone();
+                let pacore_rounds = self.pacore_rounds.clone();
+                let config = self.config.clone();
                 
-                run_agent_loop(
-                    agent,
-                    event_tx_clone,
-                    interrupt_flag,
-                    auto_approve,
-                    max_driver_loops,
-                    None
-                ).await;
-            });
-            
-            self.active_task = Some(task);
+                interrupt_flag.store(false, Ordering::SeqCst);
+                
+                let task = tokio::spawn(async move {
+                    run_pacore_task(
+                        agent,
+                        history,
+                        event_tx_clone,
+                        interrupt_flag,
+                        &pacore_rounds,
+                        config,
+                    ).await;
+                });
+                
+                self.active_task = Some(task);
+            } else {
+                // Standard agent loop
+                let agent = self.agent.clone();
+                let history = self.chat_history.clone();
+                // Update context manager with current history for ratio calculation
+                self.context_manager.set_history(&history);
+                let context_ratio = self.context_manager.get_context_ratio();
+                let event_tx_clone = event_tx.clone();
+                let interrupt_flag = self.interrupt_flag.clone();
+                let auto_approve = self.auto_approve.clone();
+                // V2 doesn't have max_driver_loops, use default
+                let max_driver_loops = 30;
+                interrupt_flag.store(false, Ordering::SeqCst);
+
+                let task = tokio::spawn(async move {
+                    {
+                        let mut agent_lock = agent.lock().await;
+                        
+                        // Automatic condensation check
+                        let final_history = if context_ratio > agent_lock.llm_client.config().condense_threshold {
+                            match agent_lock.condense_history(&history).await {
+                                Ok(new_history) => new_history,
+                                Err(_) => history,
+                            }
+                        } else {
+                            history
+                        };
+
+                        agent_lock.reset(final_history).await;
+                    }
+                    
+                    run_agent_loop(
+                        agent,
+                        event_tx_clone,
+                        interrupt_flag,
+                        auto_approve,
+                        max_driver_loops,
+                        None
+                    ).await;
+                });
+                
+                self.active_task = Some(task);
+            }
         }
     }
 
@@ -594,6 +646,67 @@ impl App {
                     logs.join("\n")
                 };
                 self.chat_history.push(ChatMessage::assistant(format!("Recent Logs (last {}):\n{}", n, log_text)));
+            }
+            "/pacore" => {
+                if parts.len() < 2 {
+                    // Show current PaCoRe status
+                    let status = if self.pacore_enabled { "ON" } else { "OFF" };
+                    self.chat_history.push(ChatMessage::assistant(
+                        format!("PaCoRe Status:\n  Enabled: {}\n  Rounds: {}\n\nCommands:\n  /pacore on - Enable PaCoRe\n  /pacore off - Disable PaCoRe\n  /pacore rounds <n,n> - Set rounds (e.g., '4,1')\n  /pacore status - Show this status\n  /pacore save - Save config to disk",
+                            status, self.pacore_rounds)
+                    ));
+                    return;
+                }
+                let subcmd = parts[1];
+                match subcmd {
+                    "on" => {
+                        self.pacore_enabled = true;
+                        self.chat_history.push(ChatMessage::assistant("PaCoRe enabled. New messages will use parallel reasoning.".to_string()));
+                    }
+                    "off" => {
+                        self.pacore_enabled = false;
+                        self.chat_history.push(ChatMessage::assistant("PaCoRe disabled. Using standard agent loop.".to_string()));
+                    }
+                    "rounds" => {
+                        if parts.len() < 3 {
+                            self.chat_history.push(ChatMessage::assistant("Usage: /pacore rounds <comma-separated numbers> (e.g., 4,1)".to_string()));
+                        } else {
+                            let new_rounds = parts[2..].join("");
+                            // Validate format
+                            if new_rounds.split(',').all(|s| s.trim().parse::<usize>().is_ok()) {
+                                // Clone before moving for display and config update
+                                let rounds_clone = new_rounds.clone();
+                                self.pacore_rounds = new_rounds;
+                                // Update config
+                                self.config.features.pacore.rounds = rounds_clone.clone();
+                                let _ = self.config.save(None);
+                                self.chat_history.push(ChatMessage::assistant(format!("PaCoRe rounds set to: {}", rounds_clone)));
+                            } else {
+                                self.chat_history.push(ChatMessage::assistant("Invalid rounds format. Use comma-separated numbers (e.g., 4,1)".to_string()));
+                            }
+                        }
+                    }
+                    "status" => {
+                        let status = if self.pacore_enabled { "ON" } else { "OFF" };
+                        self.chat_history.push(ChatMessage::assistant(
+                            format!("PaCoRe Status:\n  Enabled: {}\n  Rounds: {}", status, self.pacore_rounds)
+                        ));
+                    }
+                    "save" => {
+                        self.config.features.pacore.rounds = self.pacore_rounds.clone();
+                        match self.config.save(None) {
+                            Ok(_) => {
+                                self.chat_history.push(ChatMessage::assistant("PaCoRe configuration saved.".to_string()));
+                            }
+                            Err(e) => {
+                                self.chat_history.push(ChatMessage::assistant(format!("Error saving config: {}", e)));
+                            }
+                        }
+                    }
+                    _ => {
+                        self.chat_history.push(ChatMessage::assistant(format!("Unknown pacore command: {}. Use 'on', 'off', 'rounds', 'status', or 'save'", subcmd)));
+                    }
+                }
             }
             _ => {
                 self.chat_history.push(ChatMessage::assistant(format!("Unknown command: {}", cmd)));
@@ -1198,4 +1311,131 @@ async fn run_agent_loop(
             }
         }
     }
+}
+
+async fn run_pacore_task(
+    agent: Arc<Mutex<Agent>>,
+    history: Vec<ChatMessage>,
+    event_tx: mpsc::UnboundedSender<TuiEvent>,
+    interrupt_flag: Arc<AtomicBool>,
+    pacore_rounds: &str,
+    config: mylm_core::config::Config,
+) {
+    // Parse rounds configuration
+    let rounds_vec: Vec<usize> = pacore_rounds
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
+    
+    if rounds_vec.is_empty() {
+        let _ = event_tx.send(TuiEvent::AgentResponseFinal(
+            "Error: No valid rounds configured. Use /pacore rounds <comma-separated numbers>".to_string(),
+            TokenUsage::default()
+        ));
+        let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Idle));
+        return;
+    }
+    
+    // Get LLM client and config from agent
+    let (llm_client, resolved_config) = {
+        let agent_lock = agent.lock().await;
+        (agent_lock.llm_client.clone(), config.resolve_profile())
+    };
+    
+    // Extract endpoint info
+    let base_url = resolved_config.base_url.unwrap_or_else(|| resolved_config.provider.default_url());
+    let api_key = match resolved_config.api_key {
+        Some(key) => key,
+        None => {
+            let _ = event_tx.send(TuiEvent::AgentResponseFinal(
+                "Error: No API key configured for PaCoRe".to_string(),
+                TokenUsage::default()
+            ));
+            let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Idle));
+            return;
+        }
+    };
+    
+    // Create ChatClient for PaCoRe
+    let chat_client = mylm_core::pacore::ChatClient::new(base_url, api_key);
+    
+    // Get model name
+    let model_name = llm_client.config().model.clone();
+    
+    // Clone rounds for status message before moving into Exp
+    let rounds_display = rounds_vec.clone();
+    
+    // Create PaCoRe engine with correct signature: model, rounds, max_concurrent, client
+    let exp = Exp::new(
+        model_name,
+        rounds_vec,
+        10, // max_concurrent - using default from CLI
+        chat_client,
+    );
+    
+    // Run PaCoRe reasoning
+    let _ = event_tx.send(TuiEvent::StatusUpdate(
+        format!("PaCoRe reasoning with rounds: {:?}", rounds_display)
+    ));
+    
+    // Convert ChatMessage history to PaCoRe Message format
+    let pacore_messages: Vec<mylm_core::pacore::model::Message> = history
+        .iter()
+        .map(|msg| mylm_core::pacore::model::Message {
+            role: match msg.role {
+                mylm_core::llm::chat::MessageRole::User => "user",
+                mylm_core::llm::chat::MessageRole::Assistant => "assistant",
+                mylm_core::llm::chat::MessageRole::System => "system",
+                mylm_core::llm::chat::MessageRole::Tool => "tool",
+            }.to_string(),
+            content: msg.content.clone(),
+            name: None,
+            tool_calls: None,
+        })
+        .collect();
+    
+    match exp.process_single_stream(pacore_messages, "tui").await {
+        Ok(mut stream) => {
+            // Accumulate full response for smooth rendering via PendingStream
+            let mut full_response = String::new();
+            
+            // Consume the stream and accumulate content
+            while let Some(chunk_result) = stream.next().await {
+                // Check for interrupt
+                if interrupt_flag.load(Ordering::SeqCst) {
+                    let _ = event_tx.send(TuiEvent::StatusUpdate("PaCoRe interrupted by user".to_string()));
+                    break;
+                }
+                
+                match chunk_result {
+                    Ok(chunk) => {
+                        if let Some(choice) = chunk.choices.first() {
+                            if let Some(delta) = &choice.delta {
+                                // Accumulate content instead of sending per-chunk
+                                full_response.push_str(&delta.content);
+                            } else if let Some(message) = &choice.message {
+                                full_response.push_str(&message.content);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = event_tx.send(TuiEvent::StatusUpdate(format!("PaCoRe stream error: {}", e)));
+                    }
+                }
+            }
+            
+            // Send accumulated response as a single final event for smooth rendering
+            if !full_response.is_empty() {
+                let _ = event_tx.send(TuiEvent::AgentResponseFinal(full_response, TokenUsage::default()));
+            }
+        }
+        Err(e) => {
+            let _ = event_tx.send(TuiEvent::AgentResponseFinal(
+                format!("PaCoRe error: {}", e),
+                TokenUsage::default()
+            ));
+        }
+    }
+    
+    let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Idle));
 }

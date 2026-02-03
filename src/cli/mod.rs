@@ -136,6 +136,43 @@ pub enum Commands {
         port: u16,
     },
 
+    /// Parallel Consistency Reasoning (PaCoRe) batch processing
+    Batch {
+        /// Input JSONL file path
+        #[arg(short, long)]
+        input: String,
+
+        /// Output JSONL file path
+        #[arg(short, long)]
+        output: String,
+
+        /// LLM model to use
+        #[arg(short, long)]
+        model: String,
+
+        /// Number of responses per round (comma-separated, e.g., "4,1")
+        #[arg(short, long, default_value = "4,1")]
+        rounds: String,
+
+        /// Maximum concurrent requests
+        #[arg(short, long, default_value_t = 1)]
+        concurrent: usize,
+    },
+
+    /// Single prompt reasoning with streaming output
+    Ask {
+        /// The question or task for the AI
+        query: String,
+
+        /// LLM model to use
+        #[arg(short, long)]
+        model: Option<String>,
+
+        /// Number of responses per round (comma-separated, e.g., "4,1")
+        #[arg(short, long, default_value = "4,1")]
+        rounds: String,
+    },
+
     /// Background jobs CLI (placeholder)
     Jobs(JobsArgs),
 
