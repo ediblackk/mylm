@@ -361,9 +361,7 @@ impl ConfigUiExt for ConfigV2 {
         if let Some(iters) = iterations {
             profile.agent = Some(AgentOverride {
                 max_iterations: Some(iters),
-                iteration_rate_limit: profile.agent.as_ref().and_then(|a| a.iteration_rate_limit),
-                main_model: profile.agent.as_ref().and_then(|a| a.main_model.clone()),
-                worker_model: profile.agent.as_ref().and_then(|a| a.worker_model.clone()),
+                ..profile.agent.clone().unwrap_or_default()
             });
         } else {
             // Remove max_iterations override but keep other agent settings
@@ -376,6 +374,7 @@ impl ConfigUiExt for ConfigV2 {
                     iteration_rate_limit,
                     main_model,
                     worker_model,
+                    ..Default::default()
                 });
             } else {
                 profile.agent = None;
@@ -390,10 +389,8 @@ impl ConfigUiExt for ConfigV2 {
         
         if let Some(ms) = rate_limit {
             profile.agent = Some(AgentOverride {
-                max_iterations: profile.agent.as_ref().and_then(|a| a.max_iterations),
                 iteration_rate_limit: Some(ms),
-                main_model: profile.agent.as_ref().and_then(|a| a.main_model.clone()),
-                worker_model: profile.agent.as_ref().and_then(|a| a.worker_model.clone()),
+                ..profile.agent.clone().unwrap_or_default()
             });
         } else {
             // Remove rate limit override but keep other agent settings
@@ -406,6 +403,7 @@ impl ConfigUiExt for ConfigV2 {
                     iteration_rate_limit: None,
                     main_model,
                     worker_model,
+                    ..Default::default()
                 });
             } else {
                 profile.agent = None;

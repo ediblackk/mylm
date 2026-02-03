@@ -404,30 +404,27 @@ fn render_terminal(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let screen = app.terminal_parser.screen();
     
-    // If we're auto-scrolling, use the efficient PseudoTerminal widget from tui-term
-    if app.terminal_auto_scroll {
+    // If we're auto-scrolling AND no selection is active, use the efficient PseudoTerminal widget from tui-term
+    if app.terminal_auto_scroll && !app.is_selecting && app.selection_start.is_none() {
         let terminal = PseudoTerminal::new(screen)
             .block(block);
         frame.render_widget(terminal, area);
         return;
     }
 
-    // Custom Renderer for Scrolling
-    // Since tui-term 0.1.x PseudoTerminal doesn't support manual scrolling offset easily,
-    // we implement a basic renderer here to support viewing history.
-    
+    // Custom Renderer for Scrolling and Selection
     let height = inner_height as usize;
     
     // Combine manual history with visible screen
     let mut all_lines = Vec::new();
     for h in &app.terminal_history {
-        all_lines.push((h.as_str(), Style::default().fg(Color::DarkGray)));
+        all_lines.push(h.as_str());
     }
     
     let screen_contents = screen.contents();
     let screen_lines: Vec<&str> = screen_contents.split('\n').collect();
     for s in screen_lines {
-        all_lines.push((s, Style::default().fg(Color::White)));
+        all_lines.push(s);
     }
 
     let total_lines = all_lines.len();
@@ -435,14 +432,35 @@ fn render_terminal(frame: &mut Frame, app: &mut App, area: Rect) {
     // Clamp scroll to valid bounds
     app.terminal_scroll = app.terminal_scroll.clamp(0, max_scroll);
     
-    let start_idx = total_lines.saturating_sub(app.terminal_scroll).saturating_sub(height);
+    let start_idx = if app.terminal_auto_scroll {
+        total_lines.saturating_sub(height)
+    } else {
+        total_lines.saturating_sub(app.terminal_scroll).saturating_sub(height)
+    };
     let end_idx = (start_idx + height).min(total_lines);
     
     let mut list_items = Vec::new();
     
-    for i in start_idx..end_idx {
-        if let Some((line_content, style)) = all_lines.get(i) {
-             list_items.push(ListItem::new(Line::from(Span::styled(line_content.to_string(), *style))));
+    for (i, abs_line_idx) in (start_idx..end_idx).enumerate() {
+        if let Some(line_content) = all_lines.get(abs_line_idx) {
+            let mut spans = Vec::new();
+            let row = area.y + 1 + i as u16;
+            
+            for (col_idx, c) in line_content.chars().enumerate() {
+                let col = area.x + 1 + col_idx as u16;
+                let is_selected = app.is_in_selection(col, row, Focus::Terminal);
+                
+                let style = if is_selected {
+                    Style::default().bg(Color::Cyan).fg(Color::Black)
+                } else if abs_line_idx < app.terminal_history.len() {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                
+                spans.push(Span::styled(c.to_string(), style));
+            }
+            list_items.push(ListItem::new(Line::from(spans)));
         }
     }
     
@@ -685,14 +703,43 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
             let wrapped = wrap_text(&text, content_width);
             for line in wrapped {
                 let mut spans = Vec::new();
+                let current_row = chunks[0].y + 1 + list_items.len() as u16;
+                
                 if first_line {
-                    spans.push(Span::styled(prefix.to_string(), Style::default().fg(color).add_modifier(Modifier::BOLD)));
+                    // Check if prefix is selected
+                    let mut prefix_spans = Vec::new();
+                    for (i, c) in prefix.chars().enumerate() {
+                        let is_selected = app.is_in_selection(chunks[0].x + 1 + i as u16, current_row, Focus::Chat);
+                        prefix_spans.push(Span::styled(
+                            c.to_string(),
+                            if is_selected { Style::default().bg(Color::Cyan).fg(Color::Black) } 
+                            else { Style::default().fg(color).add_modifier(Modifier::BOLD) }
+                        ));
+                    }
+                    spans.extend(prefix_spans);
                     first_line = false;
                 } else {
-                    spans.push(Span::raw(" ".repeat(prefix.len())));
+                    // Spacing for subsequent lines
+                    let mut space_spans = Vec::new();
+                    for i in 0..prefix.len() {
+                        let is_selected = app.is_in_selection(chunks[0].x + 1 + i as u16, current_row, Focus::Chat);
+                        space_spans.push(Span::styled(
+                            " ",
+                            if is_selected { Style::default().bg(Color::Cyan).fg(Color::Black) } else { Style::default() }
+                        ));
+                    }
+                    spans.extend(space_spans);
                 }
                 
-                spans.push(Span::styled(line, style));
+                // Add the actual text with selection check per character
+                for (i, c) in line.chars().enumerate() {
+                    let is_selected = app.is_in_selection(chunks[0].x + 1 + prefix.len() as u16 + i as u16, current_row, Focus::Chat);
+                    spans.push(Span::styled(
+                        c.to_string(),
+                        if is_selected { Style::default().bg(Color::Cyan).fg(Color::Black) } else { style }
+                    ));
+                }
+                
                 list_items.push(ListItem::new(Line::from(spans)));
             }
         }

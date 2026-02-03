@@ -694,6 +694,46 @@ pub async fn handle_select_main_model(config: &mut Config) -> Result<bool> {
     };
 
     config.endpoint.model = selected_model.clone();
+
+    // Model Metadata prompts
+    println!("\n📊 Model Metadata (Optional, press Enter to skip)");
+    
+    let max_ctx = Text::new("Max context tokens:")
+        .with_help_message("e.g. 128000")
+        .prompt()?;
+    if !max_ctx.trim().is_empty() {
+        if let Ok(val) = max_ctx.trim().parse::<usize>() {
+            config.endpoint.max_context_tokens = Some(val);
+        }
+    }
+
+    let in_price = Text::new("Input price (per 1M tokens):")
+        .with_help_message("e.g. 0.15")
+        .prompt()?;
+    if !in_price.trim().is_empty() {
+        if let Ok(val) = in_price.trim().parse::<f64>() {
+            config.endpoint.input_price = Some(val);
+        }
+    }
+
+    let out_price = Text::new("Output price (per 1M tokens):")
+        .with_help_message("e.g. 0.60")
+        .prompt()?;
+    if !out_price.trim().is_empty() {
+        if let Ok(val) = out_price.trim().parse::<f64>() {
+            config.endpoint.output_price = Some(val);
+        }
+    }
+
+    let threshold = Text::new("Condensation threshold:")
+        .with_help_message("Tokens to trigger summary (e.g. 100000)")
+        .prompt()?;
+    if !threshold.trim().is_empty() {
+        if let Ok(val) = threshold.trim().parse::<usize>() {
+            config.endpoint.condensation_threshold = Some(val);
+        }
+    }
+
     config.save_to_default_location()?;
     
     println!("✅ Main LLM set to: {} @ {}", selected_model, selected_provider);
@@ -742,11 +782,60 @@ pub async fn handle_select_worker_model(config: &mut Config) -> Result<bool> {
     // Update profile with worker model
     let profile = config.profiles.entry(config.profile.clone()).or_default();
     let current_agent = profile.agent.clone().unwrap_or_default();
+    
+    let mut max_ctx = None;
+    let mut in_price = None;
+    let mut out_price = None;
+    let mut threshold = None;
+
+    // Model Metadata prompts
+    println!("\n📊 Worker Model Metadata (Optional, press Enter to skip)");
+    
+    let input = Text::new("Max context tokens:")
+        .with_help_message("e.g. 128000")
+        .prompt()?;
+    if !input.trim().is_empty() {
+        if let Ok(val) = input.trim().parse::<usize>() {
+            max_ctx = Some(val);
+        }
+    }
+
+    let input = Text::new("Input price (per 1M tokens):")
+        .with_help_message("e.g. 0.15")
+        .prompt()?;
+    if !input.trim().is_empty() {
+        if let Ok(val) = input.trim().parse::<f64>() {
+            in_price = Some(val);
+        }
+    }
+
+    let input = Text::new("Output price (per 1M tokens):")
+        .with_help_message("e.g. 0.60")
+        .prompt()?;
+    if !input.trim().is_empty() {
+        if let Ok(val) = input.trim().parse::<f64>() {
+            out_price = Some(val);
+        }
+    }
+
+    let input = Text::new("Condensation threshold:")
+        .with_help_message("Tokens to trigger summary (e.g. 100000)")
+        .prompt()?;
+    if !input.trim().is_empty() {
+        if let Ok(val) = input.trim().parse::<usize>() {
+            threshold = Some(val);
+        }
+    }
+
     profile.agent = Some(mylm_core::config::AgentOverride {
         max_iterations: current_agent.max_iterations,
         iteration_rate_limit: current_agent.iteration_rate_limit,
         main_model: current_agent.main_model,
         worker_model: worker_model.clone(),
+        max_context_tokens: max_ctx,
+        input_price: in_price,
+        output_price: out_price,
+        condensation_threshold: threshold,
     });
 
     config.save_to_default_location()?;

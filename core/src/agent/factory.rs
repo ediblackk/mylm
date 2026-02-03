@@ -162,21 +162,28 @@ impl AgentConfigs {
             .with_tools(vec![
                 Box::new(tools::fs::FileReadTool),
                 Box::new(tools::fs::FileWriteTool),
+                Box::new(tools::find::FindTool),
                 Box::new(tools::system::SystemMonitorTool::new()),
             ])
     }
     
     /// Create a development agent with programming tools
     pub fn development(llm_client: Arc<LlmClient>) -> AgentBuilder {
+        let job_registry = crate::agent::v2::jobs::JobRegistry::new();
+
         AgentBuilder::new(llm_client)
             .with_system_prompt("You are a helpful AI assistant specialized in software development.".to_string())
+            .with_job_registry(job_registry.clone())
             .with_tools(vec![
                 Box::new(tools::fs::FileReadTool),
                 Box::new(tools::fs::FileWriteTool),
+                Box::new(tools::find::FindTool),
                 Box::new(tools::git::GitStatusTool),
                 Box::new(tools::git::GitLogTool),
                 Box::new(tools::git::GitDiffTool),
                 Box::new(tools::system::SystemMonitorTool::new()),
+                Box::new(tools::wait::WaitTool),
+                Box::new(tools::ListJobsTool::new(job_registry)),
             ])
     }
     
@@ -187,22 +194,28 @@ impl AgentConfigs {
             .with_tools(vec![
                 Box::new(tools::fs::FileReadTool),
                 Box::new(tools::fs::FileWriteTool),
+                Box::new(tools::find::FindTool),
                 Box::new(tools::system::SystemMonitorTool::new()),
             ])
     }
     
     /// Create a memory-enabled agent with full capabilities
     pub fn full_featured(llm_client: Arc<LlmClient>) -> AgentBuilder {
+        let job_registry = crate::agent::v2::jobs::JobRegistry::new();
+
         AgentBuilder::new(llm_client)
             .with_system_prompt("You are a helpful AI assistant with full system access and memory capabilities.".to_string())
+            .with_job_registry(job_registry.clone())
             .with_tools(vec![
                 Box::new(tools::fs::FileReadTool),
                 Box::new(tools::fs::FileWriteTool),
+                Box::new(tools::find::FindTool),
                 Box::new(tools::git::GitStatusTool),
                 Box::new(tools::git::GitLogTool),
                 Box::new(tools::git::GitDiffTool),
                 Box::new(tools::system::SystemMonitorTool::new()),
                 Box::new(tools::wait::WaitTool),
+                Box::new(tools::ListJobsTool::new(job_registry)),
             ])
     }
     

@@ -24,7 +24,7 @@ fn test_default_config() {
 fn test_default_endpoint() {
     let endpoint = EndpointConfig::default();
     assert_eq!(endpoint.provider, Provider::Openai);
-    assert_eq!(endpoint.model, "gpt-4o");
+    assert_eq!(endpoint.model, "default-model");
     assert_eq!(endpoint.timeout_secs, 30);
     assert!(endpoint.base_url.is_none());
     assert!(endpoint.api_key.is_none());
@@ -34,17 +34,18 @@ fn test_default_endpoint() {
 fn test_profile_override() {
     let profile = Profile {
         endpoint: Some(EndpointOverride {
-            model: Some("gpt-4o-mini".to_string()),
+            model: Some("test-model-override".to_string()),
             api_key: None,
         }),
         agent: Some(AgentOverride {
             max_iterations: Some(5),
             main_model: None,
-            worker_model: Some("gpt-4o-mini".to_string()),
+            worker_model: Some("test-model-worker".to_string()),
+            ..Default::default()
         }),
     };
 
-    assert_eq!(profile.endpoint.as_ref().unwrap().model.as_ref().unwrap(), "gpt-4o-mini");
+    assert_eq!(profile.endpoint.as_ref().unwrap().model.as_ref().unwrap(), "test-model-override");
     assert_eq!(profile.agent.as_ref().unwrap().max_iterations, Some(5));
 }
 
@@ -106,7 +107,7 @@ fn test_load_default_config() {
 
     assert_eq!(config.profile, "fast");
     assert_eq!(config.endpoint.provider, Provider::Openai);
-    assert_eq!(config.endpoint.model, "gpt-4o");
+    assert_eq!(config.endpoint.model, "default-model");
 
     // Restore global process state.
     std::env::set_current_dir(&original_dir).unwrap();
@@ -242,9 +243,9 @@ fn test_profile_resolution_no_profile() {
     let resolved = config.resolve_profile();
 
     assert_eq!(resolved.provider, Provider::Openai);
-    assert_eq!(resolved.model, "gpt-4o");
-    assert_eq!(resolved.agent.main_model, "gpt-4o");
-    assert_eq!(resolved.agent.worker_model, "gpt-4o");
+    assert_eq!(resolved.model, "default-model");
+    assert_eq!(resolved.agent.main_model, "default-model");
+    assert_eq!(resolved.agent.worker_model, "default-model");
     assert_eq!(resolved.agent.max_iterations, 10);
 }
 
@@ -253,13 +254,14 @@ fn test_profile_resolution_with_overrides() {
     let mut profiles = HashMap::new();
     profiles.insert("fast".to_string(), Profile {
         endpoint: Some(EndpointOverride {
-            model: Some("gpt-4o-mini".to_string()),
+            model: Some("test-model-fast".to_string()),
             api_key: Some("profile-key".to_string()),
         }),
         agent: Some(AgentOverride {
             max_iterations: Some(5),
-            main_model: Some("gpt-4o".to_string()),
-            worker_model: Some("gpt-4o-mini".to_string()),
+            main_model: Some("test-model-main".to_string()),
+            worker_model: Some("test-model-fast".to_string()),
+            ..Default::default()
         }),
     });
 
@@ -271,11 +273,11 @@ fn test_profile_resolution_with_overrides() {
 
     let resolved = config.resolve_profile();
 
-    assert_eq!(resolved.model, "gpt-4o-mini");
+    assert_eq!(resolved.model, "test-model-fast");
     assert_eq!(resolved.api_key, Some("profile-key".to_string()));
     assert_eq!(resolved.agent.max_iterations, 5);
-    assert_eq!(resolved.agent.main_model, "gpt-4o");
-    assert_eq!(resolved.agent.worker_model, "gpt-4o-mini");
+    assert_eq!(resolved.agent.main_model, "test-model-main");
+    assert_eq!(resolved.agent.worker_model, "test-model-fast");
 }
 
 #[test]
@@ -287,6 +289,7 @@ fn test_profile_resolution_partial_agent_override() {
             max_iterations: Some(15),
             main_model: None,
             worker_model: Some("claude-3-haiku".to_string()),
+            ..Default::default()
         }),
     });
 
@@ -322,7 +325,7 @@ fn test_profile_resolution_nonexistent_profile() {
 
     // Should fall back to base config
     assert_eq!(resolved.provider, Provider::Openai);
-    assert_eq!(resolved.model, "gpt-4o");
+    assert_eq!(resolved.model, "default-model");
 }
 
 #[test]
@@ -341,8 +344,8 @@ fn test_config_error_display() {
 fn test_resolved_config_default() {
     let agent_config = AgentConfig::default();
     assert_eq!(agent_config.max_iterations, 10);
-    assert_eq!(agent_config.main_model, "gpt-4o");
-    assert_eq!(agent_config.worker_model, "gpt-4o-mini");
+    assert_eq!(agent_config.main_model, "default-model");
+    assert_eq!(agent_config.worker_model, "default-worker-model");
 }
 
 #[test]

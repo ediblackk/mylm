@@ -34,12 +34,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc, Mutex};
 use std::sync::atomic::Ordering;
 
-pub enum TuiResult {
-    Exit,
-    ReturnToHub,
-}
-
-pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>, initial_query: Option<String>, initial_context: Option<TerminalContext>, initial_terminal_context: Option<mylm_core::context::terminal::TerminalContext>, update_available: bool, incognito: bool) -> Result<TuiResult> {
+pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>, initial_query: Option<String>, initial_context: Option<TerminalContext>, initial_terminal_context: Option<mylm_core::context::terminal::TerminalContext>, update_available: bool, incognito: bool) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -131,7 +126,7 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
     let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
     
     // We need a job registry for the agent and tools
-    let job_registry = mylm_core::agent::v2::jobs::JobRegistry::new();
+    let job_registry = crate::get_job_registry().clone();
 
     // Create a temporary Scribe for tools that need it during initialization
     // The Agent will create its own internal Scribe, but we need one for DelegateTool now.
@@ -272,7 +267,7 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
 
     // Spawn PTY listener
     let pty_tx = event_tx.clone();
-    tokio::spawn(async move {
+    let pty_handle = tokio::spawn(async move {
         while let Some(data) = pty_rx.recv().await {
             let _ = pty_tx.send(TuiEvent::Pty(data));
         }
@@ -280,7 +275,7 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
 
     // Spawn Input listener
     let input_tx = event_tx.clone();
-    tokio::spawn(async move {
+    let input_handle = tokio::spawn(async move {
         loop {
             if event::poll(Duration::from_millis(10)).unwrap_or(false) {
                 if let Ok(ev) = event::read() {
@@ -293,7 +288,7 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
 
     // Spawn Tick listener
     let tick_tx = event_tx.clone();
-    tokio::spawn(async move {
+    let tick_handle = tokio::spawn(async move {
         loop {
             let _ = tick_tx.send(TuiEvent::Tick);
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -323,6 +318,11 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
         }
     }
 
+    // Abort background tasks to stop terminal polling
+    pty_handle.abort();
+    input_handle.abort();
+    tick_handle.abort();
+
     // Restore terminal
     disable_raw_mode()?;
     execute!(
@@ -332,6 +332,9 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
         DisableMouseCapture
     )?;
     terminal.show_cursor()?;
+
+    // Small delay to ensure terminal state is fully restored before Hub takes over
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     result
 }
@@ -345,7 +348,7 @@ async fn run_loop(
     store: std::sync::Arc<mylm_core::memory::VectorStore>,
     state_store: std::sync::Arc<std::sync::RwLock<mylm_core::state::StateStore>>,
     incognito: bool,
-) -> Result<TuiResult> {
+) -> Result<()> {
     static ANSI_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = ANSI_RE.get_or_init(|| regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap());
     let mut pending_copy_chord = false;
@@ -1057,7 +1060,7 @@ async fn run_loop(
                                             }
                                             KeyCode::Char('e') | KeyCode::Char('E') => {
                                                 app.should_quit = true; // We set this to avoid the fallback save
-                                                return Ok(TuiResult::Exit);
+                                                return Ok(());
                                             }
                                             KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Esc => {
                                                 app.set_state(AppState::Idle);
@@ -1074,7 +1077,7 @@ async fn run_loop(
                                         };
                                         let _ = app.save_session(name).await;
                                         app.should_quit = true;
-                                        return Ok(TuiResult::Exit);
+                                        return Ok(());
                                     }
                                             KeyCode::Esc => {
                                                 app.set_state(AppState::ConfirmExit);
@@ -1100,7 +1103,7 @@ async fn run_loop(
                                                     let _ = app.save_session(None).await;
                                                 }
                                                 app.return_to_hub = true;
-                                                return Ok(TuiResult::ReturnToHub);
+                                                return Ok(());
                                             }
                                             KeyCode::Up => app.scroll_chat_up(),
                                             KeyCode::Down => app.scroll_chat_down(),
@@ -1137,35 +1140,47 @@ async fn run_loop(
                             }
                         }
                         CrosstermEvent::Mouse(mouse_event) => {
+                            // Shift+Mouse bypass for native selection
+                            if mouse_event.modifiers.contains(KeyModifiers::SHIFT) {
+                                continue;
+                            }
+
                             // Mouse support - click to focus, wheel to scroll, drag to select
                             match mouse_event.kind {
-                                MouseEventKind::Down(_) => {
-                                    // Clear any previous selection and start new one
-                                    app.clear_selection();
-                                    
-                                    // Determine which pane was clicked and set focus
-                                    // Terminal is on the left (when visible), Chat on the right
-                                    let terminal_width = (terminal.size().map(|s| s.width).unwrap_or(80) as f32 *
-                                        if app.show_terminal { 0.7 } else { 0.0 }) as u16;
-                                    
-                                    if app.show_terminal && mouse_event.column < terminal_width {
-                                        app.focus = Focus::Terminal;
-                                        app.start_selection(mouse_event.column, mouse_event.row, Focus::Terminal);
-                                    } else {
-                                        app.focus = Focus::Chat;
-                                        app.start_selection(mouse_event.column, mouse_event.row, Focus::Chat);
+                                MouseEventKind::Down(btn) => {
+                                    // Only start selection on left click
+                                    if btn == crossterm::event::MouseButton::Left {
+                                        // Clear any previous selection and start new one
+                                        app.clear_selection();
+                                        
+                                        // Determine which pane was clicked and set focus
+                                        // Terminal is on the left (when visible), Chat on the right
+                                        let terminal_width = (terminal.size().map(|s| s.width).unwrap_or(80) as f32 *
+                                            if app.show_terminal { 1.0 - (app.chat_width_percent as f32 / 100.0) } else { 0.0 }) as u16;
+                                        
+                                        if app.show_terminal && mouse_event.column < terminal_width {
+                                            app.focus = Focus::Terminal;
+                                            app.start_selection(mouse_event.column, mouse_event.row, Focus::Terminal);
+                                        } else {
+                                            app.focus = Focus::Chat;
+                                            app.start_selection(mouse_event.column, mouse_event.row, Focus::Chat);
+                                        }
                                     }
                                 }
-                                MouseEventKind::Drag(_) => {
-                                    // Update selection on drag
-                                    app.update_selection(mouse_event.column, mouse_event.row);
+                                MouseEventKind::Drag(btn) => {
+                                    // Update selection on left click drag
+                                    if btn == crossterm::event::MouseButton::Left {
+                                        app.update_selection(mouse_event.column, mouse_event.row);
+                                    }
                                 }
-                                MouseEventKind::Up(_) => {
+                                MouseEventKind::Up(btn) => {
                                     // End selection and copy to clipboard on release
-                                    if let Some(selected_text) = app.end_selection() {
-                                        if !selected_text.is_empty() {
-                                            // Copy to clipboard using internal method
-                                            app.copy_text_to_clipboard(selected_text);
+                                    if btn == crossterm::event::MouseButton::Left {
+                                        if let Some(selected_text) = app.end_selection() {
+                                            if !selected_text.is_empty() {
+                                                // Copy to clipboard using internal method
+                                                app.copy_text_to_clipboard(selected_text);
+                                            }
                                         }
                                     }
                                 }

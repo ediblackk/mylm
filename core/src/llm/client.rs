@@ -38,7 +38,7 @@ impl std::str::FromStr for LlmProvider {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "openai" | "ollama" | "lmstudio" | "local" | "openrouter" => Ok(LlmProvider::OpenAiCompatible),
+            "openai" | "ollama" | "lmstudio" | "local" | "openrouter" | "custom" => Ok(LlmProvider::OpenAiCompatible),
             "google" | "gemini" | "google-ai" | "google-generativeai" => Ok(LlmProvider::GoogleGenerativeAi),
             "moonshot" | "kimi" => Ok(LlmProvider::MoonshotKimi),
             _ => Err(format!("Unknown LLM provider: {}", s)),

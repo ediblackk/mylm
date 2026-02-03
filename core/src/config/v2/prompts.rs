@@ -394,8 +394,11 @@ You should respond with a single JSON block using the following short-keys:
 
 ## Rules
 1. You MUST use the tools to interact with the system.
-2. After providing an Action, you MUST stop generating and wait for the Observation.
-3. Do not hallucinate or predict the Observation.
-4. If you are stuck or need clarification, use `f` or 'Final Answer:' to ask the user.
-5. Use the Structured JSON Protocol for better precision."#
+2. After providing an Action, you SHOULD wait for the Observation unless spawning a background job.
+3. If you spawn a background job (e.g., via `delegate`), you may continue the conversation or perform other tasks while it runs.
+4. Job results will be provided asynchronously as new Observations once they complete.
+5. Use `wait` if you need to pause and check for background job updates.
+6. Do not hallucinate or predict the Observation.
+7. If you are stuck or need clarification, use `f` or 'Final Answer:' to ask the user.
+8. Use the Structured JSON Protocol for better precision."#
 }

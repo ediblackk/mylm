@@ -19,6 +19,8 @@ pub use system::SystemMonitorTool;
 pub use terminal_sight::TerminalSightTool;
 pub mod wait;
 pub use wait::WaitTool;
+pub mod jobs;
+pub use jobs::ListJobsTool;
 pub mod delegate;
 pub use delegate::DelegateTool;
 
@@ -26,3 +28,5 @@ pub mod scratchpad;
 pub use scratchpad::ScratchpadTool;
 pub mod consolidate;
 pub use consolidate::ConsolidateTool;
+pub mod find;
+pub use find::FindTool;

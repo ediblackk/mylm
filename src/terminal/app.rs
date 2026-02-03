@@ -5,7 +5,7 @@ use mylm_core::executor::{CommandExecutor, allowlist::CommandAllowlist, safety::
 use mylm_core::llm::chat::{ChatMessage, MessageRole};
 use mylm_core::llm::TokenUsage;
 use mylm_core::agent::{Agent, AgentDecision, ToolKind};
-use mylm_core::agent::v2::jobs::JobRegistry;
+use mylm_core::agent::v2::jobs::{JobRegistry, JobStatus};
 use crate::terminal::session::SessionMonitor;
 use crate::terminal::session_manager::SessionManager;
 use mylm_core::context::pack::ContextBuilder;
@@ -1060,40 +1060,71 @@ impl App {
     }
 
     fn get_terminal_selected_text(&self, start_x: u16, start_y: u16, end_x: u16, end_y: u16) -> Option<String> {
-        // Get terminal screen content
-        let screen = self.terminal_parser.screen();
-        let mut lines = Vec::new();
-        
-        // Apply offset if available
         let (offset_x, offset_y) = self.terminal_area_offset.unwrap_or((0, 0));
-        let start_x = start_x.saturating_sub(offset_x);
-        let start_y = start_y.saturating_sub(offset_y);
-        let end_x = end_x.saturating_sub(offset_x);
-        let end_y = end_y.saturating_sub(offset_y);
+        
+        // Screen dimensions (inner terminal area)
+        let (screen_rows, _screen_cols) = self.terminal_parser.screen().size();
+        
+        // Reconstruct all lines including history
+        let mut all_lines = Vec::new();
+        for h in &self.terminal_history {
+            all_lines.push(h.clone());
+        }
+        let screen_contents = self.terminal_parser.screen().contents();
+        for s in screen_contents.split('\n') {
+            all_lines.push(s.to_string());
+        }
 
-        for row in start_y..=end_y {
-            let (cols, _) = screen.size();
-            let mut line = String::new();
-            
-            let col_start = if row == start_y { start_x } else { 0 };
-            let col_end = if row == end_y { end_x } else { cols.saturating_sub(1) };
+        let total_lines = all_lines.len();
+        let height = screen_rows as usize;
+        
+        // If we're not auto-scrolling, we're showing a window into the history
+        let start_idx = if self.terminal_auto_scroll {
+            total_lines.saturating_sub(height)
+        } else {
+            let max_scroll = total_lines.saturating_sub(height);
+            let clamped_scroll = self.terminal_scroll.min(max_scroll);
+            total_lines.saturating_sub(clamped_scroll).saturating_sub(height)
+        };
 
-            for col in col_start..=col_end {
-                if let Some(cell) = screen.cell(row, col) {
-                    line.push_str(&cell.contents());
+        let mut lines = Vec::new();
+        for y in start_y..=end_y {
+            let abs_y = start_idx + (y.saturating_sub(offset_y) as usize).saturating_sub(1);
+            if let Some(line) = all_lines.get(abs_y) {
+                let col_start = if y == start_y { start_x.saturating_sub(offset_x).saturating_sub(1) as usize } else { 0 };
+                let col_end = if y == end_y { (end_x.saturating_sub(offset_x).saturating_sub(1) as usize).min(line.chars().count()) } else { line.chars().count() };
+                
+                let chars: Vec<char> = line.chars().collect();
+                if col_start < chars.len() {
+                    let part: String = chars[col_start..col_end.min(chars.len())].iter().collect();
+                    lines.push(part);
+                } else if col_start == 0 && chars.is_empty() {
+                    lines.push(String::new());
                 }
             }
-            lines.push(line.trim_end().to_string());
         }
 
         Some(lines.join("\n"))
     }
 
     fn get_chat_selected_text(&self, _start_x: u16, _start_y: u16, _end_x: u16, _end_y: u16) -> Option<String> {
-        // For chat, we need to reconstruct the visible text and extract selection
-        // This is simplified - chat text is more complex due to wrapping
-        // For now, return a message indicating copy isn't fully implemented for chat
-        None
+        // Reconstruct visible chat lines (same logic as ui.rs)
+        let mut all_lines = Vec::new();
+        for m in &self.chat_history {
+            let prefix = match m.role {
+                MessageRole::User => "You: ",
+                MessageRole::Assistant => "AI: ",
+                MessageRole::System => "Sys: ",
+                _ => "AI: ",
+            };
+            all_lines.push(format!("{}{}", prefix, m.content));
+        }
+
+        if all_lines.is_empty() {
+            return None;
+        }
+
+        Some(all_lines.join("\n\n"))
     }
 
     pub fn clear_selection(&mut self) {
@@ -1101,6 +1132,43 @@ impl App {
         self.selection_end = None;
         self.selection_pane = None;
         self.is_selecting = false;
+    }
+
+    pub fn is_in_selection(&self, x: u16, y: u16, pane: Focus) -> bool {
+        let (start, end, p) = match (self.selection_start, self.selection_end, self.selection_pane) {
+            (Some(s), Some(e), Some(p)) => (s, e, p),
+            _ => return false,
+        };
+
+        if p != pane {
+            return false;
+        }
+
+        let (x1, y1) = start;
+        let (x2, y2) = end;
+        let ((min_x, min_y), (max_x, max_y)) = if y1 < y2 || (y1 == y2 && x1 <= x2) {
+            ((x1, y1), (x2, y2))
+        } else {
+            ((x2, y2), (x1, y1))
+        };
+
+        if y < min_y || y > max_y {
+            return false;
+        }
+
+        if y == min_y && y == max_y {
+            return x >= min_x && x <= max_x;
+        }
+
+        if y == min_y {
+            return x >= min_x;
+        }
+
+        if y == max_y {
+            return x <= max_x;
+        }
+
+        true
     }
 }
 
@@ -1128,6 +1196,39 @@ async fn run_agent_loop(
             let _ = event_tx.send(TuiEvent::AgentResponse("⛔ Task interrupted by user.".to_string(), TokenUsage::default()));
             let _ = event_tx.send(TuiEvent::AppStateUpdate(AppState::Idle));
             break;
+        }
+
+        // Poll for completed background jobs and convert to observation
+        let completed_jobs = {
+            let agent_lock = agent.lock().await;
+            agent_lock.job_registry.poll_updates()
+        };
+        if !completed_jobs.is_empty() {
+            let mut observations = Vec::new();
+            for job in completed_jobs {
+                match job.status {
+                    JobStatus::Completed => {
+                        let result_str = job.result.as_ref()
+                            .map(|r| r.to_string())
+                            .unwrap_or_else(|| "Job completed successfully".to_string());
+                        observations.push(format!("Background job '{}' result: {}", job.description, result_str));
+                    }
+                    JobStatus::Failed => {
+                        let error_msg = job.error.as_ref()
+                            .map(|e| e.as_str())
+                            .unwrap_or("Unknown error");
+                        observations.push(format!("Background job '{}' failed: {}", job.description, error_msg));
+                    }
+                    _ => {} // Running or other status, skip
+                }
+            }
+            if !observations.is_empty() {
+                if let Some(existing) = last_observation.take() {
+                    last_observation = Some(format!("{}\n{}", existing, observations.join("\n")));
+                } else {
+                    last_observation = Some(observations.join("\n"));
+                }
+            }
         }
 
         let mut agent_lock = agent.lock().await;

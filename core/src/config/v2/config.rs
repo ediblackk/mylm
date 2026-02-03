@@ -99,6 +99,22 @@ pub struct EndpointConfig {
     /// Request timeout in seconds
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+
+    /// Maximum context tokens
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_tokens: Option<usize>,
+
+    /// Input price per 1k tokens
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_price: Option<f64>,
+
+    /// Output price per 1k tokens
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_price: Option<f64>,
+
+    /// Tokens to trigger summary
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condensation_threshold: Option<usize>,
 }
 
 impl Default for EndpointConfig {
@@ -109,13 +125,17 @@ impl Default for EndpointConfig {
             base_url: None,
             api_key: None,
             timeout_secs: default_timeout_secs(),
+            max_context_tokens: None,
+            input_price: None,
+            output_price: None,
+            condensation_threshold: None,
         }
     }
 }
 
 /// Default model name
 fn default_model() -> String {
-    "gpt-4o".to_string()
+    "default-model".to_string()
 }
 
 /// Default timeout in seconds
@@ -237,6 +257,22 @@ pub struct AgentOverride {
     /// If not set, uses the main_model or endpoint's model.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worker_model: Option<String>,
+
+    /// Maximum context tokens for this profile's agent
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_tokens: Option<usize>,
+
+    /// Input price per 1M tokens for this profile's agent
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_price: Option<f64>,
+
+    /// Output price per 1M tokens for this profile's agent
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_price: Option<f64>,
+
+    /// Tokens to trigger summary for this profile's agent
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condensation_threshold: Option<usize>,
 }
 
 /// Features configuration
@@ -474,8 +510,8 @@ impl Default for AgentConfig {
         Self {
             max_iterations: 10,
             iteration_rate_limit: 0,
-            main_model: "gpt-4o".to_string(),
-            worker_model: "gpt-4o-mini".to_string(),
+            main_model: "default-model".to_string(),
+            worker_model: "default-worker-model".to_string(),
         }
     }
 }

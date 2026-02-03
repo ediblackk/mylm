@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::Style;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::cli::{Cli, Commands, MemoryCommand, ConfigCommand, EditCommand, hub::HubChoice, SessionCommand, DaemonCommand};
 use mylm_core::config::{Config, ConfigUiExt};
@@ -19,6 +19,13 @@ use std::process::Command;
 mod cli;
 mod terminal;
 mod server;
+
+/// Global background job registry
+pub static JOB_REGISTRY: OnceLock<mylm_core::agent::v2::jobs::JobRegistry> = OnceLock::new();
+
+pub fn get_job_registry() -> &'static mylm_core::agent::v2::jobs::JobRegistry {
+    JOB_REGISTRY.get_or_init(mylm_core::agent::v2::jobs::JobRegistry::new)
+}
 
 /// Main entry point for the AI assistant CLI
 #[tokio::main]
@@ -283,7 +290,7 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
         }
 
         Some(Commands::Jobs(_)) => {
-            println!("Not implemented");
+            crate::cli::jobs::handle_list_jobs(get_job_registry()).await?;
         }
 
         Some(Commands::Daemon(args)) => {
@@ -425,10 +432,8 @@ async fn handle_hub(config: &mut Config, formatter: &OutputFormatter, initial_co
             HubChoice::PopTerminal => {
                 let context = mylm_core::context::TerminalContext::collect().await;
                 let update_available = check_for_updates_fast();
-                match terminal::run_tui(None, None, Some(context), Some(initial_context.terminal.clone()), update_available, false).await? {
-                    terminal::TuiResult::ReturnToHub => continue,
-                    terminal::TuiResult::Exit => break,
-                }
+                let _ = terminal::run_tui(None, None, Some(context), Some(initial_context.terminal.clone()), update_available, false).await?;
+                continue;
             }
             HubChoice::PopTerminalMissing => {
                 println!("\n❌ {} is required for the 'Pop Terminal' feature.", Style::new().bold().apply_to("tmux"));
@@ -447,10 +452,8 @@ async fn handle_hub(config: &mut Config, formatter: &OutputFormatter, initial_co
                 match App::load_session(None).await {
                     Ok(session) => {
                         let update_available = check_for_updates_fast();
-                        match terminal::run_tui(Some(session), None, None, None, update_available, false).await? {
-                            terminal::TuiResult::ReturnToHub => continue,
-                            terminal::TuiResult::Exit => break,
-                        }
+                        let _ = terminal::run_tui(Some(session), None, None, None, update_available, false).await?;
+                        continue;
                     }
                     Err(e) => {
                         println!("❌ Failed to load session: {}", e);
@@ -459,17 +462,13 @@ async fn handle_hub(config: &mut Config, formatter: &OutputFormatter, initial_co
             }
             HubChoice::StartTui => {
                 let update_available = check_for_updates_fast();
-                match terminal::run_tui(None, None, None, None, update_available, false).await? {
-                    terminal::TuiResult::ReturnToHub => continue,
-                    terminal::TuiResult::Exit => break,
-                }
+                let _ = terminal::run_tui(None, None, None, None, update_available, false).await?;
+                continue;
             }
             HubChoice::StartIncognito => {
                 let update_available = check_for_updates_fast();
-                match terminal::run_tui(None, None, None, None, update_available, true).await? {
-                    terminal::TuiResult::ReturnToHub => continue,
-                    terminal::TuiResult::Exit => break,
-                }
+                let _ = terminal::run_tui(None, None, None, None, update_available, true).await?;
+                continue;
             }
             HubChoice::QuickQuery => {
                 let query = inquire::Text::new("⚡ Quick Query:").prompt()?;
@@ -479,7 +478,7 @@ async fn handle_hub(config: &mut Config, formatter: &OutputFormatter, initial_co
             }
 
             HubChoice::BackgroundJobs => {
-                crate::cli::jobs::handle_jobs_dashboard(config).await?;
+                crate::cli::jobs::handle_jobs_dashboard(config, get_job_registry()).await?;
             }
             HubChoice::Configuration => {
                 handle_settings_dashboard(config).await?;
@@ -502,10 +501,8 @@ async fn handle_hub(config: &mut Config, formatter: &OutputFormatter, initial_co
                     match App::load_session(Some(id)).await {
                         Ok(session) => {
                             let update_available = check_for_updates_fast();
-                            match terminal::run_tui(Some(session), None, None, None, update_available, false).await? {
-                                terminal::TuiResult::ReturnToHub => continue,
-                                terminal::TuiResult::Exit => break,
-                            }
+                            let _ = terminal::run_tui(Some(session), None, None, None, update_available, false).await?;
+                            continue;
                         }
                         Err(e) => println!("❌ Failed to load session: {}", e),
                     }
@@ -784,7 +781,7 @@ async fn handle_one_shot(
     let state_store = Arc::new(std::sync::RwLock::new(mylm_core::state::StateStore::new()?));
 
     // Load tools
-    let job_registry = mylm_core::agent::v2::jobs::JobRegistry::new();
+    let job_registry = get_job_registry().clone();
     let scribe = Arc::new(mylm_core::memory::scribe::Scribe::new(
         Arc::new(tokio::sync::Mutex::new(mylm_core::memory::journal::Journal::new().unwrap())),
         store.clone(),
@@ -805,6 +802,7 @@ async fn handle_one_shot(
         Arc::new(mylm_core::agent::tools::system::SystemMonitorTool::new()),
         Arc::new(mylm_core::agent::tools::terminal_sight::TerminalSightTool::new(event_tx.clone())),
         Arc::new(mylm_core::agent::tools::wait::WaitTool),
+        Arc::new(mylm_core::agent::tools::jobs::ListJobsTool::new(job_registry.clone())),
         Arc::new(mylm_core::agent::tools::delegate::DelegateTool::new(client.clone(), scribe, job_registry.clone(), Some(store.clone()), Some(Arc::new(mylm_core::memory::MemoryCategorizer::new(client.clone(), store.clone()))), None)),
     ];
 

@@ -105,6 +105,7 @@ impl SessionMonitor {
         self.stats.input_tokens = metadata.input_tokens;
         self.stats.output_tokens = metadata.output_tokens;
         self.stats.total_tokens = metadata.total_tokens;
+        self.stats.active_context_tokens = metadata.total_tokens;
         self.stats.cost = metadata.cost;
         self.stats.base_duration = Duration::from_secs(metadata.elapsed_seconds);
         self.stats.start_time = Instant::now();
