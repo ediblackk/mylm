@@ -29,6 +29,7 @@ pub struct AgentBuilder {
     memory_store: Option<Arc<crate::memory::store::VectorStore>>,
     categorizer: Option<Arc<crate::memory::MemoryCategorizer>>,
     job_registry: Option<crate::agent::v2::jobs::JobRegistry>,
+    permissions: Option<crate::config::v2::types::AgentPermissions>,
     disable_memory: bool,
 }
 
@@ -46,6 +47,7 @@ impl AgentBuilder {
             memory_store: None,
             categorizer: None,
             job_registry: None,
+            permissions: None,
             disable_memory: false,
         }
     }
@@ -91,7 +93,13 @@ impl AgentBuilder {
         self.job_registry = Some(registry);
         self
     }
-    
+
+    /// Set the permissions for this agent
+    pub fn with_permissions(mut self, permissions: Option<crate::config::v2::types::AgentPermissions>) -> Self {
+        self.permissions = permissions;
+        self
+    }
+
     /// Add a single tool to the registry
     pub fn with_tool(mut self, tool: Box<dyn crate::agent::tool::Tool>) -> Self {
         self.pending_tools.push(tool);
@@ -129,6 +137,7 @@ impl AgentBuilder {
                     self.categorizer,
                     self.job_registry, // JobRegistry
                     None, // capabilities_context
+                    self.permissions, // permissions from config
                     None, // scratchpad
                     self.disable_memory,
                 ))
@@ -145,6 +154,7 @@ impl AgentBuilder {
                     self.job_registry, // job_registry
                     None, // scratchpad
                     self.disable_memory,
+                    self.permissions, // permissions
                 ).await)
             }
         }

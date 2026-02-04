@@ -1,4 +1,5 @@
 pub mod app;
+pub mod agent_runner;
 pub mod pty;
 pub mod ui;
 pub mod session;
@@ -24,15 +25,31 @@ use mylm_core::context::TerminalContext;
 use anyhow::{Context, Result};
 use uuid::Uuid;
 use crossterm::{
-    event::{self, Event as CrosstermEvent, KeyCode, KeyModifiers, MouseEventKind, EnableBracketedPaste, DisableBracketedPaste, EnableMouseCapture, DisableMouseCapture},
+    event::{self, Event as CrosstermEvent, KeyCode, KeyModifiers, MouseEventKind, EnableBracketedPaste, EnableMouseCapture},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{enable_raw_mode, EnterAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::{io, time::Duration};
 use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc, Mutex};
 use std::sync::atomic::Ordering;
+
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        // Best-effort cleanup, suppress all errors
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::event::DisableBracketedPaste,
+            crossterm::event::DisableMouseCapture,
+            crossterm::cursor::Show
+        );
+    }
+}
 
 pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>, initial_query: Option<String>, initial_context: Option<TerminalContext>, initial_terminal_context: Option<mylm_core::context::terminal::TerminalContext>, update_available: bool, incognito: bool) -> Result<()> {
     // Setup terminal
@@ -41,6 +58,7 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
     execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    let _guard = TerminalGuard;
     let size = terminal.size()?;
 
     // Setup LLM Client (using resolved config with profile)
@@ -122,9 +140,14 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
     // Channel for events
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<TuiEvent>();
 
-    // Setup Tools - using Arc for shared ownership
-    let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
-    
+    // Set up status callback for LLM client to report retry messages to the UI
+    {
+        let event_tx = event_tx.clone();
+        llm_client.set_status_callback(std::sync::Arc::new(move |msg: &str| {
+            let _ = event_tx.send(TuiEvent::StatusUpdate(msg.to_string()));
+        }));
+    }
+
     // We need a job registry for the agent and tools
     let job_registry = crate::get_job_registry().clone();
 
@@ -133,32 +156,79 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
     let journal = Arc::new(Mutex::new(journal));
     let scribe = Arc::new(mylm_core::memory::scribe::Scribe::new(journal, store.clone(), llm_client.clone()));
 
-    let shell_tool = ShellTool::new(executor.clone(), context.clone(), event_tx.clone(), Some(store.clone()), categorizer.clone(), None, Some(job_registry.clone()));
-    let memory_tool = MemoryTool::new(store.clone());
-    let web_search_tool = WebSearchTool::new(config.features.web_search.clone(), event_tx.clone());
-    let crawl_tool = CrawlTool::new(event_tx.clone());
-    let state_tool = StateTool::new(state_store.clone());
-    let system_tool = SystemMonitorTool::new();
-    let delegate_tool = DelegateTool::new(llm_client.clone(), scribe.clone(), job_registry.clone(), Some(store.clone()), categorizer.clone(), None);
-    let wait_tool = WaitTool;
-    let terminal_sight_tool = TerminalSightTool::new(event_tx.clone());
-    let scratchpad_tool = ScratchpadTool::new(scratchpad.clone());
-    
-    tools.push(Arc::new(shell_tool));
-    tools.push(Arc::new(memory_tool));
-    tools.push(Arc::new(web_search_tool));
-    tools.push(Arc::new(crawl_tool));
-    tools.push(Arc::new(state_tool));
-    tools.push(Arc::new(system_tool));
-    tools.push(Arc::new(delegate_tool));
-    tools.push(Arc::new(wait_tool));
-    tools.push(Arc::new(terminal_sight_tool));
-    tools.push(Arc::new(scratchpad_tool));
-    tools.push(Arc::new(FileReadTool));
-    tools.push(Arc::new(FileWriteTool));
-    tools.push(Arc::new(GitStatusTool));
-    tools.push(Arc::new(GitLogTool));
-    tools.push(Arc::new(GitDiffTool));
+    // Create all tools as Arc<dyn Tool>
+    let resolved = config.resolve_profile();
+    let shell_tool: Arc<dyn Tool> = Arc::new(ShellTool::new(
+        executor.clone(),
+        context.clone(),
+        event_tx.clone(),
+        Some(store.clone()),
+        categorizer.clone(),
+        None,
+        Some(job_registry.clone()),
+        resolved.agent.permissions.clone(),
+    ));
+    let memory_tool: Arc<dyn Tool> = Arc::new(MemoryTool::new(store.clone()));
+    let web_search_tool: Arc<dyn Tool> = Arc::new(WebSearchTool::new(config.features.web_search.clone(), event_tx.clone()));
+    let crawl_tool: Arc<dyn Tool> = Arc::new(CrawlTool::new(event_tx.clone()));
+    let state_tool: Arc<dyn Tool> = Arc::new(StateTool::new(state_store.clone()));
+    let system_tool: Arc<dyn Tool> = Arc::new(SystemMonitorTool::new());
+    let wait_tool: Arc<dyn Tool> = Arc::new(WaitTool);
+    let terminal_sight_tool: Arc<dyn Tool> = Arc::new(TerminalSightTool::new(event_tx.clone()));
+    let scratchpad_tool: Arc<dyn Tool> = Arc::new(ScratchpadTool::new(scratchpad.clone()));
+    let file_read_tool: Arc<dyn Tool> = Arc::new(FileReadTool);
+    let file_write_tool: Arc<dyn Tool> = Arc::new(FileWriteTool);
+    let git_status_tool: Arc<dyn Tool> = Arc::new(GitStatusTool);
+    let git_log_tool: Arc<dyn Tool> = Arc::new(GitLogTool);
+    let git_diff_tool: Arc<dyn Tool> = Arc::new(GitDiffTool);
+
+    // Build tools HashMap for DelegateTool (must include all tools that can be delegated)
+    let mut tools_map = std::collections::HashMap::new();
+    tools_map.insert(shell_tool.name().to_string(), shell_tool.clone());
+    tools_map.insert(memory_tool.name().to_string(), memory_tool.clone());
+    tools_map.insert(web_search_tool.name().to_string(), web_search_tool.clone());
+    tools_map.insert(crawl_tool.name().to_string(), crawl_tool.clone());
+    tools_map.insert(state_tool.name().to_string(), state_tool.clone());
+    tools_map.insert(system_tool.name().to_string(), system_tool.clone());
+    tools_map.insert(wait_tool.name().to_string(), wait_tool.clone());
+    tools_map.insert(terminal_sight_tool.name().to_string(), terminal_sight_tool.clone());
+    tools_map.insert(scratchpad_tool.name().to_string(), scratchpad_tool.clone());
+    tools_map.insert(file_read_tool.name().to_string(), file_read_tool.clone());
+    tools_map.insert(file_write_tool.name().to_string(), file_write_tool.clone());
+    tools_map.insert(git_status_tool.name().to_string(), git_status_tool.clone());
+    tools_map.insert(git_log_tool.name().to_string(), git_log_tool.clone());
+    tools_map.insert(git_diff_tool.name().to_string(), git_diff_tool.clone());
+
+    // Create DelegateTool with access to all tools
+    let delegate_tool: Arc<dyn Tool> = Arc::new(DelegateTool::new(
+        llm_client.clone(),
+        scribe.clone(),
+        job_registry.clone(),
+        Some(store.clone()),
+        categorizer.clone(),
+        None,
+        tools_map,
+        None, // permissions - will inherit from agent
+    ));
+
+    // Collect all tools into vector
+    let tools = vec![
+        shell_tool,
+        memory_tool,
+        web_search_tool,
+        crawl_tool,
+        state_tool,
+        system_tool,
+        delegate_tool,
+        wait_tool,
+        terminal_sight_tool,
+        scratchpad_tool,
+        file_read_tool,
+        file_write_tool,
+        git_status_tool,
+        git_log_tool,
+        git_diff_tool,
+    ];
 
     // Create Agent
     // Get max_iterations from profile override or use default
@@ -177,6 +247,7 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
         Some(job_registry.clone()),
         Some(scratchpad.clone()),
         incognito,
+        resolved.agent.permissions.clone(),
     ).await;
     
     // Override the agent's scribe to use our incognito journal (if incognito)
@@ -323,15 +394,7 @@ pub async fn run_tui(initial_session: Option<crate::terminal::session::Session>,
     input_handle.abort();
     tick_handle.abort();
 
-    // Restore terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableBracketedPaste,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    // Restore terminal (handled by TerminalGuard)
 
     // Small delay to ensure terminal state is fully restored before Hub takes over
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -577,6 +640,14 @@ async fn run_loop(
                         
                         let llm_client = std::sync::Arc::new(llm_client);
                         
+                        // Set up status callback for the new LLM client
+                        {
+                            let event_tx = event_tx.clone();
+                            llm_client.set_status_callback(std::sync::Arc::new(move |msg: &str| {
+                                let _ = event_tx.send(TuiEvent::StatusUpdate(msg.to_string()));
+                            }));
+                        }
+                        
                         let prompt_name = "default"; // V2 doesn't have per-profile prompts
                         let context = TerminalContext::collect().await;
                         if let Ok(system_prompt) = build_system_prompt(&context, prompt_name, Some("TUI (Interactive Mode)"), None).await {
@@ -597,30 +668,70 @@ async fn run_loop(
                                 mylm_core::executor::safety::SafetyChecker::new(),
                             ));
 
-                            let shell_tool = ShellTool::new(updated_executor, context.clone(), event_tx.clone(), Some(store.clone()), categorizer.clone(), Some(agent_session_id), Some(job_registry.clone()));
-                            let memory_tool = MemoryTool::new(store.clone());
-                            let web_search_tool = WebSearchTool::new(new_config.features.web_search.clone(), event_tx.clone());
-                            let crawl_tool = CrawlTool::new(event_tx.clone());
-                            let state_tool = StateTool::new(state_store.clone());
-                            let system_tool = SystemMonitorTool::new();
-                            let delegate_tool = DelegateTool::new(llm_client.clone(), scribe.clone(), job_registry.clone(), Some(store.clone()), categorizer.clone(), None);
-                            let wait_tool = WaitTool;
-                            let terminal_sight_tool = TerminalSightTool::new(event_tx.clone());
+                            let shell_tool: Arc<dyn Tool> = Arc::new(ShellTool::new(
+                                updated_executor,
+                                context.clone(),
+                                event_tx.clone(),
+                                Some(store.clone()),
+                                categorizer.clone(),
+                                Some(agent_session_id),
+                                Some(job_registry.clone()),
+                                agent.permissions.clone(), // Pass agent's permissions
+                            ));
+                            let memory_tool: Arc<dyn Tool> = Arc::new(MemoryTool::new(store.clone()));
+                            let web_search_tool: Arc<dyn Tool> = Arc::new(WebSearchTool::new(new_config.features.web_search.clone(), event_tx.clone()));
+                            let crawl_tool: Arc<dyn Tool> = Arc::new(CrawlTool::new(event_tx.clone()));
+                            let state_tool: Arc<dyn Tool> = Arc::new(StateTool::new(state_store.clone()));
+                            let system_tool: Arc<dyn Tool> = Arc::new(SystemMonitorTool::new());
+                            let wait_tool: Arc<dyn Tool> = Arc::new(WaitTool);
+                            let terminal_sight_tool: Arc<dyn Tool> = Arc::new(TerminalSightTool::new(event_tx.clone()));
+                            let file_read_tool: Arc<dyn Tool> = Arc::new(FileReadTool);
+                            let file_write_tool: Arc<dyn Tool> = Arc::new(FileWriteTool);
+                            let git_status_tool: Arc<dyn Tool> = Arc::new(GitStatusTool);
+                            let git_log_tool: Arc<dyn Tool> = Arc::new(GitLogTool);
+                            let git_diff_tool: Arc<dyn Tool> = Arc::new(GitDiffTool);
                             
-                            tools.push(Arc::new(shell_tool));
-                            tools.push(Arc::new(memory_tool));
-                            tools.push(Arc::new(web_search_tool));
-                            tools.push(Arc::new(crawl_tool));
-                            tools.push(Arc::new(state_tool));
-                            tools.push(Arc::new(system_tool));
-                            tools.push(Arc::new(delegate_tool));
-                            tools.push(Arc::new(wait_tool));
-                            tools.push(Arc::new(terminal_sight_tool));
-                            tools.push(Arc::new(FileReadTool));
-                            tools.push(Arc::new(FileWriteTool));
-                            tools.push(Arc::new(GitStatusTool));
-                            tools.push(Arc::new(GitLogTool));
-                            tools.push(Arc::new(GitDiffTool));
+                            // Build tools HashMap for DelegateTool
+                            let mut tools_map = std::collections::HashMap::new();
+                            tools_map.insert(shell_tool.name().to_string(), shell_tool.clone());
+                            tools_map.insert(memory_tool.name().to_string(), memory_tool.clone());
+                            tools_map.insert(web_search_tool.name().to_string(), web_search_tool.clone());
+                            tools_map.insert(crawl_tool.name().to_string(), crawl_tool.clone());
+                            tools_map.insert(state_tool.name().to_string(), state_tool.clone());
+                            tools_map.insert(system_tool.name().to_string(), system_tool.clone());
+                            tools_map.insert(wait_tool.name().to_string(), wait_tool.clone());
+                            tools_map.insert(terminal_sight_tool.name().to_string(), terminal_sight_tool.clone());
+                            tools_map.insert(file_read_tool.name().to_string(), file_read_tool.clone());
+                            tools_map.insert(file_write_tool.name().to_string(), file_write_tool.clone());
+                            tools_map.insert(git_status_tool.name().to_string(), git_status_tool.clone());
+                            tools_map.insert(git_log_tool.name().to_string(), git_log_tool.clone());
+                            tools_map.insert(git_diff_tool.name().to_string(), git_diff_tool.clone());
+                            
+                            let delegate_tool: Arc<dyn Tool> = Arc::new(DelegateTool::new(
+                                llm_client.clone(),
+                                scribe.clone(),
+                                job_registry.clone(),
+                                Some(store.clone()),
+                                categorizer.clone(),
+                                None,
+                                tools_map,
+                                None, // permissions - will inherit from agent
+                            ));
+
+                            tools.push(shell_tool);
+                            tools.push(memory_tool);
+                            tools.push(web_search_tool);
+                            tools.push(crawl_tool);
+                            tools.push(state_tool);
+                            tools.push(system_tool);
+                            tools.push(delegate_tool);
+                            tools.push(wait_tool);
+                            tools.push(terminal_sight_tool);
+                            tools.push(file_read_tool);
+                            tools.push(file_write_tool);
+                            tools.push(git_status_tool);
+                            tools.push(git_log_tool);
+                            tools.push(git_diff_tool);
 
                             // Register tools in the new tool registry
                             for tool in tools {
@@ -749,6 +860,14 @@ async fn run_loop(
                             // Global Focus Toggle (F2) - Works everywhere
                             if key.code == KeyCode::F(2) {
                                 app.toggle_focus();
+                                let focus_name = match app.focus {
+                                    Focus::Terminal => "Terminal",
+                                    Focus::Chat => "Chat",
+                                    Focus::Jobs => "Jobs",
+                                };
+                                let _ = event_tx.send(TuiEvent::StatusUpdate(
+                                    format!("Focus: {} (F2 to cycle)", focus_name)
+                                ));
                                 continue;
                             }
 
@@ -787,10 +906,22 @@ async fn run_loop(
                                     if !jobs.is_empty() && app.selected_job_index.is_none() {
                                         app.selected_job_index = Some(0);
                                     }
+                                    // Set focus to Jobs panel when opened
+                                    app.focus = Focus::Jobs;
+                                    let _ = event_tx.send(TuiEvent::StatusUpdate(
+                                        "Jobs panel opened - use ↑↓ to select, c to cancel, F2 to change focus".to_string()
+                                    ));
                                 } else {
                                     // Clear selection when closing panel to prevent leaking
                                     app.selected_job_index = None;
                                     app.job_scroll = 0;
+                                    // Reset focus if it was on Jobs
+                                    if app.focus == Focus::Jobs {
+                                        app.focus = Focus::Chat;
+                                    }
+                                    let _ = event_tx.send(TuiEvent::StatusUpdate(
+                                        "Jobs panel closed".to_string()
+                                    ));
                                 }
                                 continue;
                             }
@@ -1000,7 +1131,7 @@ async fn run_loop(
                                                 app.submit_message(event_tx.clone()).await;
                                             }
                                             KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                                app.trigger_manual_condensation(event_tx.clone());
+                                                let _ = app.trigger_manual_condensation(event_tx.clone());
                                             }
                                             KeyCode::Char(c) => {
                                                 app.enter_char(c);
@@ -1117,6 +1248,76 @@ async fn run_loop(
                                         }
                                     }
                                 }
+                                Focus::Jobs => {
+                                    // Jobs panel navigation
+                                    if app.show_jobs_panel {
+                                        match key.code {
+                                            KeyCode::Esc | KeyCode::Char('q') => {
+                                                if app.show_job_detail {
+                                                    app.show_job_detail = false;
+                                                    app.job_scroll = 0;
+                                                } else {
+                                                    app.show_jobs_panel = false;
+                                                    app.selected_job_index = None;
+                                                    app.job_scroll = 0;
+                                                    app.focus = Focus::Chat;
+                                                }
+                                            }
+                                            KeyCode::Up => {
+                                                if app.show_job_detail {
+                                                    app.job_scroll = app.job_scroll.saturating_sub(1);
+                                                } else {
+                                                    let jobs = app.job_registry.list_active_jobs();
+                                                    if let Some(idx) = app.selected_job_index {
+                                                        app.selected_job_index = Some(idx.saturating_sub(1));
+                                                    } else if !jobs.is_empty() {
+                                                        app.selected_job_index = Some(0);
+                                                    }
+                                                }
+                                            }
+                                            KeyCode::Down => {
+                                                if app.show_job_detail {
+                                                    app.job_scroll = app.job_scroll.saturating_add(1);
+                                                } else {
+                                                    let jobs = app.job_registry.list_active_jobs();
+                                                    if let Some(idx) = app.selected_job_index {
+                                                        if idx + 1 < jobs.len() {
+                                                            app.selected_job_index = Some(idx + 1);
+                                                        }
+                                                    } else if !jobs.is_empty() {
+                                                        app.selected_job_index = Some(0);
+                                                    }
+                                                }
+                                            }
+                                            KeyCode::Enter => {
+                                                if !app.show_job_detail && app.selected_job_index.is_some() {
+                                                    app.show_job_detail = true;
+                                                    app.job_scroll = 0;
+                                                }
+                                            }
+                                            KeyCode::Char('c') => {
+                                                // Cancel selected job
+                                                if let Some(idx) = app.selected_job_index {
+                                                    let jobs = app.job_registry.list_active_jobs();
+                                                    if let Some(job) = jobs.get(idx) {
+                                                        let _ = event_tx.send(TuiEvent::StatusUpdate(
+                                                            format!("Cancelling job {}...", &job.id[..8.min(job.id.len())])
+                                                        ));
+                                                        app.job_registry.cancel_job(&job.id);
+                                                    }
+                                                }
+                                            }
+                                            KeyCode::Char('a') => {
+                                                // Cancel all jobs
+                                                let cancelled = app.job_registry.cancel_all_jobs();
+                                                let _ = event_tx.send(TuiEvent::StatusUpdate(
+                                                    format!("Cancelled {} job(s)", cancelled)
+                                                ));
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
                             }
                         }
                         CrosstermEvent::Resize(width, height) => {
@@ -1137,6 +1338,9 @@ async fn run_loop(
                                 Focus::Terminal => {
                                     app.handle_terminal_input(text.as_bytes());
                                 }
+                                Focus::Jobs => {
+                                    // Ignore paste in Jobs panel
+                                }
                             }
                         }
                         CrosstermEvent::Mouse(mouse_event) => {
@@ -1153,17 +1357,38 @@ async fn run_loop(
                                         // Clear any previous selection and start new one
                                         app.clear_selection();
                                         
-                                        // Determine which pane was clicked and set focus
-                                        // Terminal is on the left (when visible), Chat on the right
-                                        let terminal_width = (terminal.size().map(|s| s.width).unwrap_or(80) as f32 *
-                                            if app.show_terminal { 1.0 - (app.chat_width_percent as f32 / 100.0) } else { 0.0 }) as u16;
+                                        // Get terminal size to calculate layout
+                                        let term_size = terminal.size().unwrap_or(ratatui::prelude::Size { width: 80, height: 24 });
+                                        let job_panel_height = if app.show_jobs_panel { 6u16 } else { 0u16 };
+                                        let bottom_bar_height = 1u16;
                                         
-                                        if app.show_terminal && mouse_event.column < terminal_width {
-                                            app.focus = Focus::Terminal;
-                                            app.start_selection(mouse_event.column, mouse_event.row, Focus::Terminal);
+                                        // Check if click is in Jobs panel (bottom area)
+                                        let jobs_panel_top = term_size.height.saturating_sub(job_panel_height + bottom_bar_height);
+                                        
+                                        if app.show_jobs_panel && mouse_event.row >= jobs_panel_top {
+                                            app.focus = Focus::Jobs;
+                                            // Calculate which job was clicked (if any)
+                                            let job_row = mouse_event.row - jobs_panel_top - 1; // -1 for border
+                                            if job_row > 0 { // Skip header row
+                                                let jobs = app.job_registry.list_active_jobs();
+                                                let job_index = (job_row as usize).saturating_sub(1);
+                                                if job_index < jobs.len() {
+                                                    app.selected_job_index = Some(job_index);
+                                                }
+                                            }
                                         } else {
-                                            app.focus = Focus::Chat;
-                                            app.start_selection(mouse_event.column, mouse_event.row, Focus::Chat);
+                                            // Determine which pane was clicked and set focus
+                                            // Terminal is on the left (when visible), Chat on the right
+                                            let terminal_width = (term_size.width as f32 *
+                                                if app.show_terminal { 1.0 - (app.chat_width_percent as f32 / 100.0) } else { 0.0 }) as u16;
+                                            
+                                            if app.show_terminal && mouse_event.column < terminal_width {
+                                                app.focus = Focus::Terminal;
+                                                app.start_selection(mouse_event.column, mouse_event.row, Focus::Terminal);
+                                            } else {
+                                                app.focus = Focus::Chat;
+                                                app.start_selection(mouse_event.column, mouse_event.row, Focus::Chat);
+                                            }
                                         }
                                     }
                                 }
@@ -1188,12 +1413,38 @@ async fn run_loop(
                                     match app.focus {
                                         Focus::Terminal => app.scroll_terminal_up(),
                                         Focus::Chat => app.scroll_chat_up(),
+                                        Focus::Jobs => {
+                                            if app.show_job_detail {
+                                                app.job_scroll = app.job_scroll.saturating_sub(1);
+                                            } else {
+                                                let jobs = app.job_registry.list_active_jobs();
+                                                if let Some(idx) = app.selected_job_index {
+                                                    app.selected_job_index = Some(idx.saturating_sub(1));
+                                                } else if !jobs.is_empty() {
+                                                    app.selected_job_index = Some(0);
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 MouseEventKind::ScrollDown => {
                                     match app.focus {
                                         Focus::Terminal => app.scroll_terminal_down(),
                                         Focus::Chat => app.scroll_chat_down(),
+                                        Focus::Jobs => {
+                                            if app.show_job_detail {
+                                                app.job_scroll = app.job_scroll.saturating_add(1);
+                                            } else {
+                                                let jobs = app.job_registry.list_active_jobs();
+                                                if let Some(idx) = app.selected_job_index {
+                                                    if idx + 1 < jobs.len() {
+                                                        app.selected_job_index = Some(idx + 1);
+                                                    }
+                                                } else if !jobs.is_empty() {
+                                                    app.selected_job_index = Some(0);
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 _ => {}

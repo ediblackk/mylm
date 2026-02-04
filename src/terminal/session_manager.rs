@@ -61,7 +61,7 @@ impl SessionManager {
                             }
                             None => {
                                 // Channel closed, exit task
-                                eprintln!("[SessionManager] Save channel closed, exiting background task");
+                                mylm_core::debug_log!("[SessionManager] Save channel closed, exiting background task");
                                 break;
                             }
                         }
@@ -72,11 +72,11 @@ impl SessionManager {
                         if let Some(session) = pending_session.take() {
                             // Save session to disk atomically
                             if let Err(e) = Self::save_session_atomic(&sessions_dir_clone, &session).await {
-                                eprintln!("[SessionManager] Failed to save session {}: {}", session.id, e);
+                                mylm_core::error_log!("[SessionManager] Failed to save session {}: {}", session.id, e);
                             } else {
                                 // Update latest.json atomically
                                 if let Err(e) = Self::update_latest_atomic(&sessions_dir_clone, &session).await {
-                                    eprintln!("[SessionManager] Failed to update latest.json: {}", e);
+                                    mylm_core::error_log!("[SessionManager] Failed to update latest.json: {}", e);
                                 }
                             }
                         }
@@ -99,7 +99,7 @@ impl SessionManager {
     pub async fn save_session_async(&self, session: &Session) {
         let session_clone = session.clone();
         if let Err(e) = self.save_sender.send(session_clone).await {
-            eprintln!("[SessionManager] Failed to send session to background task: {}", e);
+            mylm_core::error_log!("[SessionManager] Failed to send session to background task: {}", e);
         }
     }
     
@@ -111,14 +111,14 @@ impl SessionManager {
         if let Ok(mut guard) = self.current_session.try_write() {
             *guard = Some(session.clone());
         } else {
-            eprintln!("[SessionManager] Failed to acquire write lock for current_session");
+            mylm_core::error_log!("[SessionManager] Failed to acquire write lock for current_session");
         }
         
         // Trigger immediate save (spawn a task to send async)
         let sender = self.save_sender.clone();
         tokio::spawn(async move {
             if let Err(e) = sender.send(session).await {
-                eprintln!("[SessionManager] Failed to send session in set_current_session: {}", e);
+                mylm_core::error_log!("[SessionManager] Failed to send session in set_current_session: {}", e);
             }
         });
     }
@@ -145,13 +145,13 @@ impl SessionManager {
                 match serde_json::from_str(&content) {
                     Ok(session) => Some(session),
                     Err(e) => {
-                        eprintln!("[SessionManager] Failed to deserialize latest.json: {}", e);
+                        mylm_core::error_log!("[SessionManager] Failed to deserialize latest.json: {}", e);
                         None
                     }
                 }
             }
             Err(e) => {
-                eprintln!("[SessionManager] Failed to read latest.json: {}", e);
+                mylm_core::error_log!("[SessionManager] Failed to read latest.json: {}", e);
                 None
             }
         }
@@ -168,7 +168,7 @@ impl SessionManager {
         let entries = match std::fs::read_dir(&sessions_dir) {
             Ok(entries) => entries,
             Err(e) => {
-                eprintln!("[SessionManager] Failed to read sessions directory: {}", e);
+                mylm_core::error_log!("[SessionManager] Failed to read sessions directory: {}", e);
                 return Vec::new();
             }
         };
@@ -193,12 +193,12 @@ impl SessionManager {
                             match serde_json::from_str(&content) {
                                 Ok(session) => sessions.push(session),
                                 Err(e) => {
-                                    eprintln!("[SessionManager] Failed to deserialize {}: {}", file_name, e);
+                                    mylm_core::error_log!("[SessionManager] Failed to deserialize {}: {}", file_name, e);
                                 }
                             }
                         }
                         Err(e) => {
-                            eprintln!("[SessionManager] Failed to read {}: {}", file_name, e);
+                            mylm_core::error_log!("[SessionManager] Failed to read {}: {}", file_name, e);
                         }
                     }
                 }

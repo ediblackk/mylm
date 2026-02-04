@@ -12,6 +12,7 @@ pub mod state;
 pub mod protocol;
 pub mod factory;
 pub mod util;
+pub mod rate_limiter;
 
 // Re-exports for convenience
 pub use agent::core::Agent;

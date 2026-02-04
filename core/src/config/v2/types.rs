@@ -85,3 +85,18 @@ pub enum ConfigError {
     #[error("Invalid profile: {0}")]
     InvalidProfile(String),
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AgentPermissions {
+    /// List of allowed tool names. If None or empty, all tools are allowed.
+    pub allowed_tools: Option<Vec<String>>,
+    /// List of command patterns (glob) that are auto-approved without confirmation.
+    /// Pattern format: "*" matches any characters, "?" matches single char.
+    /// Examples: ["ls *", "echo *", "pwd"]
+    pub auto_approve_commands: Option<Vec<String>>,
+    /// List of command patterns (glob) that are FORBIDDEN unless explicitly confirmed.
+    /// These take precedence over auto_approve.
+    /// Examples: ["rm -rf *", "dd if=", "mkfs *"]
+    pub forbidden_commands: Option<Vec<String>>,
+}

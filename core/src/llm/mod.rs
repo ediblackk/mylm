@@ -11,6 +11,11 @@ pub use client::{LlmClient, LlmProvider};
 pub use chat::ChatResponse;
 
 use anyhow::{Context, Result};
+use std::sync::Arc;
+
+/// Callback type for status updates from the LLM client
+/// Used to report retry attempts, rate limiting, etc. to the UI
+pub type StatusCallback = Arc<dyn Fn(&str) + Send + Sync>;
 use std::collections::HashMap;
 
 /// LLM Configuration

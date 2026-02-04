@@ -657,6 +657,20 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                                 }
                             }
                         }
+                        crate::cli::hub::AgentSettingsChoice::RateLimitSettings => {
+                            loop {
+                                let rl_action = crate::cli::hub::show_rate_limit_settings_menu(config)?;
+                                match rl_action {
+                                    crate::cli::hub::RateLimitSettingsChoice::SetMainRpm => {
+                                        crate::cli::hub::handle_set_main_rpm(config)?;
+                                    }
+                                    crate::cli::hub::RateLimitSettingsChoice::SetWorkersRpm => {
+                                        crate::cli::hub::handle_set_workers_rpm(config)?;
+                                    }
+                                    crate::cli::hub::RateLimitSettingsChoice::Back => break,
+                                }
+                            }
+                        }
                         crate::cli::hub::AgentSettingsChoice::ToggleTmuxAutostart => {
                             crate::cli::hub::handle_toggle_tmux_autostart(config)?;
                         }
@@ -671,6 +685,23 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                                         crate::cli::hub::handle_set_pacore_rounds(config)?;
                                     }
                                     crate::cli::hub::PaCoReSettingsChoice::Back => break,
+                                }
+                            }
+                        }
+                        crate::cli::hub::AgentSettingsChoice::PermissionsSettings => {
+                            loop {
+                                let perms_action = crate::cli::hub::show_permissions_menu(config)?;
+                                match perms_action {
+                                    crate::cli::hub::PermissionsMenuChoice::SetAllowedTools => {
+                                        crate::cli::hub::handle_set_allowed_tools(config)?;
+                                    }
+                                    crate::cli::hub::PermissionsMenuChoice::SetAutoApproveCommands => {
+                                        crate::cli::hub::handle_set_auto_approve_commands(config)?;
+                                    }
+                                    crate::cli::hub::PermissionsMenuChoice::SetForbiddenCommands => {
+                                        crate::cli::hub::handle_set_forbidden_commands(config)?;
+                                    }
+                                    crate::cli::hub::PermissionsMenuChoice::Back => break,
                                 }
                             }
                         }
@@ -788,22 +819,77 @@ async fn handle_one_shot(
         client.clone()
     ));
 
+    // Create all tools as Arc<dyn Tool>
+    let resolved = config.resolve_profile();
+    let shell_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::shell::ShellTool::new(
+        executor,
+        ctx.clone(),
+        event_tx.clone(),
+        Some(store.clone()),
+        Some(Arc::new(mylm_core::memory::MemoryCategorizer::new(client.clone(), store.clone()))),
+        None,
+        Some(job_registry.clone()),
+        resolved.agent.permissions.clone(),
+    ));
+    let web_search_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::web_search::WebSearchTool::new(config.features.web_search.clone(), event_tx.clone()));
+    let memory_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::memory::MemoryTool::new(store.clone()));
+    let crawl_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::crawl::CrawlTool::new(event_tx.clone()));
+    let file_read_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::fs::FileReadTool);
+    let file_write_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::fs::FileWriteTool);
+    let git_status_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::git::GitStatusTool);
+    let git_log_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::git::GitLogTool);
+    let git_diff_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::git::GitDiffTool);
+    let state_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::state::StateTool::new(state_store.clone()));
+    let system_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::system::SystemMonitorTool::new());
+    let terminal_sight_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::terminal_sight::TerminalSightTool::new(event_tx.clone()));
+    let wait_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::wait::WaitTool);
+    let list_jobs_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::jobs::ListJobsTool::new(job_registry.clone()));
+    
+    // Build tools HashMap for DelegateTool (must include all tools that can be delegated)
+    let mut tools_map = std::collections::HashMap::new();
+    tools_map.insert(shell_tool.name().to_string(), shell_tool.clone());
+    tools_map.insert(web_search_tool.name().to_string(), web_search_tool.clone());
+    tools_map.insert(memory_tool.name().to_string(), memory_tool.clone());
+    tools_map.insert(crawl_tool.name().to_string(), crawl_tool.clone());
+    tools_map.insert(file_read_tool.name().to_string(), file_read_tool.clone());
+    tools_map.insert(file_write_tool.name().to_string(), file_write_tool.clone());
+    tools_map.insert(git_status_tool.name().to_string(), git_status_tool.clone());
+    tools_map.insert(git_log_tool.name().to_string(), git_log_tool.clone());
+    tools_map.insert(git_diff_tool.name().to_string(), git_diff_tool.clone());
+    tools_map.insert(state_tool.name().to_string(), state_tool.clone());
+    tools_map.insert(system_tool.name().to_string(), system_tool.clone());
+    tools_map.insert(terminal_sight_tool.name().to_string(), terminal_sight_tool.clone());
+    tools_map.insert(wait_tool.name().to_string(), wait_tool.clone());
+    tools_map.insert(list_jobs_tool.name().to_string(), list_jobs_tool.clone());
+    
+    // Create DelegateTool with access to all tools
+    let delegate_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::delegate::DelegateTool::new(
+        client.clone(),
+        scribe,
+        job_registry.clone(),
+        Some(store.clone()),
+        Some(Arc::new(mylm_core::memory::MemoryCategorizer::new(client.clone(), store.clone()))),
+        None, // memory_store
+        tools_map,
+        None, // permissions - will inherit from agent
+    ));
+
     let tools: Vec<Arc<dyn mylm_core::agent::Tool>> = vec![
-        Arc::new(mylm_core::agent::tools::shell::ShellTool::new(executor, ctx.clone(), event_tx.clone(), Some(store.clone()), Some(Arc::new(mylm_core::memory::MemoryCategorizer::new(client.clone(), store.clone()))), None, Some(job_registry.clone()))),
-        Arc::new(mylm_core::agent::tools::web_search::WebSearchTool::new(config.features.web_search.clone(), event_tx.clone())),
-        Arc::new(mylm_core::agent::tools::memory::MemoryTool::new(store.clone())),
-        Arc::new(mylm_core::agent::tools::crawl::CrawlTool::new(event_tx.clone())),
-        Arc::new(mylm_core::agent::tools::fs::FileReadTool),
-        Arc::new(mylm_core::agent::tools::fs::FileWriteTool),
-        Arc::new(mylm_core::agent::tools::git::GitStatusTool),
-        Arc::new(mylm_core::agent::tools::git::GitLogTool),
-        Arc::new(mylm_core::agent::tools::git::GitDiffTool),
-        Arc::new(mylm_core::agent::tools::state::StateTool::new(state_store.clone())),
-        Arc::new(mylm_core::agent::tools::system::SystemMonitorTool::new()),
-        Arc::new(mylm_core::agent::tools::terminal_sight::TerminalSightTool::new(event_tx.clone())),
-        Arc::new(mylm_core::agent::tools::wait::WaitTool),
-        Arc::new(mylm_core::agent::tools::jobs::ListJobsTool::new(job_registry.clone())),
-        Arc::new(mylm_core::agent::tools::delegate::DelegateTool::new(client.clone(), scribe, job_registry.clone(), Some(store.clone()), Some(Arc::new(mylm_core::memory::MemoryCategorizer::new(client.clone(), store.clone()))), None)),
+        shell_tool,
+        web_search_tool,
+        memory_tool,
+        crawl_tool,
+        file_read_tool,
+        file_write_tool,
+        git_status_tool,
+        git_log_tool,
+        git_diff_tool,
+        state_tool,
+        system_tool,
+        delegate_tool,
+        terminal_sight_tool,
+        wait_tool,
+        list_jobs_tool,
     ];
 
     let max_iterations = config.get_active_profile_info()
@@ -822,6 +908,7 @@ async fn handle_one_shot(
         Some(job_registry),
         None, // scratchpad
         false, // disable_memory
+        resolved.agent.permissions.clone(),
     ).await;
     
     let messages = vec![

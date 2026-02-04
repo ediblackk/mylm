@@ -9,6 +9,7 @@ use std::error::Error as StdError;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Duration};
+use crate::config::v2::types::AgentPermissions;
 
 #[derive(Deserialize)]
 struct ShellArgs {
@@ -26,6 +27,7 @@ pub struct ShellTool {
     categorizer: Option<Arc<crate::memory::MemoryCategorizer>>,
     session_id: Option<String>,
     job_registry: Option<JobRegistry>,
+    permissions: Option<AgentPermissions>,
 }
 
 impl ShellTool {
@@ -38,6 +40,7 @@ impl ShellTool {
         categorizer: Option<Arc<crate::memory::MemoryCategorizer>>,
         session_id: Option<String>,
         job_registry: Option<JobRegistry>,
+        permissions: Option<AgentPermissions>,
     ) -> Self {
         Self {
             executor,
@@ -47,6 +50,7 @@ impl ShellTool {
             categorizer,
             session_id,
             job_registry,
+            permissions,
         }
     }
 }
@@ -102,7 +106,22 @@ impl Tool for ShellTool {
 
         let cmd = shell_args.command.trim();
 
-        // 1. Safety Check (performed by executor)
+        // 1. Permission Check (if agent has permissions configured)
+        if let Some(agent_permissions) = &self.permissions {
+            // Check forbidden commands first (highest priority)
+            if let Some(forbidden) = &agent_permissions.forbidden_commands {
+                for pattern in forbidden {
+                    if crate::agent::permissions::matches_pattern(cmd, pattern) {
+                        return Ok(ToolOutput::Immediate(serde_json::Value::String(
+                            format!("Error: Command '{}' is forbidden by pattern '{}'", cmd, pattern)
+                        )));
+                    }
+                }
+            }
+
+        }
+
+        // 2. Safety Check (performed by executor)
         if let Err(e) = self.executor.check_safety(cmd) {
             crate::error_log!("Safety check failed for command: {}. Error: {}", cmd, e);
             return Err(e.into());

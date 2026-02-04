@@ -331,7 +331,7 @@ impl ConfigManager {
             fs::write(&config_path, toml_string).await?;
             let metadata = fs::metadata(&config_path).await?;
             let modified = metadata.modified().ok();
-            eprintln!("Created default config at {:?}", config_path);
+            crate::info_log!("Created default config at {:?}", config_path);
             (config, modified)
         };
 
@@ -404,7 +404,7 @@ impl ConfigManager {
         let mut last_modified = self.last_modified.write().await;
         *last_modified = metadata.modified().ok();
 
-        eprintln!("Config reloaded successfully from {:?}", self.config_path);
+        crate::info_log!("Config reloaded successfully from {:?}", self.config_path);
         Ok(())
     }
 
@@ -508,13 +508,13 @@ impl ConfigManager {
 
                             if should_reload {
                                 if let Err(e) = manager.reload().await {
-                                    eprintln!("Config reload failed: {}", e);
+                                    crate::error_log!("Config reload failed: {}", e);
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        eprintln!("Failed to read config file metadata: {}", e);
+                        crate::error_log!("Failed to read config file metadata: {}", e);
                     }
                 }
             }

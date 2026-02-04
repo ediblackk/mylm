@@ -1091,10 +1091,20 @@ fn render_jobs_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     // Get all jobs from the registry (including completed and failed)
     let jobs = app.job_registry.list_all_jobs();
 
+    // Show different title when focused
+    let title = if app.focus == Focus::Jobs {
+        format!(" Background Jobs [{} active] | ↑↓:select | c:cancel | a:cancel-all | Enter:details | Esc:close ", 
+            jobs.iter().filter(|j| matches!(j.status, JobStatus::Running)).count())
+    } else {
+        " Background Jobs [NOT FOCUSED - Press F2 to focus, F4 to close] ".to_string()
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Background Jobs (F4: toggle, ↑↓: navigate, Enter: details, q/Esc: close) ")
-        .border_style(if !jobs.is_empty() {
+        .title(title)
+        .border_style(if app.focus == Focus::Jobs {
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        } else if !jobs.is_empty() {
             Style::default().fg(Color::Cyan)
         } else {
             Style::default().fg(Color::DarkGray)
@@ -1115,11 +1125,13 @@ fn render_jobs_panel(frame: &mut Frame, app: &mut App, area: Rect) {
             JobStatus::Running => "● Running",
             JobStatus::Completed => "✓ Done",
             JobStatus::Failed => "✗ Failed",
+            JobStatus::Cancelled => "⊘ Cancelled",
         };
         let status_color = match job.status {
             JobStatus::Running => Color::Yellow,
             JobStatus::Completed => Color::Green,
             JobStatus::Failed => Color::Red,
+            JobStatus::Cancelled => Color::Magenta,
         };
 
         // Truncate description to fit (accounting for status text)
@@ -1186,6 +1198,7 @@ fn render_job_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                 JobStatus::Running => ("Running", Color::Yellow),
                 JobStatus::Completed => ("Completed", Color::Green),
                 JobStatus::Failed => ("Failed", Color::Red),
+                JobStatus::Cancelled => ("Cancelled", Color::Magenta),
             };
             lines.push(Line::from(vec![
                 Span::styled("Status: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
@@ -1205,6 +1218,34 @@ fn render_job_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                     Span::raw(finished.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
                 ]));
             }
+
+            // Last activity
+            lines.push(Line::from(vec![
+                Span::styled("Last Activity: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(job.last_activity.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+            ]));
+
+            lines.push(Line::from(""));
+
+            // Metrics
+            let metrics = &job.metrics;
+            lines.push(Line::from(vec![
+                Span::styled("Metrics:", Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::raw(format!("  Tokens: {} prompt / {} completion / {} total", 
+                    metrics.prompt_tokens, metrics.completion_tokens, metrics.total_tokens)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::raw(format!("  Requests: {} | Errors: {} | Rate Limits: {}", 
+                    metrics.request_count, metrics.error_count, metrics.rate_limit_hits)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::raw(format!("  Context Window: {} tokens", metrics.context_tokens)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::raw(format!("  Worker Job: {}", if job.is_worker { "Yes" } else { "No" })),
+            ]));
 
             lines.push(Line::from(""));
 
@@ -1248,6 +1289,30 @@ fn render_job_detail(frame: &mut Frame, app: &mut App, area: Rect) {
                 let result_lines: Vec<String> = result_str.lines().map(|s| s.to_string()).collect();
                 for line in result_lines {
                     lines.push(Line::from(Span::styled(line, Style::default().fg(Color::Green))));
+                }
+            }
+
+            // Action Log
+            if !job.action_log.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("Action Log:", Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED)),
+                ]));
+                for entry in &job.action_log {
+                    let icon = match entry.action_type {
+                        mylm_core::agent::v2::jobs::ActionType::Thought => "💭",
+                        mylm_core::agent::v2::jobs::ActionType::ToolCall => "🔧",
+                        mylm_core::agent::v2::jobs::ActionType::ToolResult => "📤",
+                        mylm_core::agent::v2::jobs::ActionType::Error => "❌",
+                        mylm_core::agent::v2::jobs::ActionType::FinalAnswer => "✓",
+                        mylm_core::agent::v2::jobs::ActionType::System => "⚙",
+                    };
+                    let timestamp = entry.timestamp.format("%H:%M:%S");
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("[{}] ", timestamp), Style::default().fg(Color::DarkGray)),
+                        Span::raw(format!("{} ", icon)),
+                        Span::raw(&entry.content),
+                    ]));
                 }
             }
 

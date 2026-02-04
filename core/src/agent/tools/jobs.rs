@@ -44,6 +44,7 @@ impl Tool for ListJobsTool {
                     JobStatus::Running => "⏳",
                     JobStatus::Completed => "✅",
                     JobStatus::Failed => "❌",
+                    JobStatus::Cancelled => "🛑",
                 };
                 
                 let duration = if let Some(end) = job.finished_at {

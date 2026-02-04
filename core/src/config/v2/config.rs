@@ -4,7 +4,7 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::types::{Provider, SearchProvider, ConfigError};
+use super::types::{Provider, SearchProvider, ConfigError, AgentPermissions};
 
 /// Root configuration structure for mylm v2
 ///
@@ -273,6 +273,23 @@ pub struct AgentOverride {
     /// Tokens to trigger summary for this profile's agent
     #[serde(skip_serializing_if = "Option::is_none")]
     pub condensation_threshold: Option<usize>,
+
+    /// Permission controls for this agent profile
+    pub permissions: Option<AgentPermissions>,
+
+    /// Rate limit for main agent (requests per minute)
+    ///
+    /// - 0: No limit (default)
+    /// - Lower values: Slower requests, prevents rate limiting
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub main_rpm: Option<u32>,
+
+    /// Rate limit for workers (shared pool, requests per minute)
+    ///
+    /// - 0: Uses default (30)
+    /// - Lower values: Slower worker execution, prevents spamming provider
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workers_rpm: Option<u32>,
 }
 
 /// Features configuration
@@ -503,6 +520,14 @@ pub struct AgentConfig {
     pub main_model: String,
     /// Model for worker/sub-tasks
     pub worker_model: String,
+
+    /// Permission controls for this agent
+    pub permissions: Option<AgentPermissions>,
+
+    /// Rate limit for main agent (requests per minute)
+    pub main_rpm: u32,
+    /// Rate limit for workers (shared pool, requests per minute)
+    pub workers_rpm: u32,
 }
 
 impl Default for AgentConfig {
@@ -512,6 +537,9 @@ impl Default for AgentConfig {
             iteration_rate_limit: 0,
             main_model: "default-model".to_string(),
             worker_model: "default-worker-model".to_string(),
+            permissions: None,
+            main_rpm: 0,      // 0 = no limit
+            workers_rpm: 30,  // Default: 0.5 req/sec shared for workers
         }
     }
 }
@@ -749,6 +777,12 @@ impl ConfigV2 {
                     agent_config.worker_model = worker.clone();
                 } else if agent_override.main_model.is_none() {
                     agent_config.worker_model = model.clone();
+                }
+                if let Some(main_rpm) = agent_override.main_rpm {
+                    agent_config.main_rpm = main_rpm;
+                }
+                if let Some(workers_rpm) = agent_override.workers_rpm {
+                    agent_config.workers_rpm = workers_rpm;
                 }
             } else {
                 // No agent override, use endpoint model for both

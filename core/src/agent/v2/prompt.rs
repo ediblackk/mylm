@@ -28,6 +28,62 @@ impl PromptBuilder {
         }
     }
 
+    /// Format a capabilities description for a list of tools.
+    /// This is used by the delegate tool to provide tool awareness to sub-agents.
+    pub fn format_capabilities_for_tools(tools: &[Arc<dyn Tool>]) -> String {
+        use crate::agent::tool::ToolKind;
+        
+        let mut sections = Vec::new();
+        
+        // Group tools by kind
+        let mut internal_tools = Vec::new();
+        let mut terminal_tools = Vec::new();
+        let mut web_tools = Vec::new();
+        
+        for tool in tools {
+            match tool.kind() {
+                ToolKind::Internal => internal_tools.push(tool),
+                ToolKind::Terminal => terminal_tools.push(tool),
+                ToolKind::Web => web_tools.push(tool),
+            }
+        }
+        
+        // Build description sections
+        if !internal_tools.is_empty() {
+            sections.push("## Internal Tools".to_string());
+            for tool in &internal_tools {
+                sections.push(format!("- `{}`: {}", tool.name(), tool.description()));
+            }
+        }
+        
+        if !terminal_tools.is_empty() {
+            sections.push("## Terminal & File Tools".to_string());
+            for tool in &terminal_tools {
+                sections.push(format!("- `{}`: {}", tool.name(), tool.description()));
+            }
+        }
+        
+        if !web_tools.is_empty() {
+            sections.push("## Web & Search Tools".to_string());
+            for tool in &web_tools {
+                sections.push(format!("- `{}`: {}", tool.name(), tool.description()));
+            }
+        }
+        
+        // Add tool usage details
+        sections.push("\n## Tool Usage Details".to_string());
+        for tool in tools {
+            sections.push(format!(
+                "- `{}`: {}\n  Usage: {}",
+                tool.name(),
+                tool.description(),
+                tool.usage()
+            ));
+        }
+        
+        sections.join("\n")
+    }
+
     /// Generate the system prompt with available tools and Short-Key JSON instructions.
     pub fn build(&self, scratchpad_content: &str) -> String {
         let tools_desc = self.format_tools_description();

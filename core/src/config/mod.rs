@@ -253,6 +253,12 @@ pub trait ConfigUiExt {
     /// Set profile iteration_rate_limit override
     fn set_profile_iteration_rate_limit(&mut self, profile_name: &str, rate_limit: Option<u64>) -> anyhow::Result<()>;
     
+    /// Set profile main_rpm override (requests per minute for main agent)
+    fn set_profile_main_rpm(&mut self, profile_name: &str, rpm: Option<u32>) -> anyhow::Result<()>;
+    
+    /// Set profile workers_rpm override (requests per minute for workers, shared pool)
+    fn set_profile_workers_rpm(&mut self, profile_name: &str, rpm: Option<u32>) -> anyhow::Result<()>;
+    
     /// Check if configuration is initialized (has valid endpoint)
     fn is_initialized(&self) -> bool;
     
@@ -388,25 +394,47 @@ impl ConfigUiExt for ConfigV2 {
             .ok_or_else(|| anyhow::anyhow!("Profile '{}' does not exist", profile_name))?;
         
         if let Some(ms) = rate_limit {
-            profile.agent = Some(AgentOverride {
-                iteration_rate_limit: Some(ms),
-                ..profile.agent.clone().unwrap_or_default()
-            });
+            let mut agent = profile.agent.clone().unwrap_or_default();
+            agent.iteration_rate_limit = Some(ms);
+            profile.agent = Some(agent);
         } else {
             // Remove rate limit override but keep other agent settings
-            let max_iterations = profile.agent.as_ref().and_then(|a| a.max_iterations);
-            let main_model = profile.agent.as_ref().and_then(|a| a.main_model.clone());
-            let worker_model = profile.agent.as_ref().and_then(|a| a.worker_model.clone());
-            if max_iterations.is_some() || main_model.is_some() || worker_model.is_some() {
-                profile.agent = Some(AgentOverride {
-                    max_iterations,
-                    iteration_rate_limit: None,
-                    main_model,
-                    worker_model,
-                    ..Default::default()
-                });
-            } else {
-                profile.agent = None;
+            if let Some(ref mut agent) = profile.agent {
+                agent.iteration_rate_limit = None;
+            }
+        }
+        Ok(())
+    }
+    
+    fn set_profile_main_rpm(&mut self, profile_name: &str, rpm: Option<u32>) -> anyhow::Result<()> {
+        let profile = self.profiles.get_mut(profile_name)
+            .ok_or_else(|| anyhow::anyhow!("Profile '{}' does not exist", profile_name))?;
+        
+        if let Some(r) = rpm {
+            let mut agent = profile.agent.clone().unwrap_or_default();
+            agent.main_rpm = Some(r);
+            profile.agent = Some(agent);
+        } else {
+            // Remove main_rpm override but keep other agent settings
+            if let Some(ref mut agent) = profile.agent {
+                agent.main_rpm = None;
+            }
+        }
+        Ok(())
+    }
+    
+    fn set_profile_workers_rpm(&mut self, profile_name: &str, rpm: Option<u32>) -> anyhow::Result<()> {
+        let profile = self.profiles.get_mut(profile_name)
+            .ok_or_else(|| anyhow::anyhow!("Profile '{}' does not exist", profile_name))?;
+        
+        if let Some(r) = rpm {
+            let mut agent = profile.agent.clone().unwrap_or_default();
+            agent.workers_rpm = Some(r);
+            profile.agent = Some(agent);
+        } else {
+            // Remove workers_rpm override but keep other agent settings
+            if let Some(ref mut agent) = profile.agent {
+                agent.workers_rpm = None;
             }
         }
         Ok(())

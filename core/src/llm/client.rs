@@ -10,6 +10,7 @@ use super::{
 };
 use super::super::util::{sanitize_base_url, validate_api_key};
 use super::super::config::ConfigManager;
+use super::super::rate_limiter::RateLimiter;
 use anyhow::{bail, Context, Result};
 use futures::{Stream, StreamExt};
 use reqwest::{
@@ -18,7 +19,7 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use rand::Rng;
 use tokio::time::{sleep, Duration};
 
@@ -61,6 +62,17 @@ pub struct LlmClient {
     config: LlmConfig,
     http_client: HttpClient,
     config_manager: Option<Arc<ConfigManager>>,
+    /// Optional callback for status updates (e.g., retry messages)
+    /// Uses Mutex to allow setting after Arc wrapping
+    status_callback: Mutex<Option<crate::llm::StatusCallback>>,
+    /// Rate limiter for this client
+    rate_limiter: Option<Arc<RateLimiter>>,
+    /// Whether this is a worker client (uses worker rate limits)
+    is_worker: bool,
+    /// Optional job ID for tracking metrics
+    job_id: Mutex<Option<String>>,
+    /// Cancellation token for aborting retries
+    cancel_token: Mutex<Option<tokio_util::sync::CancellationToken>>,
 }
 
 impl LlmClient {
@@ -76,6 +88,11 @@ impl LlmClient {
             config,
             http_client,
             config_manager: None,
+            status_callback: Mutex::new(None),
+            rate_limiter: None,
+            is_worker: false,
+            job_id: Mutex::new(None),
+            cancel_token: Mutex::new(None),
         })
     }
 
@@ -85,14 +102,97 @@ impl LlmClient {
         self
     }
 
-    /// Check rate limit before making a request
-    async fn check_rate_limit(&self, estimated_tokens: usize) -> Result<()> {
+    /// Set a status callback for reporting retry attempts and other status updates
+    pub fn with_status_callback(self, callback: crate::llm::StatusCallback) -> Self {
+        *self.status_callback.lock().unwrap() = Some(callback);
+        self
+    }
+
+    /// Set a status callback after the client has been created (for use with Arc<LlmClient>)
+    pub fn set_status_callback(&self, callback: crate::llm::StatusCallback) {
+        *self.status_callback.lock().unwrap() = Some(callback);
+    }
+
+    /// Set the rate limiter for this client
+    pub fn with_rate_limiter(mut self, rate_limiter: Arc<RateLimiter>) -> Self {
+        self.rate_limiter = Some(rate_limiter);
+        self
+    }
+
+    /// Set whether this is a worker client
+    pub fn set_worker(mut self, is_worker: bool) -> Self {
+        self.is_worker = is_worker;
+        self
+    }
+
+    /// Set the job ID for tracking metrics
+    pub fn set_job_id(&self, job_id: Option<String>) {
+        *self.job_id.lock().unwrap() = job_id;
+    }
+
+    /// Set the cancellation token for this client
+    pub fn set_cancel_token(&self, token: tokio_util::sync::CancellationToken) {
+        *self.cancel_token.lock().unwrap() = Some(token);
+    }
+
+    /// Check if the operation has been cancelled
+    fn is_cancelled(&self) -> bool {
+        if let Ok(guard) = self.cancel_token.lock() {
+            if let Some(token) = guard.as_ref() {
+                return token.is_cancelled();
+            }
+        }
+        false
+    }
+
+    /// Report a status update through the callback if one is set
+    fn report_status(&self, message: &str) {
+        if let Ok(guard) = self.status_callback.lock() {
+            if let Some(callback) = guard.as_ref() {
+                callback(message);
+            }
+        }
+    }
+
+    /// Check rate limit before making a request (legacy config manager method)
+    async fn check_rate_limit_legacy(&self, estimated_tokens: usize) -> Result<()> {
         if let Some(cm) = &self.config_manager {
             if let Err(e) = cm.check_rate_limit(estimated_tokens).await {
                 bail!("Rate limit exceeded: retry after {:?}", e.retry_after);
             }
         }
         Ok(())
+    }
+
+    /// Check rate limit using the new rate limiter
+    async fn check_rate_limit(&self, estimated_tokens: usize) -> Result<()> {
+        // First check legacy rate limit
+        self.check_rate_limit_legacy(estimated_tokens).await?;
+
+        // Then check new rate limiter if available
+        if let Some(ref limiter) = self.rate_limiter {
+            let base_url = &self.config.base_url;
+            match limiter.acquire(base_url, self.is_worker, estimated_tokens as u32).await {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    bail!("Rate limit exceeded: {}", e);
+                }
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Update job metrics after a successful request
+    fn update_job_metrics(&self, prompt_tokens: u32, completion_tokens: u32, _context_tokens: usize) {
+        if let Ok(guard) = self.job_id.lock() {
+            if let Some(ref job_id) = *guard {
+                // This will be populated when we integrate with job registry
+                // For now, we just log it
+                crate::info_log!("Job {}: tokens used - prompt: {}, completion: {}", 
+                    job_id, prompt_tokens, completion_tokens);
+            }
+        }
     }
 
     /// Send a chat request and get a response
@@ -105,10 +205,19 @@ impl LlmClient {
         // Check rate limit before making request
         self.check_rate_limit(estimated_input_tokens).await?;
 
-        match self.config.provider {
+        let result = match self.config.provider {
             LlmProvider::OpenAiCompatible | LlmProvider::MoonshotKimi => self.chat_openai(request).await,
             LlmProvider::GoogleGenerativeAi => self.chat_gemini(request).await,
+        };
+
+        // Update metrics on success
+        if let Ok(ref response) = result {
+            if let Some(ref usage) = response.usage {
+                self.update_job_metrics(usage.prompt_tokens, usage.completion_tokens, estimated_input_tokens);
+            }
         }
+
+        result
     }
 
     /// Helper for main.rs and others
@@ -129,7 +238,7 @@ impl LlmClient {
         }
     }
 
-    /// Helper with jittered backoff retry
+    /// Helper with jittered backoff retry, respecting Retry-After headers and cancellation
     async fn retry_with_backoff<F, Fut>(
         &self,
         operation: F,
@@ -143,6 +252,11 @@ impl LlmClient {
         let mut delay = Duration::from_secs(3);
 
         loop {
+            // Check for cancellation before making request
+            if self.is_cancelled() {
+                bail!("Request cancelled by user");
+            }
+
             match operation().await {
                 Ok(response) => {
                     let status = response.status();
@@ -150,8 +264,49 @@ impl LlmClient {
                         return Ok(response);
                     }
                     
-                    if (status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS) && attempt < max_retries {
-                        eprintln!("Provider error {}, retrying in {:?}...", status, delay);
+                    // Handle 429 Rate Limit
+                    if status == StatusCode::TOO_MANY_REQUESTS {
+                        // Extract Retry-After header
+                        let retry_after = response.headers()
+                            .get("retry-after")
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .map(Duration::from_secs);
+                        
+                        // Record rate limit error
+                        if let Some(ref limiter) = self.rate_limiter {
+                            limiter.record_rate_limit_error(&self.config.base_url, retry_after);
+                        }
+
+                        if attempt >= max_retries {
+                            return Ok(response);
+                        }
+
+                        // Use Retry-After if available, otherwise use exponential backoff
+                        let wait_duration = retry_after.unwrap_or(delay);
+                        let msg = format!("Rate limited (429), waiting {:?} before retry...", wait_duration);
+                        self.report_status(&msg);
+
+                        // Check cancellation during wait
+                        let token_opt = self.cancel_token.lock().unwrap().clone();
+                        if let Some(token) = token_opt {
+                            tokio::select! {
+                                _ = sleep(wait_duration) => {},
+                                _ = token.cancelled() => {
+                                    bail!("Request cancelled by user during rate limit wait");
+                                }
+                            }
+                        } else {
+                            sleep(wait_duration).await;
+                        }
+                        delay *= 2;
+                        attempt += 1;
+                        continue;
+                    }
+                    
+                    if status.is_server_error() && attempt < max_retries {
+                        let msg = format!("Provider error {}, retrying in {:?}...", status, delay);
+                        self.report_status(&msg);
                     } else {
                         return Ok(response);
                     }
@@ -160,18 +315,30 @@ impl LlmClient {
                     if attempt >= max_retries {
                         return Err(e.into());
                     }
-                    eprintln!("Network error, retrying in {:?}...", delay);
+                    let msg = format!("Network error, retrying in {:?}...", delay);
+                    self.report_status(&msg);
                 }
             }
 
             attempt += 1;
             
+            // Check cancellation before sleep
+            let token_opt = self.cancel_token.lock().unwrap().clone();
+            if let Some(token) = token_opt {
+                tokio::select! {
+                    _ = sleep(delay) => {},
+                    _ = token.cancelled() => {
+                        bail!("Request cancelled by user");
+                    }
+                }
+            } else {
+                sleep(delay).await;
+            }
+            
             // Jitter: +/- 500ms
             let jitter_ms = rand::thread_rng().gen_range(-500..=500);
             let delay_ms = (delay.as_millis() as i64 + jitter_ms).max(0) as u64;
-            
-            sleep(Duration::from_millis(delay_ms)).await;
-            delay *= 2;
+            delay = Duration::from_millis(delay_ms);
         }
     }
 

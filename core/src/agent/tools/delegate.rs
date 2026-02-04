@@ -1,14 +1,18 @@
 use crate::agent::tool::{Tool, ToolOutput, ToolKind};
 use crate::agent::v2::core::AgentV2;
 use crate::agent::v2::jobs::JobRegistry;
+use crate::agent::v2::prompt::PromptBuilder;
 use crate::llm::LlmClient;
 use crate::memory::{MemoryCategorizer, scribe::Scribe};
 use crate::config::ConfigManager;
+use crate::rate_limiter::RateLimiter;
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use crate::config::v2::types::AgentPermissions;
 
 #[derive(Deserialize)]
 struct DelegateArgs {
@@ -35,6 +39,10 @@ pub struct DelegateTool {
     categorizer: Option<Arc<MemoryCategorizer>>,
     event_tx: Option<mpsc::UnboundedSender<crate::agent::event::RuntimeEvent>>,
     config_manager: Option<Arc<ConfigManager>>,
+    tools: HashMap<String, Arc<dyn Tool>>,
+    permissions: Option<AgentPermissions>,
+    /// Shared rate limiter for worker agents
+    rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 impl DelegateTool {
@@ -46,6 +54,8 @@ impl DelegateTool {
         memory_store: Option<Arc<crate::memory::store::VectorStore>>,
         categorizer: Option<Arc<MemoryCategorizer>>,
         event_tx: Option<mpsc::UnboundedSender<crate::agent::event::RuntimeEvent>>,
+        tools: HashMap<String, Arc<dyn Tool>>,
+        permissions: Option<AgentPermissions>,
     ) -> Self {
         Self {
             llm_client,
@@ -55,12 +65,21 @@ impl DelegateTool {
             categorizer,
             event_tx,
             config_manager: None,
+            tools,
+            permissions,
+            rate_limiter: None,
         }
     }
 
     /// Set the config manager for worker limit checking
     pub fn with_config_manager(mut self, config_manager: Arc<ConfigManager>) -> Self {
         self.config_manager = Some(config_manager);
+        self
+    }
+
+    /// Set the rate limiter for worker agents
+    pub fn with_rate_limiter(mut self, rate_limiter: Arc<RateLimiter>) -> Self {
+        self.rate_limiter = Some(rate_limiter);
         self
     }
 
@@ -171,8 +190,8 @@ impl Tool for DelegateTool {
 
         crate::info_log!("Delegating task: {} with context: {}", objective, context);
 
-        // Create a job ID for tracking this delegation
-        let job_id = self.job_registry.create_job("delegate", &format!("Delegating: {}", objective));
+        // Create a job ID for tracking this delegation (mark as worker job)
+        let job_id = self.job_registry.create_job_with_options("delegate", &format!("Delegating: {}", objective), true);
         let job_id_clone = job_id.clone();
         let job_registry = self.job_registry.clone();
         
@@ -183,14 +202,56 @@ impl Tool for DelegateTool {
         let categorizer = self.categorizer.clone();
         let event_tx = self.event_tx.clone();
         let objective_clone = objective.clone();
+        
+        // Clone tools, permissions and rate limiter for the sub-agent
+        let parent_tools = self.tools.clone();
+        let parent_permissions = self.permissions.clone();
+        let rate_limiter = self.rate_limiter.clone();
+        
+        // Get cancellation token early so it can be passed to the client
+        let cancel_token = job_registry.get_cancellation_token(&job_id_clone);
 
         // Spawn the sub-agent in a background task
         tokio::spawn(async move {
             crate::info_log!("Starting background sub-agent for task: {}", objective_clone);
+
+            // Filter parent tools based on delegate_args.tools if provided
+            // This must be done BEFORE building the system prompt
+            let mut sub_tools: Vec<Arc<dyn Tool>> = Vec::new();
+            if let Some(requested_tools) = &delegate_args.tools {
+                for tool_name in requested_tools {
+                    if let Some(tool) = parent_tools.get(tool_name) {
+                        sub_tools.push(tool.clone());
+                    } else {
+                        crate::info_log!("Requested tool '{}' not found in parent agent's tools", tool_name);
+                    }
+                }
+            } else {
+                // No filter specified, pass all parent tools
+                for tool in parent_tools.values() {
+                    sub_tools.push(tool.clone());
+                }
+            }
+            
+            // Build capabilities context from the filtered tools
+            let capabilities_context = PromptBuilder::format_capabilities_for_tools(&sub_tools);
             
             // Prepare sub-agent configuration with custom or default values
             let system_prompt = delegate_args.system_prompt.unwrap_or_else(|| {
-                format!("You are a specialized worker agent. Your objective is: {}", objective_clone)
+                format!(
+                    r#"You are a specialized Worker Agent. Your objective is: {}
+
+## CRITICAL INSTRUCTIONS
+1. You MUST use the available tools to complete your task. DO NOT just describe what you would do.
+2. You MUST respond using the Short-Key JSON protocol format.
+3. Use tools by returning JSON: {{"t": "your thought", "a": "tool_name", "i": "arguments"}}
+4. When complete, return: {{"f": "your final answer"}}
+5. DO NOT ask clarifying questions. DO NOT explain your approach. JUST EXECUTE.
+
+{}"#,
+                    objective_clone,
+                    capabilities_context
+                )
             });
             let max_iterations = delegate_args.max_iterations.unwrap_or(50);
             let requested_model = delegate_args.model;
@@ -200,7 +261,15 @@ impl Tool for DelegateTool {
                 let mut config = llm_client.config().clone();
                 config.model = model_name.clone();
                 match LlmClient::new(config) {
-                    Ok(c) => Arc::new(c),
+                    Ok(c) => {
+                        let c = c.set_worker(true);
+                        let c = if let Some(ref rl) = rate_limiter {
+                            c.with_rate_limiter(rl.clone())
+                        } else {
+                            c
+                        };
+                        Arc::new(c)
+                    }
                     Err(e) => {
                         crate::error_log!("Failed to create worker client with model {}: {}", model_name, e);
                         // Fallback to parent client
@@ -208,25 +277,40 @@ impl Tool for DelegateTool {
                     }
                 }
             } else {
-                llm_client.clone()
+                // Clone parent client but mark as worker
+                let client = LlmClient::new(llm_client.config().clone())
+                    .expect("Failed to create worker client")
+                    .set_worker(true);
+                let client = if let Some(ref rl) = rate_limiter {
+                    client.with_rate_limiter(rl.clone())
+                } else {
+                    client
+                };
+                Arc::new(client)
             };
-
-            // TODO: Filter tools based on delegate_args.tools if provided
-            // For now, sub-agent starts with empty tool set (inherits context via prompt)
-            let _requested_tools = delegate_args.tools;
+            
+            // Set job ID for metrics tracking
+            client.set_job_id(Some(job_id_clone.clone()));
+            
+            // Set cancellation token so retries can be aborted
+            if let Some(ref token) = cancel_token {
+                client.set_cancel_token(token.clone());
+            }
 
             // Create a new AgentV2 instance for the subtask
+            // Pass capabilities_context so the agent knows about its tools
             let mut sub_agent = AgentV2::new_with_iterations(
                 client,
                 scribe,
-                vec![], // Sub-agent will inherit tools from parent or use minimal set
+                sub_tools,
                 system_prompt,
                 max_iterations,
                 crate::config::AgentVersion::V2,
                 memory_store,
                 categorizer,
                 Some(job_registry.clone()), // Share parent's job registry
-                None, // capabilities_context
+                Some(capabilities_context), // Pass capabilities so sub-agent knows its tools
+                parent_permissions.clone(), // Inherit parent's permissions
                 None, // scratchpad
                 false, // disable_memory
             );
@@ -248,15 +332,27 @@ impl Tool for DelegateTool {
                 ))
             ];
 
-            // Run the sub-agent event-driven loop with panic catching
-            // Spawn the sub-agent in a separate task so we can catch panics via JoinHandle
+            // Run the sub-agent event-driven loop with panic catching and cancellation support
             let sub_task = tokio::spawn(async move {
-                sub_agent.run_event_driven(
+                // Create a task that checks for cancellation
+                let run_fut = sub_agent.run_event_driven(
                     history,
                     sub_event_tx,
                     interrupt_rx,
                     approval_rx,
-                ).await
+                );
+                
+                // If we have a cancellation token, race against it
+                if let Some(token) = cancel_token {
+                    tokio::select! {
+                        result = run_fut => result,
+                        _ = token.cancelled() => {
+                            Err("Job cancelled by user".into())
+                        }
+                    }
+                } else {
+                    run_fut.await
+                }
             });
 
             match sub_task.await {

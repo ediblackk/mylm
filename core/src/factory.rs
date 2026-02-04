@@ -11,6 +11,7 @@ use crate::memory::categorizer::MemoryCategorizer;
 use crate::state::StateStore;
 use crate::executor::{CommandExecutor, allowlist::CommandAllowlist, safety::SafetyChecker};
 use crate::context::TerminalContext;
+use crate::rate_limiter::{RateLimiter, RateLimitConfig};
 
 pub async fn create_agent_for_session(
     config: &Config,
@@ -30,7 +31,14 @@ pub async fn create_agent_for_session(
     )
     .with_memory(config.features.memory.clone());
     
-    let client = Arc::new(LlmClient::new(llm_config)?);
+    // Create rate limiter from config
+    let rate_limit_config = RateLimitConfig::from_settings(
+        Some(resolved.agent.main_rpm),
+        Some(resolved.agent.workers_rpm),
+    );
+    let rate_limiter = Arc::new(RateLimiter::new(rate_limit_config));
+    
+    let client = Arc::new(LlmClient::new(llm_config)?.with_rate_limiter(rate_limiter.clone()));
 
     // Context
     let ctx = TerminalContext::collect().await;
@@ -63,7 +71,8 @@ pub async fn create_agent_for_session(
             Some(store.clone()),
             Some(categorizer.clone()),
             None,
-            None // JobRegistry not available in Agent v1
+            None, // JobRegistry not available in Agent v1
+            None, // permissions - V1 agents don't use permissions
         )),
         Arc::new(crate::agent::tools::web_search::WebSearchTool::new(
             config.features.web_search.clone(), 
@@ -114,6 +123,7 @@ pub async fn create_agent_for_session(
                 None, // job_registry
                 None, // scratchpad
                 false, // disable_memory
+                resolved.agent.permissions.clone(), // permissions
             ).await;
             Ok(crate::agent::factory::BuiltAgent::V1(agent))
         }
@@ -138,7 +148,14 @@ pub async fn create_agent_v2_for_session(
     )
     .with_memory(config.features.memory.clone());
     
-    let client = Arc::new(LlmClient::new(llm_config)?);
+    // Create rate limiter from config
+    let rate_limit_config = RateLimitConfig::from_settings(
+        Some(resolved.agent.main_rpm),
+        Some(resolved.agent.workers_rpm),
+    );
+    let rate_limiter = Arc::new(RateLimiter::new(rate_limit_config));
+    
+    let client = Arc::new(LlmClient::new(llm_config)?.with_rate_limiter(rate_limiter.clone()));
 
     // Context
     let ctx = TerminalContext::collect().await;
@@ -172,7 +189,7 @@ pub async fn create_agent_v2_for_session(
     let job_registry = crate::agent::v2::jobs::JobRegistry::new();
 
     // Tools for AgentV2 - includes the new Delegate tool
-    let tools: Vec<Arc<dyn Tool>> = vec![
+    let mut tools_vec: Vec<Arc<dyn Tool>> = vec![
         Arc::new(crate::agent::tools::shell::ShellTool::new(
             executor,
             ctx.clone(),
@@ -180,7 +197,8 @@ pub async fn create_agent_v2_for_session(
             Some(store.clone()),
             Some(categorizer.clone()),
             None,
-            Some(job_registry.clone()) // Share registry with ShellTool if needed
+            Some(job_registry.clone()), // Share registry with ShellTool if needed
+            resolved.agent.permissions.clone(), // Pass permissions from config
         )),
         Arc::new(crate::agent::tools::web_search::WebSearchTool::new(
             config.features.web_search.clone(),
@@ -197,15 +215,27 @@ pub async fn create_agent_v2_for_session(
         Arc::new(crate::agent::tools::system::SystemMonitorTool::new()),
         Arc::new(crate::agent::tools::terminal_sight::TerminalSightTool::new(event_tx.clone())),
         Arc::new(crate::agent::tools::wait::WaitTool),
-        Arc::new(crate::agent::tools::delegate::DelegateTool::new(
-            client.clone(),
-            scribe.clone(),
-            job_registry.clone(), // Share registry with DelegateTool
-            Some(store.clone()),
-            Some(categorizer.clone()),
-            None // Event tx will be set by AgentV2
-        )),
     ];
+    
+    // Build tools HashMap for DelegateTool (convert Vec to HashMap)
+    let mut tools_map = std::collections::HashMap::new();
+    for tool in &tools_vec {
+        tools_map.insert(tool.name().to_string(), tool.clone());
+    }
+    
+    // Add DelegateTool with access to parent tools and permissions
+    tools_vec.push(Arc::new(crate::agent::tools::delegate::DelegateTool::new(
+        client.clone(),
+        scribe.clone(),
+        job_registry.clone(), // Share registry with DelegateTool
+        Some(store.clone()),
+        Some(categorizer.clone()),
+        None, // Event tx will be set by AgentV2
+        tools_map, // Pass parent tools as HashMap for delegation
+        resolved.agent.permissions.clone(), // Inherit parent agent's permissions
+    ).with_rate_limiter(rate_limiter)));
+    
+    let tools = tools_vec;
 
 
     let system_prompt = crate::config::build_system_prompt(
@@ -226,6 +256,7 @@ pub async fn create_agent_v2_for_session(
         Some(categorizer),
         Some(job_registry),
         None, // capabilities_context is already included in system_prompt
+        resolved.agent.permissions.clone(), // Pass permissions from config
         None, // scratchpad
         false, // disable_memory
     ))

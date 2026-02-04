@@ -50,7 +50,7 @@ pub enum ToolKind {
 /// Each tool must implement this trait and be `Send + Sync` to be used in the agentic loop.
 #[async_trait]
 pub trait Tool: Send + Sync {
-    /// The name of the tool (e.g., "execute_command")
+    /// The name of the tool (e.g. "execute_command")
     fn name(&self) -> &str;
 
     /// A brief description of what the tool does

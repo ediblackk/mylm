@@ -4,6 +4,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Terminal AI](https://img.shields.io/badge/Terminal-AI-blue.svg)](#)
 
+<p align="center">
+  <img src="assets/logo.png" alt="mylm Logo" width="180">
+</p>
+
 > **The AI assistant that actually understands your terminal.** Built in Rust. Designed for people who want real productivity, not just chat.
 
 **mylm** is a privacy-focused **multi-agent terminal AI assistant** that goes beyond simple Q&A. It sees what you see, remembers your projects, delegates tasks to specialized sub-agents, and safely executes commands—all while keeping you in control.
