@@ -38,8 +38,11 @@
 ### Installation
 
 git clone https://github.com/ediblackk/mylm.git
+
 cd mylm
+
 chmod +x install.sh
+
 ./install.sh
 
 Installs to `~/.local/bin` without sudo.
