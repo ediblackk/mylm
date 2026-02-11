@@ -53,11 +53,12 @@ Unless you changed the alias, simply type "ai" into your terminal. Proceed to Co
 
 I also highly recommend you set the web_search API too, as it enhances the model's capacity to provide relevant answers.
 
-I use it as chat, mainly tired of key aspects when using llm's from main providers:
+I use it also for chatting, mainly tired of key aspects when using llm's from main providers:
 - On long contexts, chat apps crash
 - Even on not so long, they can still lag/crash
 - I don't like the fact that all my data is stored externally
 - I tried other personal AI assistants apps and simply did not match very well.
+- More complex memory system
 
 This does not require docker or any other special configurations to work. It can be a little bit tricky to get everything required to build and it does take some time to finish (especially the optimized release version, on my local i7-7700HQ it took almost 40 minutes to finish). But the bianry itself is pretty small and quick.
 
