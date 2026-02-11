@@ -240,7 +240,7 @@ pub struct AgentOverride {
     ///
     /// - 0: No delay (default)
     /// - Higher values: Add pause between agentic actions
-    /// Useful for rate limiting or to observe agent behavior
+    ///   Useful for rate limiting or to observe agent behavior
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iteration_rate_limit: Option<u64>,
 
@@ -290,6 +290,60 @@ pub struct AgentOverride {
     /// - Lower values: Slower worker execution, prevents spamming provider
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workers_rpm: Option<u32>,
+
+    /// Maximum number of concurrent workers (background jobs)
+    ///
+    /// - Lower values (5-10): Conservative, less provider load
+    /// - Higher values (50-100): Aggressive parallel execution
+    /// - Default: 20
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_limit: Option<usize>,
+
+    /// Rate limit tier for the provider
+    ///
+    /// Predefined configurations based on provider capabilities:
+    /// - conservative: Basic/free tier (10 workers, 60 RPM)
+    /// - standard: Standard tier (20 workers, 120 RPM)
+    /// - high: Premium tier (50 workers, 300 RPM)
+    /// - enterprise: Unlimited tier (100 workers, 600 RPM)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_tier: Option<String>,
+    
+    /// Maximum actions before a worker job is considered stalled
+    ///
+    /// Prevents workers from looping indefinitely without returning a final answer.
+    /// - Lower values (5-10): Stricter, catches runaway workers faster
+    /// - Higher values (20-30): Allows complex multi-step workflows
+    /// - Default: 15
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_actions_before_stall: Option<usize>,
+    
+    /// Maximum consecutive messages without tool use
+    ///
+    /// After this many conversational messages, the worker is reminded to use tools.
+    /// - Lower values (2-3): More aggressive tool pushing
+    /// - Higher values (5-10): Allows more back-and-forth
+    /// - Default: 3
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_consecutive_messages: Option<u32>,
+    
+    /// Maximum recovery attempts after errors
+    ///
+    /// Number of times to retry after encountering errors before giving up.
+    /// - Lower values (1-2): Fail fast
+    /// - Higher values (5-10): More resilient to transient errors
+    /// - Default: 3
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_recovery_attempts: Option<u32>,
+    
+    /// Maximum consecutive tool failures before worker is stalled
+    ///
+    /// Prevents workers from retrying failed tools indefinitely.
+    /// - Lower values (2-3): Fail fast on tool errors
+    /// - Higher values (5-10): More resilient to transient tool failures
+    /// - Default: 5
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tool_failures: Option<usize>,
 }
 
 /// Features configuration
@@ -313,6 +367,13 @@ pub struct FeaturesConfig {
     /// Parallel Consistency Reasoning (PaCoRe) settings
     #[serde(default)]
     pub pacore: PacoreConfig,
+
+    /// Agent version selection
+    ///
+    /// Choose between V1 (Classic ReAct) and V2 (Cognitive Submodule) agent architectures.
+    /// V2 is the default and recommended for most use cases.
+    #[serde(default)]
+    pub agent_version: crate::config::AgentVersion,
 }
 
 /// Parallel Consistency Reasoning (PaCoRe) configuration
@@ -468,6 +529,26 @@ pub struct PromptsConfig {
     /// Number of recent journal entries to inject into initial context
     #[serde(default = "default_hot_memory_entries")]
     pub hot_memory_entries: usize,
+
+    /// System prompt config name to use (default: "default")
+    ///
+    /// Specifies which prompt configuration to load for the main system prompt.
+    /// The config will be loaded from ~/.config/mylm/prompts/config/{name}.json
+    /// or fall back to embedded defaults.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+
+    /// Worker prompt config name to use (default: "worker")
+    ///
+    /// Specifies which prompt configuration to load for worker/agent tasks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_prompt: Option<String>,
+
+    /// Memory prompt config name to use (default: "memory")
+    ///
+    /// Specifies which prompt configuration to load for memory operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_prompt: Option<String>,
 }
 
 impl Default for PromptsConfig {
@@ -477,6 +558,9 @@ impl Default for PromptsConfig {
             inject_capabilities: true,
             inject_memory_docs: true,
             hot_memory_entries: default_hot_memory_entries(),
+            system_prompt: None,
+            worker_prompt: None,
+            memory_prompt: None,
         }
     }
 }
@@ -503,6 +587,8 @@ pub struct ResolvedConfig {
     pub api_key: Option<String>,
     /// Request timeout in seconds
     pub timeout_secs: u64,
+    /// Maximum context tokens
+    pub max_context_tokens: usize,
     /// Agent configuration (max_iterations, main_model, worker_model)
     pub agent: AgentConfig,
     /// PaCoRe configuration
@@ -521,6 +607,9 @@ pub struct AgentConfig {
     /// Model for worker/sub-tasks
     pub worker_model: String,
 
+    /// Maximum context tokens for this agent
+    pub max_context_tokens: usize,
+
     /// Permission controls for this agent
     pub permissions: Option<AgentPermissions>,
 
@@ -528,6 +617,20 @@ pub struct AgentConfig {
     pub main_rpm: u32,
     /// Rate limit for workers (shared pool, requests per minute)
     pub workers_rpm: u32,
+    /// Maximum number of concurrent workers (background jobs)
+    pub worker_limit: usize,
+    /// Rate limit tier for the provider
+    pub rate_limit_tier: String,
+    
+    /// Maximum actions before a worker job is considered stalled
+    /// Prevents workers from looping indefinitely without returning a final answer
+    pub max_actions_before_stall: usize,
+    /// Maximum consecutive messages without tool use before pushing for action
+    pub max_consecutive_messages: u32,
+    /// Maximum recovery attempts after errors before giving up
+    pub max_recovery_attempts: u32,
+    /// Maximum consecutive tool failures before worker is stalled
+    pub max_tool_failures: usize,
 }
 
 impl Default for AgentConfig {
@@ -537,9 +640,16 @@ impl Default for AgentConfig {
             iteration_rate_limit: 0,
             main_model: "default-model".to_string(),
             worker_model: "default-worker-model".to_string(),
+            max_context_tokens: 128000,
             permissions: None,
-            main_rpm: 0,      // 0 = no limit
-            workers_rpm: 30,  // Default: 0.5 req/sec shared for workers
+            main_rpm: 0,           // 0 = no limit
+            workers_rpm: 300,      // Default: 5 req/sec shared for workers (increased from 30)
+            worker_limit: 20,      // Default: 20 concurrent workers
+            rate_limit_tier: "standard".to_string(), // Default: standard tier
+            max_actions_before_stall: 15,  // Default: 15 actions before stall detection
+            max_consecutive_messages: 3,   // Default: 3 messages before action reminder
+            max_recovery_attempts: 3,      // Default: 3 recovery attempts after errors
+            max_tool_failures: 5,          // Default: 5 tool failures before stall
         }
     }
 }
@@ -744,9 +854,11 @@ impl ConfigV2 {
         let base_url = self.endpoint.base_url.clone();
         let mut api_key = self.endpoint.api_key.clone();
         let timeout_secs = self.endpoint.timeout_secs;
+        let mut max_context_tokens = self.endpoint.max_context_tokens.unwrap_or(128000);
 
         // Default agent config
         let mut agent_config = AgentConfig::default();
+        agent_config.max_context_tokens = max_context_tokens;
 
         // Apply profile overrides if the profile exists
         if let Some(profile) = self.profiles.get(&self.profile) {
@@ -762,6 +874,10 @@ impl ConfigV2 {
 
             // Apply agent overrides
             if let Some(agent_override) = &profile.agent {
+                if let Some(tokens) = agent_override.max_context_tokens {
+                    max_context_tokens = tokens;
+                    agent_config.max_context_tokens = tokens;
+                }
                 if let Some(iterations) = agent_override.max_iterations {
                     agent_config.max_iterations = iterations;
                 }
@@ -784,6 +900,28 @@ impl ConfigV2 {
                 if let Some(workers_rpm) = agent_override.workers_rpm {
                     agent_config.workers_rpm = workers_rpm;
                 }
+                if let Some(worker_limit) = agent_override.worker_limit {
+                    agent_config.worker_limit = worker_limit;
+                }
+                if let Some(ref tier) = agent_override.rate_limit_tier {
+                    agent_config.rate_limit_tier = tier.clone();
+                }
+                if let Some(max_actions) = agent_override.max_actions_before_stall {
+                    agent_config.max_actions_before_stall = max_actions;
+                }
+                if let Some(max_messages) = agent_override.max_consecutive_messages {
+                    agent_config.max_consecutive_messages = max_messages;
+                }
+                if let Some(max_recovery) = agent_override.max_recovery_attempts {
+                    agent_config.max_recovery_attempts = max_recovery;
+                }
+                if let Some(max_failures) = agent_override.max_tool_failures {
+                    agent_config.max_tool_failures = max_failures;
+                }
+                // Copy permissions from agent override
+                if agent_override.permissions.is_some() {
+                    agent_config.permissions = agent_override.permissions.clone();
+                }
             } else {
                 // No agent override, use endpoint model for both
                 agent_config.main_model = model.clone();
@@ -801,6 +939,7 @@ impl ConfigV2 {
             base_url,
             api_key,
             timeout_secs,
+            max_context_tokens,
             agent: agent_config,
             pacore: self.features.pacore.clone(),
         }

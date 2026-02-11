@@ -1,3 +1,15 @@
+//! MCP (Model Context Protocol) message definitions for client-server communication.
+//!
+//! Defines all message types exchanged between the mylm client and server,
+//! including session management, tool calls, terminal I/O, and configuration.
+//!
+//! # Main Types
+//! - `ClientMessage`: Messages sent from client to server
+//! - `ServerEvent`: Events broadcast from server to clients
+//! - `ToolRequest`/`ToolResponse`: Tool execution protocol
+//! - `MessageEnvelope`: Wrapper for versioned message payloads
+//! - Supporting types: `SessionSummary`, `Workflow`, `Stage`, `SystemInfo`, etc.
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use crate::llm::TokenUsage;

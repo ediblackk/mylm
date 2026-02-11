@@ -26,4 +26,6 @@ pub enum AgentDecision {
     MalformedAction(String),
     /// The agent has reached maximum iterations or an error occurred.
     Error(String),
+    /// The worker has stalled due to too many consecutive tool failures.
+    Stall { reason: String, tool_failures: usize },
 }

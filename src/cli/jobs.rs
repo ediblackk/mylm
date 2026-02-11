@@ -70,6 +70,8 @@ pub async fn handle_list_jobs(job_registry: &JobRegistry) -> Result<()> {
             JobStatus::Completed => green.apply_to("Completed"),
             JobStatus::Failed => red.apply_to("Failed"),
             JobStatus::Cancelled => red.apply_to("Cancelled"),
+            JobStatus::TimeoutPending => yellow.apply_to("Timeout Pending"),
+            JobStatus::Stalled => red.apply_to("Stalled"),
         };
 
         let started_at = job.started_at.format("%Y-%m-%d %H:%M:%S").to_string();

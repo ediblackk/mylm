@@ -3,8 +3,9 @@
 //! Provides per-endpoint rate limiting with separate quotas for main agent and workers.
 //! Respects Retry-After headers from providers.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
@@ -48,18 +49,66 @@ impl RateLimitConfig {
         }
         config
     }
+
+    /// Conservative limits for basic tier providers (default)
+    pub fn conservative() -> Self {
+        Self {
+            main_rpm: 60,      // 1 req/sec
+            workers_rpm: 30,   // 0.5 req/sec shared
+            main_tpm: 100_000,
+            workers_tpm: 50_000,
+            burst_size: 3,
+        }
+    }
+
+    /// Standard limits for mid-tier providers
+    pub fn standard() -> Self {
+        Self {
+            main_rpm: 120,      // 2 req/sec
+            workers_rpm: 300,   // 5 req/sec shared (100 workers = 3 req/min each)
+            main_tpm: 250_000,
+            workers_tpm: 500_000,
+            burst_size: 10,
+        }
+    }
+
+    /// High-tier limits for providers with generous rate limits
+    pub fn high_tier() -> Self {
+        Self {
+            main_rpm: 300,       // 5 req/sec
+            workers_rpm: 1200,   // 20 req/sec shared (100 workers = 12 req/min each)
+            main_tpm: 1_000_000,
+            workers_tpm: 5_000_000,
+            burst_size: 25,
+        }
+    }
+
+    /// Enterprise/unlimited tier for providers with very high limits
+    pub fn enterprise() -> Self {
+        Self {
+            main_rpm: 600,       // 10 req/sec
+            workers_rpm: 6000,   // 100 req/sec shared (100 workers = 60 req/min each)
+            main_tpm: 5_000_000,
+            workers_tpm: 50_000_000,
+            burst_size: 100,
+        }
+    }
+
+    /// Select configuration based on provider tier
+    pub fn for_tier(tier: &str) -> Self {
+        match tier.to_lowercase().as_str() {
+            "conservative" | "basic" | "free" => Self::conservative(),
+            "standard" | "pro" => Self::standard(),
+            "high" | "premium" | "business" => Self::high_tier(),
+            "enterprise" | "unlimited" => Self::enterprise(),
+            _ => Self::default(),
+        }
+    }
 }
 
-/// Endpoint state tracking requests and tokens
+/// Circuit breaker state for a specific agent type
 #[derive(Debug)]
-struct EndpointState {
-    /// Base URL of the endpoint (for debugging)
-    #[allow(dead_code)]
-    base_url: String,
-    /// Request timestamps for sliding window
-    request_times: Vec<Instant>,
-    /// Token usage timestamps and counts
-    token_usage: Vec<(Instant, u32)>,
+struct CircuitState {
     /// Currently blocked until (from Retry-After)
     blocked_until: Option<Instant>,
     /// Consecutive rate limit errors
@@ -70,35 +119,93 @@ struct EndpointState {
     circuit_reset_at: Option<Instant>,
 }
 
-impl EndpointState {
-    fn new(base_url: String) -> Self {
+impl CircuitState {
+    fn new() -> Self {
         Self {
-            base_url,
-            request_times: Vec::new(),
-            token_usage: Vec::new(),
             blocked_until: None,
             consecutive_429s: 0,
             circuit_open: false,
             circuit_reset_at: None,
         }
     }
+}
 
-    /// Clean up old entries outside the window
-    fn cleanup_old_entries(&mut self, window: Duration) {
-        let cutoff = Instant::now() - window;
-        self.request_times.retain(|&t| t > cutoff);
-        self.token_usage.retain(|(t, _)| *t > cutoff);
+/// Endpoint state tracking requests and tokens
+/// Separates main agent and worker requests for proper rate limiting
+#[derive(Debug)]
+struct EndpointState {
+    /// Request timestamps for sliding window - Main agent
+    request_times_main: Vec<Instant>,
+    /// Request timestamps for sliding window - Workers (shared pool)
+    request_times_workers: Vec<Instant>,
+    /// Token usage timestamps and counts - Main agent
+    token_usage_main: Vec<(Instant, u32)>,
+    /// Token usage timestamps and counts - Workers
+    token_usage_workers: Vec<(Instant, u32)>,
+    /// Circuit breaker state - Main agent
+    circuit_main: CircuitState,
+    /// Circuit breaker state - Workers
+    circuit_workers: CircuitState,
+}
+
+impl EndpointState {
+    fn new() -> Self {
+        Self {
+            request_times_main: Vec::new(),
+            request_times_workers: Vec::new(),
+            token_usage_main: Vec::new(),
+            token_usage_workers: Vec::new(),
+            circuit_main: CircuitState::new(),
+            circuit_workers: CircuitState::new(),
+        }
     }
 
-    /// Check if circuit breaker is open
-    fn is_circuit_open(&mut self) -> bool {
-        if self.circuit_open {
+    /// Get circuit state for a specific agent type
+    fn circuit(&mut self, is_worker: bool) -> &mut CircuitState {
+        if is_worker {
+            &mut self.circuit_workers
+        } else {
+            &mut self.circuit_main
+        }
+    }
+
+    /// Clean up old entries outside the window for both main and workers
+    fn cleanup_old_entries(&mut self, window: Duration) {
+        let cutoff = Instant::now() - window;
+        self.request_times_main.retain(|&t| t > cutoff);
+        self.request_times_workers.retain(|&t| t > cutoff);
+        self.token_usage_main.retain(|(t, _)| *t > cutoff);
+        self.token_usage_workers.retain(|(t, _)| *t > cutoff);
+    }
+
+    /// Get request times for a specific agent type
+    fn request_times(&mut self, is_worker: bool) -> &mut Vec<Instant> {
+        if is_worker {
+            &mut self.request_times_workers
+        } else {
+            &mut self.request_times_main
+        }
+    }
+
+    /// Get token usage for a specific agent type
+    fn token_usage(&mut self, is_worker: bool) -> &mut Vec<(Instant, u32)> {
+        if is_worker {
+            &mut self.token_usage_workers
+        } else {
+            &mut self.token_usage_main
+        }
+    }
+
+    /// Check if circuit breaker is open for a specific agent type
+    fn is_circuit_open(&mut self, is_worker: bool) -> bool {
+        let circuit = self.circuit(is_worker);
+        if circuit.circuit_open {
             // Check if we should try resetting
-            if let Some(reset_at) = self.circuit_reset_at {
+            if let Some(reset_at) = circuit.circuit_reset_at {
                 if Instant::now() > reset_at {
-                    self.circuit_open = false;
-                    self.consecutive_429s = 0;
-                    self.circuit_reset_at = None;
+                    circuit.circuit_open = false;
+                    circuit.consecutive_429s = 0;
+                    circuit.circuit_reset_at = None;
                     return false;
                 }
             }
@@ -108,64 +215,76 @@ impl EndpointState {
         }
     }
 
-    /// Record a rate limit hit (429 error)
-    fn record_rate_limit(&mut self, retry_after: Option<Duration>) {
-        self.consecutive_429s += 1;
+    /// Record a rate limit hit (429 error) for a specific agent type
+    fn record_rate_limit(&mut self, is_worker: bool, retry_after: Option<Duration>) {
+        let circuit = self.circuit(is_worker);
+        circuit.consecutive_429s += 1;
         
         // Block endpoint temporarily
         let block_duration = retry_after.unwrap_or_else(|| {
             // Exponential backoff: 5s, 10s, 20s, 40s, max 60s
             let base = Duration::from_secs(5);
-            let multiplier = 2u32.pow(self.consecutive_429s.min(5));
+            let multiplier = 2u32.pow(circuit.consecutive_429s.min(5));
             base * multiplier
         });
         
-        self.blocked_until = Some(Instant::now() + block_duration);
+        circuit.blocked_until = Some(Instant::now() + block_duration);
         
         // Open circuit after 5 consecutive 429s
-        if self.consecutive_429s >= 5 {
-            self.circuit_open = true;
-            self.circuit_reset_at = Some(Instant::now() + Duration::from_secs(60));
+        if circuit.consecutive_429s >= 5 {
+            circuit.circuit_open = true;
+            circuit.circuit_reset_at = Some(Instant::now() + Duration::from_secs(60));
         }
     }
 
-    /// Record successful request
-    fn record_success(&mut self) {
-        self.consecutive_429s = 0;
-        self.request_times.push(Instant::now());
+    /// Record successful request for specific agent type
+    fn record_success(&mut self, is_worker: bool) {
+        self.circuit(is_worker).consecutive_429s = 0;
+        self.request_times(is_worker).push(Instant::now());
     }
 
-    /// Record token usage
-    fn record_tokens(&mut self, tokens: u32) {
-        self.token_usage.push((Instant::now(), tokens));
+    /// Record token usage for specific agent type
+    fn record_tokens(&mut self, tokens: u32, is_worker: bool) {
+        self.token_usage(is_worker).push((Instant::now(), tokens));
     }
 
-    /// Get current RPM
-    fn current_rpm(&mut self) -> u32 {
+    /// Correct usage based on actual token count
+    fn correct_usage(&mut self, excess_tokens: u32, is_worker: bool) {
+        // Just record the excess as a new usage event at current time
+        self.record_tokens(excess_tokens, is_worker);
+    }
+
+    /// Get current RPM for specific agent type
+    fn current_rpm(&mut self, is_worker: bool) -> u32 {
         self.cleanup_old_entries(Duration::from_secs(60));
-        self.request_times.len() as u32
+        self.request_times(is_worker).len() as u32
     }
 
-    /// Get current TPM
-    fn current_tpm(&mut self) -> u32 {
+    /// Get current TPM for specific agent type
+    fn current_tpm(&mut self, is_worker: bool) -> u32 {
         self.cleanup_old_entries(Duration::from_secs(60));
-        self.token_usage.iter().map(|(_, t)| t).sum()
+        self.token_usage(is_worker).iter().map(|(_, t)| t).sum()
     }
 
-    /// Time until next request is allowed
-    fn time_until_available(&self, _max_rpm: u32, _max_tpm: u32, _burst: u32) -> Duration {
+    /// Time until next request is allowed for a specific agent type
+    fn time_until_available(&self, is_worker: bool) -> Duration {
         let now = Instant::now();
+        let circuit = if is_worker {
+            &self.circuit_workers
+        } else {
+            &self.circuit_main
+        };
         
         // Check if blocked by Retry-After
-        if let Some(blocked_until) = self.blocked_until {
+        if let Some(blocked_until) = circuit.blocked_until {
             if now < blocked_until {
                 return blocked_until - now;
             }
         }
         
         // Check circuit breaker
-        if self.circuit_open {
-            if let Some(reset_at) = self.circuit_reset_at {
+        if circuit.circuit_open {
+            if let Some(reset_at) = circuit.circuit_reset_at {
                 if now < reset_at {
                     return reset_at - now;
                 }
@@ -181,8 +300,7 @@ impl EndpointState {
 struct AgentRateLimiter {
     max_rpm: u32,
     max_tpm: u32,
-    burst_size: u32,
-    /// Semaphore for concurrent request limiting
+    /// Semaphore for concurrent request limiting (controls burst)
     semaphore: Semaphore,
 }
 
@@ -194,7 +312,6 @@ impl AgentRateLimiter {
         Self {
             max_rpm,
             max_tpm,
-            burst_size,
             semaphore,
         }
     }
@@ -207,8 +324,6 @@ impl AgentRateLimiter {
 /// Global rate limiter managing all endpoints and agent types
 #[derive(Debug, Clone)]
 pub struct RateLimiter {
-    #[allow(dead_code)]
-    config: RateLimitConfig,
     /// Endpoint-specific state
     endpoints: Arc<Mutex<HashMap<String, EndpointState>>>,
     /// Main agent rate limiter
@@ -221,7 +336,6 @@ impl RateLimiter {
     /// Create a new rate limiter with the given configuration
     pub fn new(config: RateLimitConfig) -> Self {
         Self {
-            config: config.clone(),
             endpoints: Arc::new(Mutex::new(HashMap::new())),
             main_limiter: Arc::new(AgentRateLimiter::new(
                 config.main_rpm,
@@ -237,20 +351,8 @@ impl RateLimiter {
     }
 
     /// Create with default configuration
-    pub fn default() -> Self {
+    pub fn with_default_config() -> Self {
         Self::new(RateLimitConfig::default())
-    }
-
-    /// Get or create endpoint state - returns a clone since we can't hold the lock
-    #[allow(dead_code)]
-    fn with_endpoint<F, R>(&self, base_url: &str, f: F) -> R
-    where
-        F: FnOnce(&mut EndpointState) -> R,
-    {
-        let mut endpoints = self.endpoints.lock().unwrap();
-        let endpoint = endpoints.entry(base_url.to_string())
-            .or_insert_with(|| EndpointState::new(base_url.to_string()));
-        f(endpoint)
     }
 
     /// Acquire permission to make a request
@@ -278,24 +380,24 @@ impl RateLimiter {
         let _permit = limiter.acquire_permit().await;
 
         // Check endpoint-specific limits
-        let mut endpoints = self.endpoints.lock().unwrap();
+        let mut endpoints = self.endpoints.lock();
         let endpoint = endpoints.entry(base_url.to_string())
-            .or_insert_with(|| EndpointState::new(base_url.to_string()));
+            .or_insert_with(EndpointState::new);
 
         // Check circuit breaker
-        if endpoint.is_circuit_open() {
-            let wait = endpoint.time_until_available(limiter.max_rpm, limiter.max_tpm, limiter.burst_size);
+        if endpoint.is_circuit_open(is_worker) {
+            let wait = endpoint.time_until_available(is_worker);
             return Err(RateLimitError::CircuitOpen { retry_after: wait });
         }
 
         // Check if blocked by Retry-After
-        let wait = endpoint.time_until_available(limiter.max_rpm, limiter.max_tpm, limiter.burst_size);
+        let wait = endpoint.time_until_available(is_worker);
         if wait > Duration::ZERO {
             return Err(RateLimitError::Blocked { retry_after: wait });
         }
 
-        // Check RPM limit
-        let current_rpm = endpoint.current_rpm();
+        // Check RPM limit (for specific agent type)
+        let current_rpm = endpoint.current_rpm(is_worker);
         if current_rpm >= limiter.max_rpm {
             // Calculate time until oldest request falls out of window
             let wait = Duration::from_secs(60) / limiter.max_rpm.max(1);
@@ -307,8 +409,8 @@ impl RateLimiter {
             });
         }
 
-        // Check TPM limit
-        let current_tpm = endpoint.current_tpm();
+        // Check TPM limit (for specific agent type)
+        let current_tpm = endpoint.current_tpm(is_worker);
         if current_tpm + estimated_tokens > limiter.max_tpm {
             let wait = Duration::from_secs(60) / limiter.max_rpm.max(1);
             return Err(RateLimitError::RateLimitExceeded {
@@ -319,33 +421,49 @@ impl RateLimiter {
             });
         }
 
-        // Record the request
-        endpoint.record_success();
-        endpoint.record_tokens(estimated_tokens);
+        // Record the request (for specific agent type)
+        endpoint.record_success(is_worker);
+        endpoint.record_tokens(estimated_tokens, is_worker);
 
         Ok(())
     }
 
-    /// Record a rate limit error (429) from the provider
-    pub fn record_rate_limit_error(&self, base_url: &str, retry_after: Option<Duration>) {
-        let mut endpoints = self.endpoints.lock().unwrap();
+    /// Record a rate limit error (429) from the provider for a specific agent type
+    pub fn record_rate_limit_error(&self, base_url: &str, is_worker: bool, retry_after: Option<Duration>) {
+        let mut endpoints = self.endpoints.lock();
         if let Some(endpoint) = endpoints.get_mut(base_url) {
-            endpoint.record_rate_limit(retry_after);
+            endpoint.record_rate_limit(is_worker, retry_after);
+        }
+    }
+
+    /// Record actual usage and correct if estimate was too low
+    pub fn record_usage(&self, base_url: &str, is_worker: bool, actual_tokens: u32, estimated_tokens: u32) {
+        if actual_tokens > estimated_tokens {
+            let excess = actual_tokens - estimated_tokens;
+            let mut endpoints = self.endpoints.lock();
+            // Only correct if endpoint state exists
+            if let Some(endpoint) = endpoints.get_mut(base_url) {
+                endpoint.correct_usage(excess, is_worker);
+            }
         }
     }
 
     /// Get current rate limit status for an endpoint
     pub fn get_status(&self, base_url: &str) -> Option<EndpointStatus> {
-        let mut endpoints = self.endpoints.lock().unwrap();
+        let mut endpoints = self.endpoints.lock();
         let endpoint = endpoints.get_mut(base_url)?;
         
         Some(EndpointStatus {
-            current_rpm_main: endpoint.current_rpm(),
-            current_rpm_workers: endpoint.current_rpm(), // Same endpoint, different limits
-            current_tpm: endpoint.current_tpm(),
-            blocked_until: endpoint.blocked_until,
-            circuit_open: endpoint.circuit_open,
-            consecutive_429s: endpoint.consecutive_429s,
+            current_rpm_main: endpoint.current_rpm(false), // main agent
+            current_rpm_workers: endpoint.current_rpm(true), // workers
+            current_tpm_main: endpoint.current_tpm(false),
+            current_tpm_workers: endpoint.current_tpm(true),
+            blocked_until_main: endpoint.circuit_main.blocked_until,
+            blocked_until_workers: endpoint.circuit_workers.blocked_until,
+            circuit_open_main: endpoint.circuit_main.circuit_open,
+            circuit_open_workers: endpoint.circuit_workers.circuit_open,
+            consecutive_429s_main: endpoint.circuit_main.consecutive_429s,
+            consecutive_429s_workers: endpoint.circuit_workers.consecutive_429s,
         })
     }
 
@@ -373,7 +491,7 @@ impl RateLimiter {
                         Ok(result) => return Ok(result),
                         Err(ProviderError::RateLimit { retry_after }) => {
                             // Record the 429
-                            self.record_rate_limit_error(base_url, retry_after);
+                            self.record_rate_limit_error(base_url, is_worker, retry_after);
                             let last_error = RateLimitError::Blocked { 
                                 retry_after: retry_after.unwrap_or(Duration::from_secs(5))
                             };
@@ -420,10 +538,14 @@ impl RateLimiter {
 pub struct EndpointStatus {
     pub current_rpm_main: u32,
     pub current_rpm_workers: u32,
-    pub current_tpm: u32,
-    pub blocked_until: Option<Instant>,
-    pub circuit_open: bool,
-    pub consecutive_429s: u32,
+    pub current_tpm_main: u32,
+    pub current_tpm_workers: u32,
+    pub blocked_until_main: Option<Instant>,
+    pub blocked_until_workers: Option<Instant>,
+    pub circuit_open_main: bool,
+    pub circuit_open_workers: bool,
+    pub consecutive_429s_main: u32,
+    pub consecutive_429s_workers: u32,
 }
 
 /// Rate limit error types

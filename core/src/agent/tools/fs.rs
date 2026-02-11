@@ -4,6 +4,18 @@ use serde::Deserialize;
 use std::error::Error as StdError;
 use std::fs;
 
+
+/// Expand tilde (~) to the user's home directory.
+fn expand_tilde(path: &str) -> String {
+    if path.starts_with("~/") || path == "~" {
+        if let Some(home) = dirs::home_dir() {
+            let rest = &path[1..]; // Remove the leading '~'
+            return home.join(rest.trim_start_matches('/')).to_string_lossy().to_string();
+        }
+    }
+    path.to_string()
+}
+
 /// A tool for reading file contents.
 pub struct FileReadTool;
 
@@ -47,6 +59,28 @@ impl Tool for FileReadTool {
             // Fallback for ReAct or plain string
             args.trim().trim_matches('"').to_string()
         };
+
+        // Expand tilde to home directory
+        let path = expand_tilde(&path);
+
+        // Check file size before reading (limit to 100KB)
+        const MAX_FILE_SIZE: u64 = 100 * 1024;
+        match fs::metadata(&path) {
+            Ok(metadata) => {
+                if metadata.len() > MAX_FILE_SIZE {
+                    return Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
+                        "Error: File '{}' is too large ({} bytes, max {} bytes). Use a more targeted approach to read specific sections.",
+                        path, metadata.len(), MAX_FILE_SIZE
+                    ))));
+                }
+            }
+            Err(e) => {
+                return Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
+                    "Error checking file '{}': {}",
+                    path, e
+                ))));
+            }
+        }
 
         match fs::read_to_string(&path) {
             Ok(content) => Ok(ToolOutput::Immediate(serde_json::Value::String(content))),
@@ -113,6 +147,9 @@ impl Tool for FileWriteTool {
                 "Error: write_file requires structured JSON arguments: { \"path\": \"...\", \"content\": \"...\" }".to_string()
             )));
         };
+
+        // Expand tilde to home directory
+        let path = expand_tilde(&path);
 
         // Create parent directories if they don't exist
         if let Some(parent) = std::path::Path::new(&path).parent() {

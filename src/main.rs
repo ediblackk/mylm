@@ -6,15 +6,18 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use console::Style;
+use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
-use crate::cli::{Cli, Commands, MemoryCommand, ConfigCommand, EditCommand, hub::HubChoice, SessionCommand, DaemonCommand};
+use crate::cli::{Cli, Commands, MemoryCommand, ConfigCommand, EditCommand, hub::HubChoice, SessionCommand, DaemonCommand, PromptsCommand};
 use mylm_core::config::{Config, ConfigUiExt};
 use mylm_core::context::TerminalContext;
 use mylm_core::llm::{LlmClient, LlmConfig};
 use mylm_core::output::OutputFormatter;
 use crate::terminal::app::App;
 use std::process::Command;
+use mylm_core::agent::traits::TerminalExecutor;
+use crate::server::HeadlessTerminalExecutor;
 
 mod cli;
 mod terminal;
@@ -30,6 +33,41 @@ pub fn get_job_registry() -> &'static mylm_core::agent::v2::jobs::JobRegistry {
 /// Main entry point for the AI assistant CLI
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize logging as early as possible
+    let data_dir = dirs::data_dir()
+        .context("Could not find data directory")?
+        .join("mylm");
+    std::fs::create_dir_all(&data_dir)?;
+    mylm_core::agent::logger::init(data_dir.clone());
+
+    // Setup panic hook to log panic info and cleanup terminal state
+    // This prevents mouse tracking mode and other terminal settings from leaking to shell
+    std::panic::set_hook(Box::new(|panic_info| {
+        // Log panic details to the log file
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let _ = mylm_core::agent::logger::log(
+            mylm_core::agent::logger::LogLevel::Error,
+            "panic",
+            &format!("PANIC: {}\nBacktrace: {:?}", panic_info, backtrace),
+        );
+
+        // Best-effort terminal cleanup - suppress all errors
+        let _ = crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::LeaveAlternateScreen,
+            crossterm::event::DisableBracketedPaste,
+            crossterm::event::DisableMouseCapture,
+            crossterm::cursor::Show
+        );
+        // Reset colors and clear any remaining mouse tracking
+        let _ = std::io::stdout().write_all(b"\x1b[?1000l\x1b[?1002l\x1b[?1015l\x1b[?1006l\x1b[?25h\x1b[0m");
+        let _ = std::io::stdout().flush();
+    }));
+
+    mylm_core::info_log!("mylm starting up...");
+    mylm_core::debug_log!("Log level: {:?}", std::env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()));
+
     // Capture context IMMEDIATELY before any output to ensure we get the clean terminal state
     let initial_context = mylm_core::context::TerminalContext::collect_sync();
     
@@ -65,7 +103,7 @@ async fn main() -> Result<()> {
 
     // Onboarding: Check for fresh install - skip if any command is specified
     if !config.is_initialized() && config.profiles.is_empty() && !cli.version && cli.command.is_none() {
-        println!("\n👋 Welcome to mylm! It looks like this is a fresh install.");
+        println!("\n👋 Welcome to MyLM! It looks like this is a fresh install.");
         println!("🚀 Let's get you set up.");
         
         // Launch onboarding wizard (simplified version: configure endpoint -> create profile)
@@ -121,6 +159,7 @@ async fn main() -> Result<()> {
                 base_url,
                 resolved.model.clone(),
                 Some(api_key),
+                resolved.agent.max_context_tokens,
             )
             .with_memory(config.features.memory.clone());
             let client = LlmClient::new(llm_config)?;
@@ -242,6 +281,11 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
                         }
                     }
                 }
+                MemoryCommand::Repair => {
+                    println!("🔧 Repairing memory database...");
+                    let report = store.repair_database().await?;
+                    println!("{}", report);
+                }
             }
         }
 
@@ -271,7 +315,7 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
                         .map(|p| p.name.clone())
                         .unwrap_or_else(|| "default".to_string());
                     let path = mylm_core::config::get_prompts_dir().join(format!("{}.md", profile));
-                    let _ = mylm_core::config::load_prompt(&profile)?;
+                    let _ = mylm_core::config::load_prompt(&profile).await?;
                     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
                     std::process::Command::new(editor).arg(path).status()?;
                 }
@@ -279,6 +323,10 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
                     handle_settings_dashboard(&mut config).await?;
                 }
             }
+        }
+
+        Some(Commands::Prompts { cmd }) => {
+            handle_prompts_command(cmd).await?;
         }
 
         Some(Commands::Session { cmd }) => {
@@ -327,101 +375,130 @@ COMMAND: [The command to execute, exactly as it should be run]"#,
     Ok(())
 }
 
+// TODO: PaCoRe module is temporarily disabled - pacore module doesn't exist
+// async fn handle_batch(
+//     input: &str,
+//     output: &str,
+//     model: &str,
+//     rounds: &str,
+//     concurrent: usize,
+//     config: &Config,
+// ) -> Result<()> {
+//     use mylm_core::pacore::{Exp, ChatClient, load_jsonl, save_jsonl};
+// 
+//     println!("🚀 Starting PaCoRe Batch Process...");
+//     println!("📂 Input: {}", input);
+//     println!("📂 Output: {}", output);
+// 
+//     let resolved = config.resolve_profile();
+//     let base_url = resolved.base_url.unwrap_or_else(|| resolved.provider.default_url());
+//     let api_key = resolved.api_key.ok_or_else(|| anyhow::anyhow!("No API key configured"))?;
+// 
+//     let client = ChatClient::new(base_url, api_key);
+//     
+//     let num_responses_per_round: Vec<usize> = rounds
+//         .split(',')
+//         .map(|s| s.trim().parse().unwrap_or(1))
+//         .collect();
+// 
+//     let exp = Exp::new(
+//         model.to_string(),
+//         num_responses_per_round,
+//         10, // max_concurrent_per_request (parallel calls)
+//         client,
+//     );
+// 
+//     let dataset = load_jsonl(input).await.map_err(|e| anyhow::anyhow!("Load error: {}", e))?;
+//     println!("📊 Loaded {} items.", dataset.len());
+// 
+//     let results = exp.run_batch(dataset, concurrent).await;
+//     
+//     save_jsonl(output, &results).await.map_err(|e| anyhow::anyhow!("Save error: {}", e))?;
+//     println!("✅ Batch complete. Results saved to {}", output);
+// 
+//     Ok(())
+// }
+
 async fn handle_batch(
-    input: &str,
-    output: &str,
-    model: &str,
-    rounds: &str,
-    concurrent: usize,
-    config: &Config,
+    _input: &str,
+    _output: &str,
+    _model: &str,
+    _rounds: &str,
+    _concurrent: usize,
+    _config: &Config,
 ) -> Result<()> {
-    use mylm_core::pacore::{Exp, ChatClient, load_jsonl, save_jsonl};
-
-    println!("🚀 Starting PaCoRe Batch Process...");
-    println!("📂 Input: {}", input);
-    println!("📂 Output: {}", output);
-
-    let resolved = config.resolve_profile();
-    let base_url = resolved.base_url.unwrap_or_else(|| resolved.provider.default_url());
-    let api_key = resolved.api_key.ok_or_else(|| anyhow::anyhow!("No API key configured"))?;
-
-    let client = ChatClient::new(base_url, api_key);
-    
-    let num_responses_per_round: Vec<usize> = rounds
-        .split(',')
-        .map(|s| s.trim().parse().unwrap_or(1))
-        .collect();
-
-    let exp = Exp::new(
-        model.to_string(),
-        num_responses_per_round,
-        10, // max_concurrent_per_request (parallel calls)
-        client,
-    );
-
-    let dataset = load_jsonl(input).await.map_err(|e| anyhow::anyhow!("Load error: {}", e))?;
-    println!("📊 Loaded {} items.", dataset.len());
-
-    let results = exp.run_batch(dataset, concurrent).await;
-    
-    save_jsonl(output, &results).await.map_err(|e| anyhow::anyhow!("Save error: {}", e))?;
-    println!("✅ Batch complete. Results saved to {}", output);
-
+    println!("⚠️  PaCoRe batch processing is temporarily unavailable.");
+    println!("   The pacore module is being refactored.");
     Ok(())
 }
 
+// TODO: PaCoRe module is temporarily disabled - pacore module doesn't exist
+// async fn handle_ask(
+//     query: &str,
+//     model: Option<&str>,
+//     rounds: &str,
+//     config: &Config,
+// ) -> Result<()> {
+//     use mylm_core::pacore::{Exp, ChatClient, Message};
+//     use futures_util::StreamExt;
+//     use std::io::{Write, stdout};
+// 
+//     let resolved = config.resolve_profile();
+//     let base_url = resolved.base_url.unwrap_or_else(|| resolved.provider.default_url());
+//     let api_key = resolved.api_key.ok_or_else(|| anyhow::anyhow!("No API key configured"))?;
+// 
+//     let client = ChatClient::new(base_url, api_key);
+//     
+//     let num_responses_per_round: Vec<usize> = rounds
+//         .split(',')
+//         .map(|s| s.trim().parse().unwrap_or(1))
+//         .collect();
+// 
+//     let model_name = model.unwrap_or(&resolved.model).to_string();
+// 
+//     let exp = Exp::new(
+//         model_name.clone(),
+//         num_responses_per_round,
+//         10,
+//         client,
+//     );
+// 
+//     let messages = vec![Message::user(query)];
+// 
+//     println!("🤖 Thinking (using {} with rounds {})...", model_name, rounds);
+// 
+//     let mut stream = exp.process_single_stream(messages, "ask").await?;
+// 
+//     println!("\nFinal Answer:");
+//     while let Some(chunk_result) = stream.next().await {
+//         let chunk = chunk_result?;
+//         if let Some(choice) = chunk.choices.first() {
+//             if let Some(delta) = &choice.delta {
+//                 print!("{}", delta.content);
+//                 stdout().flush()?;
+//             } else if let Some(message) = &choice.message {
+//                 print!("{}", message.content);
+//                 stdout().flush()?;
+//             }
+//         }
+//     }
+//     println!("\n");
+// 
+//     Ok(())
+// }
+
 async fn handle_ask(
     query: &str,
-    model: Option<&str>,
-    rounds: &str,
+    _model: Option<&str>,
+    _rounds: &str,
     config: &Config,
 ) -> Result<()> {
-    use mylm_core::pacore::{Exp, ChatClient, Message};
-    use futures_util::StreamExt;
-    use std::io::{Write, stdout};
-
-    let resolved = config.resolve_profile();
-    let base_url = resolved.base_url.unwrap_or_else(|| resolved.provider.default_url());
-    let api_key = resolved.api_key.ok_or_else(|| anyhow::anyhow!("No API key configured"))?;
-
-    let client = ChatClient::new(base_url, api_key);
+    println!("⚠️  PaCoRe ask is temporarily unavailable. Using standard query instead.");
     
-    let num_responses_per_round: Vec<usize> = rounds
-        .split(',')
-        .map(|s| s.trim().parse().unwrap_or(1))
-        .collect();
-
-    let model_name = model.unwrap_or(&resolved.model).to_string();
-
-    let exp = Exp::new(
-        model_name.clone(),
-        num_responses_per_round,
-        10,
-        client,
-    );
-
-    let messages = vec![Message::user(query)];
-
-    println!("🤖 Thinking (using {} with rounds {})...", model_name, rounds);
-
-    let mut stream = exp.process_single_stream(messages, "ask").await?;
-
-    println!("\nFinal Answer:");
-    while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result?;
-        if let Some(choice) = chunk.choices.first() {
-            if let Some(delta) = &choice.delta {
-                print!("{}", delta.content);
-                stdout().flush()?;
-            } else if let Some(message) = &choice.message {
-                print!("{}", message.content);
-                stdout().flush()?;
-            }
-        }
-    }
-    println!("\n");
-
-    Ok(())
+    // Fallback to standard one-shot query
+    let formatter = OutputFormatter::new();
+    let cli = Cli::parse();
+    handle_one_shot(&cli, query, config, &formatter).await
 }
 
 /// Handle the interactive hub menu
@@ -590,6 +667,101 @@ async fn handle_session_command(cmd: &SessionCommand, _config: &Config) -> Resul
     Ok(())
 }
 
+/// Handle prompts commands (edit, reset, validate, list)
+async fn handle_prompts_command(cmd: &PromptsCommand) -> Result<()> {
+    use crate::cli::PromptType;
+    
+    let config_dir = dirs::config_dir()
+        .context("Could not find config directory")?
+        .join("mylm")
+        .join("prompts");
+    
+    fn get_prompt_path(config_dir: &std::path::Path, prompt_type: &PromptType) -> std::path::PathBuf {
+        match prompt_type {
+            PromptType::System => config_dir.join("system.md"),
+            PromptType::Worker => config_dir.join("worker.md"),
+            PromptType::Memory => config_dir.join("memory.md"),
+        }
+    }
+    
+    fn get_prompt_name(prompt_type: &PromptType) -> &'static str {
+        match prompt_type {
+            PromptType::System => "default",
+            PromptType::Worker => "worker",
+            PromptType::Memory => "memory",
+        }
+    }
+    
+    match cmd {
+        PromptsCommand::Edit { prompt_type } => {
+            let prompt_path = get_prompt_path(&config_dir, prompt_type);
+            let prompt_name = get_prompt_name(prompt_type);
+            
+            // Create directory if it doesn't exist
+            std::fs::create_dir_all(&config_dir).context("Failed to create prompts directory")?;
+            
+            // If file doesn't exist, write default content
+            if !prompt_path.exists() {
+                let default_prompt = mylm_core::config::load_prompt(prompt_name).await
+                    .context("Failed to load default prompt")?;
+                std::fs::write(&prompt_path, default_prompt).context("Failed to write default prompt file")?;
+            }
+            
+            // Open in editor
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
+            let status = std::process::Command::new(editor)
+                .arg(&prompt_path)
+                .status()
+                .context("Failed to launch editor")?;
+            
+            if status.success() {
+                println!("✅ Prompts updated. Restart mylm to apply changes.");
+            } else {
+                anyhow::bail!("Editor exited with error");
+            }
+        }
+        PromptsCommand::Reset { prompt_type } => {
+            let prompt_path = get_prompt_path(&config_dir, prompt_type);
+            
+            if prompt_path.exists() {
+                // Remove the custom file to fall back to compiled default
+                std::fs::remove_file(&prompt_path).context("Failed to remove custom prompt file")?;
+                println!("✅ Prompts reset to default. Restart mylm to apply changes.");
+            } else {
+                println!("ℹ️  No custom prompts found. System is using the default.");
+            }
+        }
+        PromptsCommand::Validate => {
+            println!("🔍 Validating prompt configurations...");
+            
+            for prompt_type in [PromptType::System, PromptType::Worker, PromptType::Memory] {
+                let prompt_name = get_prompt_name(&prompt_type);
+                match mylm_core::config::load_prompt(prompt_name).await {
+                    Ok(_) => println!("  ✅ {} prompt is valid", prompt_name),
+                    Err(e) => println!("  ❌ {} prompt error: {}", prompt_name, e),
+                }
+            }
+        }
+        PromptsCommand::List => {
+            println!("📋 Available prompts:");
+            
+            for prompt_type in [PromptType::System, PromptType::Worker, PromptType::Memory] {
+                let prompt_path = get_prompt_path(&config_dir, &prompt_type);
+                let prompt_name = get_prompt_name(&prompt_type);
+                let type_name = format!("{:?}", prompt_type).to_lowercase();
+                
+                if prompt_path.exists() {
+                    println!("  {} {} (custom)", type_name, prompt_path.display());
+                } else {
+                    println!("  {} {} (default/embedded)", type_name, prompt_name);
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
 /// Handle the unified settings dashboard - Multi-Provider Menu System
 async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
     // Ensure we have at least one profile if none exist
@@ -661,6 +833,12 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                             loop {
                                 let rl_action = crate::cli::hub::show_rate_limit_settings_menu(config)?;
                                 match rl_action {
+                                    crate::cli::hub::RateLimitSettingsChoice::SetRateLimitTier => {
+                                        crate::cli::hub::handle_set_rate_limit_tier(config)?;
+                                    }
+                                    crate::cli::hub::RateLimitSettingsChoice::SetWorkerLimit => {
+                                        crate::cli::hub::handle_set_worker_limit(config)?;
+                                    }
                                     crate::cli::hub::RateLimitSettingsChoice::SetMainRpm => {
                                         crate::cli::hub::handle_set_main_rpm(config)?;
                                     }
@@ -673,6 +851,9 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                         }
                         crate::cli::hub::AgentSettingsChoice::ToggleTmuxAutostart => {
                             crate::cli::hub::handle_toggle_tmux_autostart(config)?;
+                        }
+                        crate::cli::hub::AgentSettingsChoice::ToggleAgentVersion => {
+                            crate::cli::hub::handle_toggle_agent_version(config)?;
                         }
                         crate::cli::hub::AgentSettingsChoice::PaCoReSettings => {
                             loop {
@@ -701,11 +882,66 @@ async fn handle_settings_dashboard(config: &mut Config) -> Result<()> {
                                     crate::cli::hub::PermissionsMenuChoice::SetForbiddenCommands => {
                                         crate::cli::hub::handle_set_forbidden_commands(config)?;
                                     }
+                                    crate::cli::hub::PermissionsMenuChoice::ConfigureWorkerShell => {
+                                        loop {
+                                            let worker_action = crate::cli::hub::show_worker_shell_menu(config)?;
+                                            match worker_action {
+                                                crate::cli::hub::WorkerShellMenuChoice::SetAllowedPatterns => {
+                                                    crate::cli::hub::handle_set_worker_allowed_commands(config)?;
+                                                }
+                                                crate::cli::hub::WorkerShellMenuChoice::SetRestrictedPatterns => {
+                                                    crate::cli::hub::handle_set_worker_restricted_commands(config)?;
+                                                }
+                                                crate::cli::hub::WorkerShellMenuChoice::SetForbiddenPatterns => {
+                                                    crate::cli::hub::handle_set_worker_forbidden_commands(config)?;
+                                                }
+                                                crate::cli::hub::WorkerShellMenuChoice::SetEscalationMode => {
+                                                    crate::cli::hub::handle_set_worker_escalation_mode(config)?;
+                                                }
+                                                crate::cli::hub::WorkerShellMenuChoice::ResetToDefaults => {
+                                                    crate::cli::hub::handle_reset_worker_shell_defaults(config)?;
+                                                }
+                                                crate::cli::hub::WorkerShellMenuChoice::Back => break,
+                                            }
+                                        }
+                                    }
                                     crate::cli::hub::PermissionsMenuChoice::Back => break,
                                 }
                             }
                         }
+                        crate::cli::hub::AgentSettingsChoice::WorkerResilienceSettings => {
+                            loop {
+                                let resilience_action = crate::cli::hub::show_worker_resilience_menu(config)?;
+                                match resilience_action {
+                                    crate::cli::hub::WorkerResilienceSettingsChoice::SetMaxToolFailures => {
+                                        crate::cli::hub::handle_set_max_tool_failures(config)?;
+                                    }
+                                    crate::cli::hub::WorkerResilienceSettingsChoice::Back => break,
+                                }
+                            }
+                        }
                         crate::cli::hub::AgentSettingsChoice::Back => break,
+                    }
+                }
+            }
+
+            crate::cli::hub::SettingsMenuChoice::PromptSettings => {
+                loop {
+                    let action = crate::cli::hub::show_prompt_settings_menu(config)?;
+                    match action {
+                        crate::cli::hub::PromptMenuChoice::SystemPrompt => {
+                            crate::cli::hub::handle_system_prompt(config)?;
+                        }
+                        crate::cli::hub::PromptMenuChoice::WorkerPrompt => {
+                            crate::cli::hub::handle_worker_prompt(config)?;
+                        }
+                        crate::cli::hub::PromptMenuChoice::MemoryPrompt => {
+                            crate::cli::hub::handle_memory_prompt(config)?;
+                        }
+                        crate::cli::hub::PromptMenuChoice::ViewCurrentPrompts => {
+                            crate::cli::hub::view_current_prompts(config)?;
+                        }
+                        crate::cli::hub::PromptMenuChoice::Back => break,
                     }
                 }
             }
@@ -747,12 +983,13 @@ async fn handle_one_shot(
                 base_url,
                 resolved.model.clone(),
                 Some(api_key),
+                resolved.agent.max_context_tokens,
             )
             .with_memory(config.features.memory.clone());
     let client = Arc::new(LlmClient::new(llm_config)?);
 
     // Build hierarchical system prompt
-    let system_prompt = mylm_core::config::build_system_prompt(&ctx, "default", Some("CLI (Single Query)"), None).await?;
+    let system_prompt = mylm_core::config::build_system_prompt(&ctx, "default", Some("CLI (Single Query)"), None, None, None).await?;
 
     println!("{} Querying {} with model {}...",
         blue.apply_to("🤖"),
@@ -761,7 +998,7 @@ async fn handle_one_shot(
     );
 
     // Initialize dependencies for tools
-    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<crate::terminal::app::TuiEvent>();
+    let (_event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel::<crate::terminal::app::TuiEvent>();
     
     // Determine auto-approve based on CLI flags
     let auto_approve = match &cli.command {
@@ -819,97 +1056,73 @@ async fn handle_one_shot(
         client.clone()
     ));
 
-    // Create all tools as Arc<dyn Tool>
+    // Create builder with tools
     let resolved = config.resolve_profile();
-    let shell_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::shell::ShellTool::new(
-        executor,
-        ctx.clone(),
-        event_tx.clone(),
-        Some(store.clone()),
-        Some(Arc::new(mylm_core::memory::MemoryCategorizer::new(client.clone(), store.clone()))),
-        None,
-        Some(job_registry.clone()),
-        resolved.agent.permissions.clone(),
-    ));
-    let web_search_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::web_search::WebSearchTool::new(config.features.web_search.clone(), event_tx.clone()));
-    let memory_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::memory::MemoryTool::new(store.clone()));
-    let crawl_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::crawl::CrawlTool::new(event_tx.clone()));
-    let file_read_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::fs::FileReadTool);
-    let file_write_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::fs::FileWriteTool);
-    let git_status_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::git::GitStatusTool);
-    let git_log_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::git::GitLogTool);
-    let git_diff_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::git::GitDiffTool);
-    let state_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::state::StateTool::new(state_store.clone()));
-    let system_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::system::SystemMonitorTool::new());
-    let terminal_sight_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::terminal_sight::TerminalSightTool::new(event_tx.clone()));
-    let wait_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::wait::WaitTool);
-    let list_jobs_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::jobs::ListJobsTool::new(job_registry.clone()));
+    let terminal_executor: Arc<dyn TerminalExecutor> = Arc::new(HeadlessTerminalExecutor);
+    let crawl_event_bus = Arc::new(mylm_core::agent::event_bus::EventBus::new());
+    let categorizer = Arc::new(mylm_core::memory::MemoryCategorizer::new(client.clone(), store.clone()));
     
-    // Build tools HashMap for DelegateTool (must include all tools that can be delegated)
-    let mut tools_map = std::collections::HashMap::new();
-    tools_map.insert(shell_tool.name().to_string(), shell_tool.clone());
-    tools_map.insert(web_search_tool.name().to_string(), web_search_tool.clone());
-    tools_map.insert(memory_tool.name().to_string(), memory_tool.clone());
-    tools_map.insert(crawl_tool.name().to_string(), crawl_tool.clone());
-    tools_map.insert(file_read_tool.name().to_string(), file_read_tool.clone());
-    tools_map.insert(file_write_tool.name().to_string(), file_write_tool.clone());
-    tools_map.insert(git_status_tool.name().to_string(), git_status_tool.clone());
-    tools_map.insert(git_log_tool.name().to_string(), git_log_tool.clone());
-    tools_map.insert(git_diff_tool.name().to_string(), git_diff_tool.clone());
-    tools_map.insert(state_tool.name().to_string(), state_tool.clone());
-    tools_map.insert(system_tool.name().to_string(), system_tool.clone());
-    tools_map.insert(terminal_sight_tool.name().to_string(), terminal_sight_tool.clone());
-    tools_map.insert(wait_tool.name().to_string(), wait_tool.clone());
-    tools_map.insert(list_jobs_tool.name().to_string(), list_jobs_tool.clone());
-    
-    // Create DelegateTool with access to all tools
-    let delegate_tool: Arc<dyn mylm_core::agent::Tool> = Arc::new(mylm_core::agent::tools::delegate::DelegateTool::new(
-        client.clone(),
-        scribe,
-        job_registry.clone(),
-        Some(store.clone()),
-        Some(Arc::new(mylm_core::memory::MemoryCategorizer::new(client.clone(), store.clone()))),
-        None, // memory_store
-        tools_map,
-        None, // permissions - will inherit from agent
-    ));
-
-    let tools: Vec<Arc<dyn mylm_core::agent::Tool>> = vec![
-        shell_tool,
-        web_search_tool,
-        memory_tool,
-        crawl_tool,
-        file_read_tool,
-        file_write_tool,
-        git_status_tool,
-        git_log_tool,
-        git_diff_tool,
-        state_tool,
-        system_tool,
-        delegate_tool,
-        terminal_sight_tool,
-        wait_tool,
-        list_jobs_tool,
-    ];
-
     let max_iterations = config.get_active_profile_info()
         .and_then(|p| p.max_iterations)
         .unwrap_or(10);
 
-    let categorizer = Arc::new(mylm_core::memory::categorizer::MemoryCategorizer::new(client.clone(), store.clone()));
-    let mut agent = mylm_core::agent::Agent::new_with_iterations(
-        client,
-        tools,
-        system_prompt,
-        max_iterations,
-        mylm_core::config::AgentVersion::V2,
-        Some(store),
-        Some(categorizer),
-        Some(job_registry),
-        None, // scratchpad
-        false, // disable_memory
+    let builder = mylm_core::agent::v2::driver::factory::AgentConfigs::one_shot(
+        client.clone(),
+        executor.clone(),
+        ctx.clone(),
+        terminal_executor.clone(),
+        store.clone(),
+        Some(categorizer.clone()),
+        job_registry.clone(),
         resolved.agent.permissions.clone(),
-    ).await;
+        config.features.web_search.clone(),
+        crawl_event_bus.clone(),
+        state_store.clone(),
+    )
+    .with_system_prompt(system_prompt)
+    .with_max_iterations(max_iterations);
+
+    // Extract tools to build map for delegate
+    let tools = builder.build_tools().await?;
+    
+    // Build tools HashMap for DelegateTool
+    let mut tools_map = std::collections::HashMap::new();
+    for tool in &tools {
+        tools_map.insert(tool.name().to_string(), tool.clone());
+    }
+
+    // Create executor for DelegateTool
+    use mylm_core::executor::{CommandExecutor, allowlist::CommandAllowlist, safety::SafetyChecker};
+    let allowlist = CommandAllowlist::new();
+    let safety_checker = SafetyChecker::new();
+    let executor = Arc::new(CommandExecutor::new(allowlist, safety_checker));
+
+    // Create DelegateTool with access to all tools
+    let delegate_config = mylm_core::agent::tools::delegate::DelegateToolConfig {
+        llm_client: client.clone(),
+        scribe,
+        job_registry: job_registry.clone(),
+        memory_store: Some(store.clone()),
+        categorizer: Some(categorizer.clone()),
+        event_bus: None,
+        tools: tools_map,
+        permissions: None,
+        max_iterations: 50,
+        executor,
+        max_tool_failures: 5,
+        worker_model: Some(resolved.agent.worker_model.clone()),
+        providers: config.providers.clone(),
+    };
+    let delegate_tool = mylm_core::agent::tools::delegate::DelegateTool::new(delegate_config);
+
+    // Add DelegateTool to builder and build agent
+    let builder = builder.with_tool(Box::new(delegate_tool));
+    let built_agent = builder.build().await;
+    
+    let mut agent = match built_agent {
+        mylm_core::BuiltAgent::V1(a) => a,
+        mylm_core::BuiltAgent::V2(_) => anyhow::bail!("Unexpected Agent V2 in one-shot mode"),
+    };
     
     let messages = vec![
         mylm_core::llm::chat::ChatMessage::user(query.to_string()),
@@ -918,7 +1131,8 @@ async fn handle_one_shot(
     // Dummy interrupt flag for one-shot
     let interrupt_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-    match agent.run(messages, event_tx, interrupt_flag, auto_approve, 30, None).await {
+    let run_event_bus = Arc::new(mylm_core::agent::event_bus::EventBus::new());
+    match agent.run(messages, run_event_bus, interrupt_flag, auto_approve, 30, None).await {
         Ok((response, _usage)) => {
             // Stop the log task
             log_handle.abort();

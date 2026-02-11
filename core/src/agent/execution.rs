@@ -5,10 +5,10 @@
 
 use crate::agent::tool::ToolKind;
 use crate::agent::tool_registry::ToolRegistry;
-use crate::terminal::app::TuiEvent;
+use crate::agent::event_bus::{EventBus, CoreEvent};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::mpsc::{UnboundedSender, Receiver};
+use tokio::sync::mpsc::Receiver;
 
 /// Process tool arguments from JSON if necessary
 /// 
@@ -49,7 +49,7 @@ pub async fn handle_tool_approval(
     tool: &str,
     args: &str,
     auto_approve: bool,
-    event_tx: &UnboundedSender<TuiEvent>,
+    event_bus: &Arc<EventBus>,
     approval_rx: &mut Option<Receiver<bool>>,
 ) -> Result<bool, String> {
     if auto_approve {
@@ -72,19 +72,19 @@ pub async fn handle_tool_approval(
         format!("{} {}", tool, args)
     };
     
-    let _ = event_tx.send(TuiEvent::SuggestCommand(suggestion));
+    let _ = event_bus.publish(CoreEvent::SuggestCommand { command: suggestion });
 
     if let Some(rx) = approval_rx {
         // Wait for approval (one tool execution == one approval)
-        let _ = event_tx.send(TuiEvent::StatusUpdate("Waiting for approval...".to_string()));
+        let _ = event_bus.publish(CoreEvent::StatusUpdate { message: "Waiting for approval...".to_string() });
         
         match rx.recv().await {
             Some(true) => {
-                let _ = event_tx.send(TuiEvent::StatusUpdate("Approved.".to_string()));
+                let _ = event_bus.publish(CoreEvent::StatusUpdate { message: "Approved.".to_string() });
                 Ok(true)
             }
             Some(false) => {
-                let _ = event_tx.send(TuiEvent::StatusUpdate("Denied.".to_string()));
+                let _ = event_bus.publish(CoreEvent::StatusUpdate { message: "Denied.".to_string() });
                 Ok(false)
             }
             None => Err("Approval channel closed.".to_string()),
@@ -103,17 +103,17 @@ pub fn emit_tool_observation(
     tool: &str,
     observation: &str,
     kind: ToolKind,
-    event_tx: &UnboundedSender<TuiEvent>,
+    event_bus: &Arc<EventBus>,
 ) {
     if kind == ToolKind::Internal {
         let obs_log = format!("\x1b[32m[Observation]:\x1b[0m {}\r\n", observation.trim());
-        let _ = event_tx.send(TuiEvent::InternalObservation(obs_log.into_bytes()));
+        let _ = event_bus.publish(CoreEvent::InternalObservation { data: obs_log.into_bytes() });
     }
     
-    let _ = event_tx.send(TuiEvent::StatusUpdate(format!(
+    let _ = event_bus.publish(CoreEvent::StatusUpdate { message: format!(
         "Tool '{}' completed",
         tool
-    )));
+    ) });
 }
 
 /// Check for interruption signal

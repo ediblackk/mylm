@@ -102,7 +102,7 @@ impl Default for Config {
             max_context_tokens: 128_000,
             condense_threshold: 0.8,
             max_output_tokens: 4096,
-            worker_limit: 5,
+            worker_limit: 20,  // Increased from 5 - default is now 20 workers
             rate_limit_tokens_per_minute: 100_000,
             rate_limit_requests_per_minute: 100,
             model_costs,
@@ -526,6 +526,26 @@ impl ConfigManager {
         self.config.read().await.worker_limit
     }
 
+    /// Set worker limit based on provider tier
+    pub async fn configure_for_provider_tier(&self, tier: &str) {
+        let (worker_limit, rpm) = match tier.to_lowercase().as_str() {
+            "conservative" | "basic" | "free" => (10, 60u32),
+            "standard" | "pro" => (20, 120u32),
+            "high" | "premium" | "business" => (50, 300u32),
+            "enterprise" | "unlimited" => (100, 600u32),
+            _ => (20, 100u32),
+        };
+        
+        {
+            let mut config = self.config.write().await;
+            config.worker_limit = worker_limit;
+            config.rate_limit_requests_per_minute = rpm as usize;
+        }
+        
+        crate::info_log!("[CONFIG] Configured for provider tier '{}': worker_limit={}, rpm={}", 
+            tier, worker_limit, rpm);
+    }
+
     /// Get cost per token for a model
     pub async fn get_model_cost(&self, model: &str) -> Option<CostPerToken> {
         self.config.read().await.model_costs.get(model).cloned()
@@ -547,7 +567,7 @@ mod tests {
         assert_eq!(config.max_context_tokens, 128_000);
         assert_eq!(config.condense_threshold, 0.8);
         assert_eq!(config.max_output_tokens, 4096);
-        assert_eq!(config.worker_limit, 5);
+        assert_eq!(config.worker_limit, 20);
         assert_eq!(config.rate_limit_tokens_per_minute, 100_000);
         assert_eq!(config.rate_limit_requests_per_minute, 100);
         assert!(config.model_costs.contains_key("gemini-2.0-flash"));

@@ -46,7 +46,7 @@ pub struct LlmConfig {
     /// Memory configuration (auto-record, auto-context)
     pub memory: crate::config::MemoryConfig,
     /// Additional provider-specific parameters
-    #[allow(dead_code)]
+    
     pub extra_params: HashMap<String, String>,
 }
 
@@ -57,6 +57,7 @@ impl LlmConfig {
         base_url: String,
         model: String,
         api_key: Option<String>,
+        max_context_tokens: usize,
     ) -> Self {
         LlmConfig {
             provider,
@@ -68,7 +69,7 @@ impl LlmConfig {
             system_prompt: None,
             input_price_per_1m: 0.0,
             output_price_per_1m: 0.0,
-            max_context_tokens: 32768,
+            max_context_tokens,
             condense_threshold: 0.8,
             memory: crate::config::MemoryConfig::default(),
             extra_params: HashMap::new(),
@@ -96,21 +97,21 @@ impl LlmConfig {
     }
 
     /// Set maximum tokens
-    #[allow(dead_code)]
+    
     pub fn with_max_tokens(mut self, tokens: u32) -> Self {
         self.max_tokens = Some(tokens);
         self
     }
 
     /// Set temperature
-    #[allow(dead_code)]
+    
     pub fn with_temperature(mut self, temp: f32) -> Self {
         self.temperature = Some(temp.clamp(0.0, 2.0));
         self
     }
 
     /// Set system prompt
-    #[allow(dead_code)]
+    
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         self.system_prompt = Some(prompt);
         self
@@ -137,13 +138,13 @@ impl std::fmt::Display for TokenUsage {
 }
 
 /// Create a default LLM client with the given configuration
-#[allow(dead_code)]
+
 pub fn create_client(config: LlmConfig) -> Result<LlmClient> {
     LlmClient::new(config).context("Failed to create LLM client")
 }
 
 /// Get the system prompt for terminal AI assistant
-#[allow(dead_code)]
+
 pub fn get_terminal_system_prompt() -> String {
     String::from(
         "You are a helpful AI assistant that helps with terminal operations and system administration. \

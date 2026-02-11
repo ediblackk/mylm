@@ -1,19 +1,28 @@
+//! Memory consolidation tool for transferring short-term to long-term memory.
+//!
+//! Allows agents to save important facts to the vector store memory system
+//! while condensing the scratchpad to manage context window space.
+//!
+//! # Main Types
+//! - `ConsolidateTool`: Tool for memory consolidation operations
+
 use anyhow::Result;
 use async_trait::async_trait;
 use crate::agent::tool::{Tool, ToolOutput, ToolKind};
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
-use std::sync::RwLock;
+use tokio::sync::RwLock;
+use crate::agent::tools::StructuredScratchpad;
 
 #[derive(Clone)]
 pub struct ConsolidateTool {
-    scratchpad: Arc<RwLock<String>>,
+    scratchpad: Arc<RwLock<StructuredScratchpad>>,
     store: Arc<crate::memory::store::VectorStore>,
 }
 
 impl ConsolidateTool {
-    pub fn new(scratchpad: Arc<RwLock<String>>, store: Arc<crate::memory::store::VectorStore>) -> Self {
+    pub fn new(scratchpad: Arc<RwLock<StructuredScratchpad>>, store: Arc<crate::memory::store::VectorStore>) -> Self {
         Self { scratchpad, store }
     }
 }
@@ -101,10 +110,11 @@ impl Tool for ConsolidateTool {
             }
         }
 
-        // Update scratchpad
+        // Update scratchpad: clear non-persistent entries and add new condensed content
         {
-            let mut scratchpad = self.scratchpad.write().map_err(|_| anyhow::anyhow!("Scratchpad lock poisoned"))?;
-            *scratchpad = args.new_scratchpad;
+            let mut scratchpad = self.scratchpad.write().await;
+            scratchpad.clear(true); // Keep persistent entries
+            scratchpad.append(args.new_scratchpad, None, Vec::new(), false);
         }
 
         Ok(ToolOutput::Immediate(serde_json::Value::String(format!(

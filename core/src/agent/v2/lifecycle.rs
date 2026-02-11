@@ -1,10 +1,12 @@
 //! Agent lifecycle management (reset, state management)
 use crate::llm::chat::{ChatMessage, MessageRole};
 use crate::llm::TokenUsage;
-use crate::agent::v2::prompt::PromptBuilder;
+use crate::agent::prompt::PromptBuilder;
+use crate::agent::tools::StructuredScratchpad;
 use std::sync::RwLock;
 
 /// Manages agent lifecycle: reset, state management.
+#[derive(Default)]
 pub struct LifecycleManager {
     pub history: Vec<ChatMessage>,
     pub iteration_count: usize,
@@ -16,23 +18,6 @@ pub struct LifecycleManager {
     pub parse_failure_count: usize,
     pub max_steps: usize,
     pub budget: usize,
-}
-
-impl Default for LifecycleManager {
-    fn default() -> Self {
-        Self {
-            history: Vec::new(),
-            iteration_count: 0,
-            total_usage: TokenUsage::default(),
-            pending_decision: None,
-            last_tool_call: None,
-            repetition_count: 0,
-            pending_tool_call_id: None,
-            parse_failure_count: 0,
-            max_steps: 0,
-            budget: 0,
-        }
-    }
 }
 
 impl LifecycleManager {
@@ -68,12 +53,13 @@ impl LifecycleManager {
 /// Reset helper that ensures system prompt is present.
 pub async fn reset_with_system_prompt(
     history: &mut Vec<ChatMessage>,
-    scratchpad: &RwLock<String>,
+    scratchpad: &RwLock<StructuredScratchpad>,
     prompt_builder: &mut PromptBuilder,
 ) {
     // Ensure system prompt is present with capability awareness
     if history.is_empty() || history[0].role != MessageRole::System {
-        let scratchpad_content = scratchpad.read().unwrap_or_else(|e| e.into_inner());
+        let scratchpad_guard = scratchpad.read().unwrap_or_else(|e| e.into_inner());
+        let scratchpad_content = scratchpad_guard.to_string();
         history.insert(0, ChatMessage::system(prompt_builder.build(&scratchpad_content)));
     }
 }

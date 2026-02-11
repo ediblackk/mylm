@@ -44,8 +44,17 @@ impl HelpSystem {
         }
         output.push_str("╠══════════════════════════════════════════════════════════════════════════════╣\n");
 
+        // MOUSE SECTION
+        output.push_str("║ MOUSE                                                                        ║\n");
+        output.push_str("║   Shift+Click          Bypass mylm mouse capture (use terminal's native      ║\n");
+        output.push_str("║                        selection & right-click menu)                         ║\n");
+        output.push_str("║   Drag                 Select text in terminal or chat pane                  ║\n");
+        output.push_str("║   Right/Middle-click   Paste clipboard (or copy if clicking on selection)    ║\n");
+        output.push_str("║   Scroll wheel         Scroll focused pane                                   ║\n");
+        output.push_str("╠══════════════════════════════════════════════════════════════════════════════╣\n");
+
         // SLASH COMMANDS SECTION
-        output.push_str("║ SLASH COMMANDS                                                               ║\n");
+        output.push_str("║ SLASH COMMANDS (type in Chat input)                                          ║\n");
         let commands = Self::get_slash_commands();
         for cmd in &commands {
             let line = format!("║   {:<20} {:<45}║\n", cmd.command, cmd.description);
@@ -63,6 +72,7 @@ impl HelpSystem {
 
         // TIPS SECTION
         output.push_str("║ TIPS                                                                         ║\n");
+        output.push_str("║   • Hold Shift when clicking to use your terminal's native mouse features    ║\n");
         output.push_str("║   • Use /pacore for parallel context retrieval reasoning                     ║\n");
         output.push_str("║   • Background jobs appear in jobs panel (F4)                                ║\n");
         output.push_str("║   • Workers can process large documents in parallel                          ║\n");
@@ -76,6 +86,22 @@ impl HelpSystem {
     /// Get all keybindings
     fn get_keybindings() -> Vec<Keybinding> {
         vec![
+            Keybinding {
+                keys: "F1",
+                description: "Toggle this help screen",
+            },
+            Keybinding {
+                keys: "F2",
+                description: "Cycle focus (Terminal → Chat → Jobs)",
+            },
+            Keybinding {
+                keys: "F3",
+                description: "Toggle memory graph view",
+            },
+            Keybinding {
+                keys: "F4",
+                description: "Toggle jobs panel",
+            },
             Keybinding {
                 keys: "Ctrl+C",
                 description: "Abort current AI task (while running)",
@@ -132,7 +158,6 @@ impl HelpSystem {
                 keys: "Ctrl+U",
                 description: "Kill (delete) to start of line",
             },
-
             Keybinding {
                 keys: "Ctrl+Shift+←/→",
                 description: "Adjust chat width",

@@ -1,3 +1,12 @@
+//! Global state persistence tool for cross-session data storage.
+//!
+//! Provides key-value storage for maintaining state between conversations
+//! and sessions. Supports get, set, delete, and list operations on JSON values.
+//!
+//! # Main Types
+//! - `StateTool`: Tool implementation for state operations
+//! - `StateCommand`: Enum of available state commands
+
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use crate::agent::tool::{Tool, ToolKind, ToolOutput};

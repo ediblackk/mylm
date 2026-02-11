@@ -46,6 +46,7 @@ pub enum SettingsMenuChoice {
     SelectWorkerModel, // Choose provider + model for worker
     WebSearchSettings, // Web search provider config
     AgentSettings, // Max iterations, tmux, etc
+    PromptSettings, // Prompt customization
     Back,
 }
 
@@ -57,7 +58,8 @@ impl std::fmt::Display for SettingsMenuChoice {
             SettingsMenuChoice::SelectWorkerModel => write!(f, "⚡ [3] Select Worker Model"),
             SettingsMenuChoice::WebSearchSettings => write!(f, "🌐 [4] Web Search"),
             SettingsMenuChoice::AgentSettings => write!(f, "⚙️  [5] Agent Settings"),
-            SettingsMenuChoice::Back => write!(f, "⬅️  [6] Back"),
+            SettingsMenuChoice::PromptSettings => write!(f, "📝 [6] Prompt Settings"),
+            SettingsMenuChoice::Back => write!(f, "⬅️  [7] Back"),
         }
     }
 }
@@ -107,7 +109,9 @@ impl std::fmt::Display for WebSearchMenuChoice {
 pub enum AgentSettingsChoice {
     IterationsSettings,
     RateLimitSettings,
+    WorkerResilienceSettings,
     ToggleTmuxAutostart,
+    ToggleAgentVersion,
     PaCoReSettings,
     PermissionsSettings,
     Back,
@@ -119,8 +123,10 @@ impl std::fmt::Display for AgentSettingsChoice {
             AgentSettingsChoice::IterationsSettings => write!(f, "🔁 Iterations Settings"),
             AgentSettingsChoice::RateLimitSettings => write!(f, "⏱️  Rate Limit Settings (LLM)"),
             AgentSettingsChoice::ToggleTmuxAutostart => write!(f, "🔄 Toggle Tmux Autostart"),
+            AgentSettingsChoice::ToggleAgentVersion => write!(f, "🤖 Toggle Agent Version (V1/V2)"),
             AgentSettingsChoice::PaCoReSettings => write!(f, "⚡ PaCoRe Settings"),
             AgentSettingsChoice::PermissionsSettings => write!(f, "🔒 Permissions"),
+            AgentSettingsChoice::WorkerResilienceSettings => write!(f, "🛡️  Worker Resilience Settings"),
             AgentSettingsChoice::Back => write!(f, "⬅️  Back"),
         }
     }
@@ -132,6 +138,7 @@ pub enum PermissionsMenuChoice {
     SetAllowedTools,
     SetAutoApproveCommands,
     SetForbiddenCommands,
+    ConfigureWorkerShell,
     Back,
 }
 
@@ -141,6 +148,7 @@ impl std::fmt::Display for PermissionsMenuChoice {
             PermissionsMenuChoice::SetAllowedTools => write!(f, "🔧 Allowed Tools"),
             PermissionsMenuChoice::SetAutoApproveCommands => write!(f, "✅ Auto-Approve Commands"),
             PermissionsMenuChoice::SetForbiddenCommands => write!(f, "🚫 Forbidden Commands"),
+            PermissionsMenuChoice::ConfigureWorkerShell => write!(f, "👷 Worker Shell Permissions"),
             PermissionsMenuChoice::Back => write!(f, "⬅️  Back"),
         }
     }
@@ -167,6 +175,8 @@ impl std::fmt::Display for IterationsSettingsChoice {
 /// LLM Rate Limit settings submenu
 #[derive(Debug, PartialEq)]
 pub enum RateLimitSettingsChoice {
+    SetRateLimitTier,
+    SetWorkerLimit,
     SetMainRpm,
     SetWorkersRpm,
     Back,
@@ -175,9 +185,27 @@ pub enum RateLimitSettingsChoice {
 impl std::fmt::Display for RateLimitSettingsChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            RateLimitSettingsChoice::SetRateLimitTier => write!(f, "⚡ Set Rate Limit Tier (Provider)"),
+            RateLimitSettingsChoice::SetWorkerLimit => write!(f, "👷 Set Max Workers"),
             RateLimitSettingsChoice::SetMainRpm => write!(f, "🤖 Set Main Agent Rate Limit (RPM)"),
-            RateLimitSettingsChoice::SetWorkersRpm => write!(f, "👷 Set Workers Rate Limit (RPM)"),
+            RateLimitSettingsChoice::SetWorkersRpm => write!(f, "⚙️  Set Workers Rate Limit (RPM)"),
             RateLimitSettingsChoice::Back => write!(f, "⬅️  Back"),
+        }
+    }
+}
+
+/// Worker Resilience settings submenu
+#[derive(Debug, PartialEq)]
+pub enum WorkerResilienceSettingsChoice {
+    SetMaxToolFailures,
+    Back,
+}
+
+impl std::fmt::Display for WorkerResilienceSettingsChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkerResilienceSettingsChoice::SetMaxToolFailures => write!(f, "🔧 Set Max Tool Failures"),
+            WorkerResilienceSettingsChoice::Back => write!(f, "⬅️  Back"),
         }
     }
 }
@@ -196,6 +224,30 @@ impl std::fmt::Display for PaCoReSettingsChoice {
             PaCoReSettingsChoice::TogglePaCoRe => write!(f, "⚡ Toggle PaCoRe"),
             PaCoReSettingsChoice::SetPaCoReRounds => write!(f, "📊 Set PaCoRe Rounds"),
             PaCoReSettingsChoice::Back => write!(f, "⬅️  Back"),
+        }
+    }
+}
+
+/// Worker Shell settings submenu
+#[derive(Debug, PartialEq)]
+pub enum WorkerShellMenuChoice {
+    SetAllowedPatterns,
+    SetRestrictedPatterns,
+    SetForbiddenPatterns,
+    SetEscalationMode,
+    ResetToDefaults,
+    Back,
+}
+
+impl std::fmt::Display for WorkerShellMenuChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkerShellMenuChoice::SetAllowedPatterns => write!(f, "🔧 Set Allowed Patterns"),
+            WorkerShellMenuChoice::SetRestrictedPatterns => write!(f, "⚠️  Set Restricted Patterns"),
+            WorkerShellMenuChoice::SetForbiddenPatterns => write!(f, "🚫 Set Forbidden Patterns"),
+            WorkerShellMenuChoice::SetEscalationMode => write!(f, "⚙️  Set Escalation Mode"),
+            WorkerShellMenuChoice::ResetToDefaults => write!(f, "🔄 Reset to Defaults"),
+            WorkerShellMenuChoice::Back => write!(f, "⬅️  Back"),
         }
     }
 }

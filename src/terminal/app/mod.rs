@@ -6,5 +6,7 @@ pub mod session;
 pub mod state;
 pub mod app;
 
-pub use state::Focus;
-pub use app::{AppState, TuiEvent, App};
+pub use state::{Focus, AppState};
+#[allow(unused_imports)]
+pub use state::AppStateContainer;
+pub use app::{TuiEvent, App};

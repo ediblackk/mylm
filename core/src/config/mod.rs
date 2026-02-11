@@ -15,7 +15,8 @@ pub use v2::{
     AgentConfig, AgentOverride, ConfigError, ConfigV2, EndpointConfig,
     EndpointOverride, FeaturesConfig, MemoryConfig, PacoreConfig, Profile,
     PromptsConfig, Provider, ResolvedConfig, SearchProvider, WebSearchConfig,
-    build_system_prompt, build_system_prompt_with_capabilities, generate_capabilities_prompt,
+    build_system_prompt, build_system_prompt_with_capabilities, build_worker_prompt, build_memory_prompt,
+    generate_capabilities_prompt,
     get_identity_prompt, get_memory_protocol, get_prompts_dir, get_react_protocol,
     get_user_prompts_dir, install_default_prompts, load_prompt, load_prompt_from_path,
 };
@@ -259,6 +260,15 @@ pub trait ConfigUiExt {
     /// Set profile workers_rpm override (requests per minute for workers, shared pool)
     fn set_profile_workers_rpm(&mut self, profile_name: &str, rpm: Option<u32>) -> anyhow::Result<()>;
     
+    /// Set profile worker_limit override (max concurrent workers)
+    fn set_profile_worker_limit(&mut self, profile_name: &str, limit: Option<usize>) -> anyhow::Result<()>;
+    
+    /// Set profile rate_limit_tier override (conservative, standard, high, enterprise)
+    fn set_profile_rate_limit_tier(&mut self, profile_name: &str, tier: Option<String>) -> anyhow::Result<()>;
+    
+    /// Set profile max_tool_failures override (consecutive tool failures before worker stalls)
+    fn set_profile_max_tool_failures(&mut self, profile_name: &str, max_failures: Option<usize>) -> anyhow::Result<()>;
+    
     /// Check if configuration is initialized (has valid endpoint)
     fn is_initialized(&self) -> bool;
     
@@ -315,7 +325,7 @@ impl ConfigUiExt for ConfigV2 {
             provider: format!("{:?}", self.endpoint.provider).to_lowercase(),
             base_url: self.endpoint.base_url.clone().unwrap_or_else(|| self.endpoint.provider.default_url()),
             model: self.endpoint.model.clone(),
-            api_key_set: self.endpoint.api_key.is_some() && !self.endpoint.api_key.as_ref().unwrap().is_empty(),
+            api_key_set: self.endpoint.api_key.as_ref().is_some_and(|k| !k.is_empty()),
             timeout_seconds: self.endpoint.timeout_secs,
         }
     }
@@ -326,7 +336,7 @@ impl ConfigUiExt for ConfigV2 {
             provider: format!("{:?}", resolved.provider).to_lowercase(),
             base_url: resolved.base_url.unwrap_or_else(|| resolved.provider.default_url()),
             model: resolved.model,
-            api_key_set: resolved.api_key.is_some() && !resolved.api_key.as_ref().unwrap().is_empty(),
+            api_key_set: resolved.api_key.as_ref().is_some_and(|k| !k.is_empty()),
             timeout_seconds: resolved.timeout_secs,
         }
     }
@@ -435,6 +445,65 @@ impl ConfigUiExt for ConfigV2 {
             // Remove workers_rpm override but keep other agent settings
             if let Some(ref mut agent) = profile.agent {
                 agent.workers_rpm = None;
+            }
+        }
+        Ok(())
+    }
+    
+    fn set_profile_worker_limit(&mut self, profile_name: &str, limit: Option<usize>) -> anyhow::Result<()> {
+        let profile = self.profiles.get_mut(profile_name)
+            .ok_or_else(|| anyhow::anyhow!("Profile '{}' does not exist", profile_name))?;
+        
+        if let Some(l) = limit {
+            let mut agent = profile.agent.clone().unwrap_or_default();
+            agent.worker_limit = Some(l);
+            profile.agent = Some(agent);
+        } else {
+            // Remove worker_limit override but keep other agent settings
+            if let Some(ref mut agent) = profile.agent {
+                agent.worker_limit = None;
+            }
+        }
+        Ok(())
+    }
+    
+    fn set_profile_rate_limit_tier(&mut self, profile_name: &str, tier: Option<String>) -> anyhow::Result<()> {
+        let profile = self.profiles.get_mut(profile_name)
+            .ok_or_else(|| anyhow::anyhow!("Profile '{}' does not exist", profile_name))?;
+        
+        if let Some(t) = tier {
+            // Validate tier
+            let valid_tiers = ["conservative", "standard", "high", "enterprise"];
+            if !valid_tiers.contains(&t.as_str()) {
+                return Err(anyhow::anyhow!(
+                    "Invalid tier '{}'. Valid tiers: conservative, standard, high, enterprise",
+                    t
+                ));
+            }
+            let mut agent = profile.agent.clone().unwrap_or_default();
+            agent.rate_limit_tier = Some(t);
+            profile.agent = Some(agent);
+        } else {
+            // Remove rate_limit_tier override but keep other agent settings
+            if let Some(ref mut agent) = profile.agent {
+                agent.rate_limit_tier = None;
+            }
+        }
+        Ok(())
+    }
+    
+    fn set_profile_max_tool_failures(&mut self, profile_name: &str, max_failures: Option<usize>) -> anyhow::Result<()> {
+        let profile = self.profiles.get_mut(profile_name)
+            .ok_or_else(|| anyhow::anyhow!("Profile '{}' does not exist", profile_name))?;
+        
+        if let Some(mf) = max_failures {
+            let mut agent = profile.agent.clone().unwrap_or_default();
+            agent.max_tool_failures = Some(mf);
+            profile.agent = Some(agent);
+        } else {
+            // Remove max_tool_failures override but keep other agent settings
+            if let Some(ref mut agent) = profile.agent {
+                agent.max_tool_failures = None;
             }
         }
         Ok(())

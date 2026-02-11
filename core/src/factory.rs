@@ -1,22 +1,27 @@
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::RwLock;
 use crate::config::Config;
 use crate::agent::{Agent, Tool};
 use crate::config::AgentVersion;
 use crate::agent::v2::core::AgentV2;
 use crate::llm::{LlmClient, LlmConfig};
-use crate::terminal::app::TuiEvent;
 use crate::memory::store::VectorStore;
 use crate::memory::categorizer::MemoryCategorizer;
 use crate::state::StateStore;
 use crate::executor::{CommandExecutor, allowlist::CommandAllowlist, safety::SafetyChecker};
 use crate::context::TerminalContext;
 use crate::rate_limiter::{RateLimiter, RateLimitConfig};
+use crate::agent::tools::StructuredScratchpad;
+use crate::agent::traits::TerminalExecutor;
+use crate::agent::event_bus::EventBus;
+use crate::agent::tools::worker_shell::{EscalationRequest, EscalationResponse};
 
 pub async fn create_agent_for_session(
     config: &Config,
-    event_tx: mpsc::UnboundedSender<TuiEvent>,
-) -> anyhow::Result<crate::agent::factory::BuiltAgent> {
+    event_bus: Arc<EventBus>,
+    terminal: Arc<dyn TerminalExecutor>,
+    _escalation_tx: Option<tokio::sync::mpsc::Sender<(EscalationRequest, tokio::sync::oneshot::Sender<EscalationResponse>)>>,
+) -> anyhow::Result<crate::agent::v2::driver::factory::BuiltAgent> {
     // Resolve configuration with profile overrides
     let resolved = config.resolve_profile();
     
@@ -28,6 +33,7 @@ pub async fn create_agent_for_session(
         base_url.clone(),
         resolved.model.clone(),
         Some(api_key.clone()),
+        resolved.agent.max_context_tokens,
     )
     .with_memory(config.features.memory.clone());
     
@@ -49,10 +55,11 @@ pub async fn create_agent_for_session(
         .join("mylm")
         .join("memory");
     std::fs::create_dir_all(&data_dir)?;
-    let store = Arc::new(VectorStore::new(data_dir.to_str().unwrap()).await?);
+    let store = Arc::new(VectorStore::new(data_dir.to_str()
+        .ok_or_else(|| anyhow::anyhow!("Invalid data directory path"))?).await?);
 
     // State Store
-    let state_store = Arc::new(std::sync::RwLock::new(StateStore::new()?));
+    let state_store = Arc::new(std::sync::RwLock::new(StateStore::new()?)); // StateStore uses std::sync
 
     // Executor
     let allowlist = CommandAllowlist::new();
@@ -63,31 +70,32 @@ pub async fn create_agent_for_session(
     let categorizer = Arc::new(MemoryCategorizer::new(client.clone(), store.clone()));
 
     // Tools - convert Box to Arc for the agent
+    let shell_config = crate::agent::tools::shell::ShellToolConfig {
+        executor,
+        context: ctx.clone(),
+        terminal: terminal.clone(),
+        memory_store: Some(store.clone()),
+        categorizer: Some(categorizer.clone()),
+        session_id: None,
+        job_registry: None, // JobRegistry not available in Agent v1
+        permissions: None, // permissions - V1 agents don't use permissions
+    };
     let tools: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(crate::agent::tools::shell::ShellTool::new(
-            executor,
-            ctx.clone(),
-            event_tx.clone(),
-            Some(store.clone()),
-            Some(categorizer.clone()),
-            None,
-            None, // JobRegistry not available in Agent v1
-            None, // permissions - V1 agents don't use permissions
-        )),
+        Arc::new(crate::agent::tools::shell::ShellTool::new_with_config(shell_config)),
         Arc::new(crate::agent::tools::web_search::WebSearchTool::new(
-            config.features.web_search.clone(), 
-            event_tx.clone()
+            config.features.web_search.clone()
         )),
         Arc::new(crate::agent::tools::memory::MemoryTool::new(store.clone())),
-        Arc::new(crate::agent::tools::crawl::CrawlTool::new(event_tx.clone())),
+        Arc::new(crate::agent::tools::crawl::CrawlTool::new(Arc::clone(&event_bus))),
         Arc::new(crate::agent::tools::fs::FileReadTool),
         Arc::new(crate::agent::tools::fs::FileWriteTool),
+        Arc::new(crate::agent::tools::list_files::ListFilesTool::with_cwd()),
         Arc::new(crate::agent::tools::git::GitStatusTool),
         Arc::new(crate::agent::tools::git::GitLogTool),
         Arc::new(crate::agent::tools::git::GitDiffTool),
         Arc::new(crate::agent::tools::state::StateTool::new(state_store.clone())),
         Arc::new(crate::agent::tools::system::SystemMonitorTool::new()),
-        Arc::new(crate::agent::tools::terminal_sight::TerminalSightTool::new(event_tx.clone())),
+        Arc::new(crate::agent::tools::terminal_sight::TerminalSightTool::new(terminal.clone())),
         Arc::new(crate::agent::tools::wait::WaitTool),
     ];
 
@@ -96,7 +104,9 @@ pub async fn create_agent_for_session(
         &ctx,
         "default",
         Some("WebSocket Session"),
-        Some(&config.features.prompts)
+        Some(&config.features.prompts),
+        Some(tools.as_slice()),
+        None
     ).await?;
 
     // Determine agent version based on profile settings
@@ -108,31 +118,39 @@ pub async fn create_agent_for_session(
 
     match agent_version {
         AgentVersion::V2 => {
-            let agent = create_agent_v2_for_session(config, event_tx).await?;
-            Ok(crate::agent::factory::BuiltAgent::V2(agent))
+            let agent = create_agent_v2_for_session(config, event_bus, terminal, None).await?;
+            Ok(crate::agent::v2::driver::factory::BuiltAgent::V2(agent))
         }
         AgentVersion::V1 => {
-            let agent = Agent::new_with_iterations(
+            let config = crate::agent::AgentConfig {
                 client,
                 tools,
-                system_prompt,
-                resolved.agent.max_iterations,
-                agent_version,
-                Some(store),
-                Some(categorizer),
-                None, // job_registry
-                None, // scratchpad
-                false, // disable_memory
-                resolved.agent.permissions.clone(), // permissions
-            ).await;
-            Ok(crate::agent::factory::BuiltAgent::V1(agent))
+                system_prompt_prefix: system_prompt,
+                max_iterations: resolved.agent.max_iterations,
+                version: agent_version,
+                memory_store: Some(store),
+                categorizer: Some(categorizer),
+                job_registry: None,
+                scratchpad: None,
+                disable_memory: false,
+                permissions: resolved.agent.permissions.clone(),
+                event_bus: Some(event_bus),
+                max_actions_before_stall: resolved.agent.max_actions_before_stall,
+                max_consecutive_messages: resolved.agent.max_consecutive_messages,
+                max_recovery_attempts: resolved.agent.max_recovery_attempts,
+                max_tool_failures: resolved.agent.max_tool_failures,
+            };
+            let agent = Agent::new_with_config(config).await;
+            Ok(crate::agent::v2::driver::factory::BuiltAgent::V1(agent))
         }
     }
 }
 
 pub async fn create_agent_v2_for_session(
     config: &Config,
-    event_tx: mpsc::UnboundedSender<TuiEvent>,
+    event_bus: Arc<EventBus>,
+    terminal: Arc<dyn TerminalExecutor>,
+    escalation_tx: Option<tokio::sync::mpsc::Sender<(EscalationRequest, tokio::sync::oneshot::Sender<EscalationResponse>)>>,
 ) -> anyhow::Result<AgentV2> {
     // Resolve configuration with profile overrides
     let resolved = config.resolve_profile();
@@ -145,6 +163,7 @@ pub async fn create_agent_v2_for_session(
         base_url.clone(),
         resolved.model.clone(),
         Some(api_key.clone()),
+        resolved.agent.max_context_tokens,
     )
     .with_memory(config.features.memory.clone());
     
@@ -166,10 +185,11 @@ pub async fn create_agent_v2_for_session(
         .join("mylm")
         .join("memory");
     std::fs::create_dir_all(&data_dir)?;
-    let store = Arc::new(VectorStore::new(data_dir.to_str().unwrap()).await?);
+    let store = Arc::new(VectorStore::new(data_dir.to_str()
+        .ok_or_else(|| anyhow::anyhow!("Invalid data directory path"))?).await?);
 
     // State Store
-    let state_store = Arc::new(std::sync::RwLock::new(StateStore::new()?));
+    let state_store = Arc::new(std::sync::RwLock::new(StateStore::new()?)); // StateStore uses std::sync
 
     // Executor
     let allowlist = CommandAllowlist::new();
@@ -187,33 +207,38 @@ pub async fn create_agent_v2_for_session(
 
     // Job Registry (Shared between Agent and Tools)
     let job_registry = crate::agent::v2::jobs::JobRegistry::new();
+    job_registry.set_event_bus(event_bus.clone());
+    
+    // Shared scratchpad for main agent and workers
+    let shared_scratchpad = Arc::new(RwLock::new(StructuredScratchpad::new())); // Use tokio::sync::RwLock
 
     // Tools for AgentV2 - includes the new Delegate tool
+    let shell_config = crate::agent::tools::shell::ShellToolConfig {
+        executor: executor.clone(),
+        context: ctx.clone(),
+        terminal: terminal.clone(),
+        memory_store: Some(store.clone()),
+        categorizer: Some(categorizer.clone()),
+        session_id: None,
+        job_registry: Some(job_registry.clone()), // Share registry with ShellTool if needed
+        permissions: resolved.agent.permissions.clone(), // Pass permissions from config
+    };
     let mut tools_vec: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(crate::agent::tools::shell::ShellTool::new(
-            executor,
-            ctx.clone(),
-            event_tx.clone(),
-            Some(store.clone()),
-            Some(categorizer.clone()),
-            None,
-            Some(job_registry.clone()), // Share registry with ShellTool if needed
-            resolved.agent.permissions.clone(), // Pass permissions from config
-        )),
+        Arc::new(crate::agent::tools::shell::ShellTool::new_with_config(shell_config)),
         Arc::new(crate::agent::tools::web_search::WebSearchTool::new(
-            config.features.web_search.clone(),
-            event_tx.clone()
+            config.features.web_search.clone()
         )),
         Arc::new(crate::agent::tools::memory::MemoryTool::new(store.clone())),
-        Arc::new(crate::agent::tools::crawl::CrawlTool::new(event_tx.clone())),
+        Arc::new(crate::agent::tools::crawl::CrawlTool::new(Arc::clone(&event_bus))),
         Arc::new(crate::agent::tools::fs::FileReadTool),
         Arc::new(crate::agent::tools::fs::FileWriteTool),
+        Arc::new(crate::agent::tools::list_files::ListFilesTool::with_cwd()),
         Arc::new(crate::agent::tools::git::GitStatusTool),
         Arc::new(crate::agent::tools::git::GitLogTool),
         Arc::new(crate::agent::tools::git::GitDiffTool),
         Arc::new(crate::agent::tools::state::StateTool::new(state_store.clone())),
         Arc::new(crate::agent::tools::system::SystemMonitorTool::new()),
-        Arc::new(crate::agent::tools::terminal_sight::TerminalSightTool::new(event_tx.clone())),
+        Arc::new(crate::agent::tools::terminal_sight::TerminalSightTool::new(terminal.clone())),
         Arc::new(crate::agent::tools::wait::WaitTool),
     ];
     
@@ -223,17 +248,35 @@ pub async fn create_agent_v2_for_session(
         tools_map.insert(tool.name().to_string(), tool.clone());
     }
     
+    // Create shared workspace for worker awareness
+    let _shared_workspace = crate::agent::workspace::SharedWorkspace::new(job_registry.clone())
+        .with_vector_store(store.clone());
+    
     // Add DelegateTool with access to parent tools and permissions
-    tools_vec.push(Arc::new(crate::agent::tools::delegate::DelegateTool::new(
-        client.clone(),
-        scribe.clone(),
-        job_registry.clone(), // Share registry with DelegateTool
-        Some(store.clone()),
-        Some(categorizer.clone()),
-        None, // Event tx will be set by AgentV2
-        tools_map, // Pass parent tools as HashMap for delegation
-        resolved.agent.permissions.clone(), // Inherit parent agent's permissions
-    ).with_rate_limiter(rate_limiter)));
+    let delegate_config = crate::agent::tools::delegate::DelegateToolConfig {
+        llm_client: client.clone(),
+        scribe: scribe.clone(),
+        job_registry: job_registry.clone(),
+        memory_store: Some(store.clone()),
+        categorizer: Some(categorizer.clone()),
+        event_bus: Some(event_bus.clone()),
+        tools: tools_map,
+        permissions: resolved.agent.permissions.clone(),
+        max_iterations: resolved.agent.max_iterations,
+        executor: executor.clone(), // For WorkerShellTool
+        max_tool_failures: resolved.agent.max_tool_failures,
+        worker_model: Some(resolved.agent.worker_model.clone()), // Use configured worker_model
+        providers: config.providers.clone(), // Pass providers for worker model lookup
+    };
+    let delegate_tool = crate::agent::tools::delegate::DelegateTool::new(delegate_config)
+        .with_rate_limiter(rate_limiter);
+    // Add escalation channel if provided
+    let delegate_tool = if let Some(tx) = escalation_tx {
+        delegate_tool.with_escalation_channel(tx)
+    } else {
+        delegate_tool
+    };
+    tools_vec.push(Arc::new(delegate_tool));
     
     let tools = tools_vec;
 
@@ -242,22 +285,31 @@ pub async fn create_agent_v2_for_session(
         &ctx,
         "default",
         Some("WebSocket Session"),
-        Some(&config.features.prompts)
+        Some(&config.features.prompts),
+        Some(tools.as_slice()),
+        None
     ).await?;
 
-    Ok(AgentV2::new_with_iterations(
+    let config = crate::agent::v2::AgentV2Config {
         client,
         scribe,
         tools,
-        system_prompt,
-        resolved.agent.max_iterations,
-        AgentVersion::V2,
-        Some(store),
-        Some(categorizer),
-        Some(job_registry),
-        None, // capabilities_context is already included in system_prompt
-        resolved.agent.permissions.clone(), // Pass permissions from config
-        None, // scratchpad
-        false, // disable_memory
-    ))
+        system_prompt_prefix: system_prompt,
+        max_iterations: resolved.agent.max_iterations,
+        version: AgentVersion::V2,
+        memory_store: Some(store),
+        categorizer: Some(categorizer),
+        job_registry: Some(job_registry),
+        capabilities_context: None, // capabilities_context is already included in system_prompt
+        permissions: resolved.agent.permissions.clone(), // Pass permissions from config
+        scratchpad: Some(shared_scratchpad), // Use shared scratchpad that workers can also write to
+        disable_memory: false,
+        event_bus: Some(event_bus),
+        execute_tools_internally: true,
+        max_actions_before_stall: resolved.agent.max_actions_before_stall,
+        max_consecutive_messages: resolved.agent.max_consecutive_messages,
+        max_recovery_attempts: resolved.agent.max_recovery_attempts,
+        max_tool_failures: resolved.agent.max_tool_failures,
+    };
+    Ok(AgentV2::new_with_config(config))
 }

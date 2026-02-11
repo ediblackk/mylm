@@ -13,13 +13,13 @@ use std::process::Output;
 use tokio::process::Command;
 
 /// Command executor with safety checks
-#[allow(dead_code)]
+
 pub struct CommandExecutor {
     allowlist: CommandAllowlist,
     safety_checker: SafetyChecker,
 }
 
-#[allow(dead_code)]
+
 impl CommandExecutor {
     /// Create a new executor
     pub fn new(allowlist: CommandAllowlist, safety_checker: SafetyChecker) -> Self {
@@ -105,27 +105,36 @@ impl CommandExecutor {
         })
     }
 
-    /// Execute the actual command
+    /// Execute the actual command (private implementation)
     async fn execute(
         &self,
         parsed: &ParsedCommand,
         context: &TerminalContext,
     ) -> Result<Output> {
-        let mut cmd = Command::new(&parsed.command);
+        self.execute_raw(&parsed.command, &parsed.args, context.cwd.as_ref().map(|p| p.to_str()).flatten()).await
+    }
 
-        // Add arguments
-        cmd.args(&parsed.args);
+    /// Execute a command directly without safety checks (for worker agents)
+    /// 
+    /// # Safety
+    /// This bypasses allowlist and safety checks. Caller must ensure command is safe.
+    pub async fn execute_raw(
+        &self,
+        command: &str,
+        args: &[String],
+        cwd: Option<&str>,
+    ) -> Result<Output> {
+        let mut cmd = Command::new(command);
+        cmd.args(args);
 
-        // Set working directory
-        if let Some(cwd) = &context.cwd {
-            cmd.current_dir(cwd);
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
         }
 
-        // Execute
         let output = cmd
             .output()
             .await
-            .with_context(|| format!("Failed to execute command: {}", parsed.command))?;
+            .with_context(|| format!("Failed to execute command: {}", command))?;
 
         Ok(output)
     }
@@ -157,7 +166,7 @@ impl CommandExecutor {
 }
 
 /// Parsed command structure
-#[allow(dead_code)]
+
 pub struct ParsedCommand {
     pub command: String,
     pub args: Vec<String>,
@@ -165,7 +174,7 @@ pub struct ParsedCommand {
 
 /// Result of command execution
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+
 pub struct ExecutionResult {
     /// The command that was executed
     pub command: String,
@@ -179,7 +188,7 @@ pub struct ExecutionResult {
     pub exit_code: Option<i32>,
 }
 
-#[allow(dead_code)]
+
 impl ExecutionResult {
     /// Check if execution was successful
     pub fn is_success(&self) -> bool {

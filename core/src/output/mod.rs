@@ -14,8 +14,6 @@ pub struct OutputFormatter {
     blue: Style,
     green: Style,
     yellow: Style,
-    #[allow(dead_code)]
-    red: Style,
     bold: Style,
 }
 
@@ -25,7 +23,6 @@ impl Default for OutputFormatter {
             blue: Style::new().blue(),
             green: Style::new().green(),
             yellow: Style::new().yellow(),
-            red: Style::new().red(),
             bold: Style::new().bold(),
         }
     }
@@ -38,7 +35,7 @@ impl OutputFormatter {
     }
 
     /// Print the AI response
-    #[allow(dead_code)]
+    
     pub fn print_response(&self, response: &ChatResponse) {
         println!();
         println!("{}", self.bold.apply_to("AI Response:"));

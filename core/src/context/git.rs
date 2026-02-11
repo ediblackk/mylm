@@ -65,11 +65,12 @@ fn get_commit_message() -> Option<String> {
 fn get_status_summary() -> String {
     let output = git_command(&["status", "--porcelain"][..]).ok();
 
-    if output.as_ref().map(|o| !o.status.success()).unwrap_or(true) {
-        return "unknown".to_string();
-    }
+    let output = match output {
+        Some(o) if o.status.success() => o,
+        _ => return "unknown".to_string(),
+    };
 
-    let stdout = output.unwrap().stdout;
+    let stdout = output.stdout;
     let status_lines = String::from_utf8_lossy(&stdout);
 
     let mut modified = 0;

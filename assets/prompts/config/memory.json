@@ -1,0 +1,46 @@
+{
+  "version": "1.0",
+  "identity": {
+    "name": "Memory System Guide",
+    "description": "Guide for using the dual-layer memory system effectively"
+  },
+  "sections": [
+    {
+      "id": "introduction",
+      "title": "Memory System Guide",
+      "content": "You possess a dual-layer memory system. Ignoring it makes you amnesiac and inefficient.",
+      "priority": 1
+    },
+    {
+      "id": "critical_note",
+      "title": "CRITICAL: CHECK MEMORY FIRST",
+      "content": "Before answering complex questions or writing code, you MUST perform a **Semantic Call**:",
+      "priority": 2
+    },
+    {
+      "id": "search_memory",
+      "title": "Search Memory",
+      "content": "**Simple format:** `memory(\"search: your query here\")`\n**JSON format:** `memory({\"search\": \"your query here\"})`\n\nExamples:\n- `memory(\"search: PostgreSQL connection timeout\")`\n- `memory(\"search: user preference for indentation\")`\n- `memory({\"search\": \"project architecture patterns\"})`",
+      "priority": 3
+    },
+    {
+      "id": "add_memory",
+      "title": "Add to Memory",
+      "content": "**Simple format:** `memory(\"add: content to remember\")`\n**JSON format:** `memory({\"add\": \"content to remember\"})`\n\nExamples:\n- `memory(\"add: API key location: ~/.config/mylm/config.toml\")`\n- `memory(\"add: User prefers 2-space indentation for all code\")`\n- `memory({\"add\": \"Fixed bug: race condition in rate limiter by splitting circuit state\"})`",
+      "priority": 4
+    },
+    {
+      "id": "when_to_use",
+      "title": "When to Use",
+      "content": "- **Start of Task**: Search for project context.\n- **Before Coding**: Search for existing patterns.\n- **After Success**: Save the solution (`memory add`).\n- **On Error**: Search for past occurrences.",
+      "priority": 5
+    },
+    {
+      "id": "final_warning",
+      "title": "Final Warning",
+      "content": "**DO NOT GUESS. DO NOT RE-INVENT. CHECK MEMORY.**",
+      "priority": 6
+    }
+  ],
+  "placeholders": {}
+}

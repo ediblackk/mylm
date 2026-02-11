@@ -1,17 +1,14 @@
 use crate::agent::tool::{Tool, ToolOutput};
-use crate::terminal::app::TuiEvent;
 use async_trait::async_trait;
 use std::error::Error as StdError;
-use tokio::sync::mpsc;
 
 /// A tool for crawling websites.
 pub struct CrawlTool {
-    _event_tx: mpsc::UnboundedSender<TuiEvent>,
 }
 
 impl CrawlTool {
-    pub fn new(event_tx: mpsc::UnboundedSender<TuiEvent>) -> Self {
-        Self { _event_tx: event_tx }
+    pub fn new(_event_bus: std::sync::Arc<crate::agent::event_bus::EventBus>) -> Self {
+        Self { }
     }
 }
 

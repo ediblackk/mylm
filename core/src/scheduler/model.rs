@@ -97,18 +97,13 @@ impl From<String> for DurationSpec {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum JobTimezone {
     #[serde(rename = "local")]
+    #[default]
     Local,
     #[serde(rename = "utc")]
     Utc,
-}
-
-impl Default for JobTimezone {
-    fn default() -> Self {
-        Self::Local
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,17 +145,12 @@ pub struct DelegateAction {
     pub task: AgentTaskAction,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum AgentContextSpec {
+    #[default]
     None,
     SystemInfoOnly,
     TerminalSnapshot,
-}
-
-impl Default for AgentContextSpec {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,28 +182,18 @@ impl JobPolicy {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum OverlapPolicy {
+    #[default]
     Skip,
     Queue,
     Allow,
 }
 
-impl Default for OverlapPolicy {
-    fn default() -> Self {
-        Self::Skip
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum MisfirePolicy {
+    #[default]
     Skip,
     CatchUp(u32),
-}
-
-impl Default for MisfirePolicy {
-    fn default() -> Self {
-        Self::Skip
-    }
 }
 

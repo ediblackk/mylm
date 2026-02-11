@@ -1,10 +1,11 @@
 //! Parallel tool execution for AgentV2
-use crate::agent::event::RuntimeEvent;
+use crate::agent::event_bus::RuntimeEvent;
 use crate::agent::permissions::check_tool_permission;
 use crate::agent::tool::{Tool, ToolOutput};
 use crate::agent::v2::protocol::{AgentError, AgentRequest, AgentResponse};
+use crate::agent::v2::jobs::{JobRegistry, ActionType};
 use crate::config::v2::types::AgentPermissions;
-use crate::memory::journal::InteractionType;
+// DISABLED: Scribe redesign pending - use crate::memory::journal::InteractionType;
 use crate::memory::scribe::Scribe;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,14 +17,19 @@ pub async fn execute_parallel_tools(
     scribe: Arc<Scribe>,
     permissions: &Option<AgentPermissions>,
     event_tx: &Option<tokio::sync::mpsc::UnboundedSender<RuntimeEvent>>,
+    job_registry: &Option<JobRegistry>,
+    job_id: Option<&str>,
 ) -> Result<Vec<AgentResponse>, Box<dyn std::error::Error + Send + Sync>> {
     let mut futures = Vec::new();
 
     for req in requests {
         let event_tx = event_tx.clone();
         let tool = tools.get(&req.action).cloned();
-        let scribe = scribe.clone();
+        let _scribe = scribe.clone();
         let permissions = permissions.clone();
+        let job_registry = job_registry.clone();
+        let job_id = job_id.map(|s| s.to_string());
+        let action_name = req.action.clone();
 
         futures.push(async move {
             if let Some(tx) = &event_tx {
@@ -32,18 +38,29 @@ pub async fn execute_parallel_tools(
 
             let response = match tool {
                 Some(t) => {
-                    let args = if req.input.is_string() {
-                        req.input.as_str().unwrap().to_string()
+                    let args = if let Some(s) = req.input.as_str() {
+                        s.to_string()
                     } else {
                         req.input.to_string()
                     };
 
-                    if let Err(e) = scribe.observe(InteractionType::Tool, &format!("Action: {}\nInput: {}", req.action, args)).await {
-                        crate::error_log!("Failed to log tool call to memory: {}", e);
-                        if let Some(tx) = &event_tx {
-                            let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", e) });
-                        }
+                    // Log action to job registry if available (includes args for visibility)
+                    if let (Some(registry), Some(jid)) = (&job_registry, &job_id) {
+                        let action_with_args = if args.len() > 50 {
+                            format!("{}: {}...", action_name, &args[..47])
+                        } else {
+                            format!("{}: {}", action_name, args)
+                        };
+                        registry.add_action(jid, ActionType::ToolCall, &action_with_args);
                     }
+
+                    // DISABLED: Scribe redesign pending
+                    // if let Err(e) = scribe.observe(InteractionType::Tool, &format!("Action: {}\nInput: {}", req.action, args)).await {
+                    //     crate::error_log!("Failed to log tool call to memory: {}", e);
+                    //     if let Some(tx) = &event_tx {
+                    //         let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", e) });
+                    //     }
+                    // }
 
                     // Check tool permission
                     if let Some(ref perms) = permissions {
@@ -62,12 +79,19 @@ pub async fn execute_parallel_tools(
                     match t.call(&args).await {
                         Ok(output) => {
                             let output_str = output.as_string();
-                            if let Err(log_err) = scribe.observe(InteractionType::Output, &output_str).await {
-                                crate::error_log!("Failed to log tool output to memory: {}", log_err);
-                                if let Some(tx) = &event_tx {
-                                    let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", log_err) });
-                                }
+                            
+                            // Log tool result to job registry
+                            if let (Some(registry), Some(jid)) = (&job_registry, &job_id) {
+                                registry.add_action(jid, ActionType::ToolResult, &format!("{} completed", action_name));
                             }
+                            
+                            // DISABLED: Scribe redesign pending
+                            // if let Err(log_err) = scribe.observe(InteractionType::Output, &output_str).await {
+                            //     crate::error_log!("Failed to log tool output to memory: {}", log_err);
+                            //     if let Some(tx) = &event_tx {
+                            //         let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", log_err) });
+                            //     }
+                            // }
                             AgentResponse {
                                 result: Some(serde_json::json!({
                                     "output": output_str,
@@ -82,12 +106,19 @@ pub async fn execute_parallel_tools(
                         }
                         Err(e) => {
                             let error_msg = e.to_string();
-                            if let Err(log_err) = scribe.observe(InteractionType::Output, &format!("Error: {}", error_msg)).await {
-                                crate::error_log!("Failed to log tool error to memory: {}", log_err);
-                                if let Some(tx) = &event_tx {
-                                    let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", log_err) });
-                                }
+                            
+                            // Log error to job registry
+                            if let (Some(registry), Some(jid)) = (&job_registry, &job_id) {
+                                registry.add_action(jid, ActionType::Error, &format!("{} failed: {}", action_name, &error_msg[..error_msg.len().min(50)]));
                             }
+                            
+                            // DISABLED: Scribe redesign pending
+                            // if let Err(log_err) = scribe.observe(InteractionType::Output, &format!("Error: {}", error_msg)).await {
+                            //     crate::error_log!("Failed to log tool error to memory: {}", log_err);
+                            //     if let Some(tx) = &event_tx {
+                            //         let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", log_err) });
+                            //     }
+                            // }
                             AgentResponse {
                                 result: None,
                                 error: Some(AgentError {
@@ -126,40 +157,43 @@ pub async fn execute_single_tool(
     tool_name: &str,
     args: &str,
     tools: &HashMap<String, Arc<dyn Tool>>,
-    scribe: Arc<Scribe>,
-    event_tx: &Option<tokio::sync::mpsc::UnboundedSender<RuntimeEvent>>,
+    _scribe: Arc<Scribe>,
+    _event_tx: &Option<tokio::sync::mpsc::UnboundedSender<RuntimeEvent>>,
 ) -> Result<String, String> {
     match tools.get(tool_name) {
         Some(t) => match t.call(args).await {
             Ok(output) => {
                 let output_str = output.as_string();
-                if let Err(log_err) = scribe.observe(InteractionType::Output, &output_str).await {
-                    crate::error_log!("Failed to log tool output to memory: {}", log_err);
-                    if let Some(tx) = event_tx {
-                        let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", log_err) });
-                    }
-                }
+                // DISABLED: Scribe redesign pending
+                // if let Err(log_err) = scribe.observe(InteractionType::Output, &output_str).await {
+                //     crate::error_log!("Failed to log tool output to memory: {}", log_err);
+                //     if let Some(tx) = event_tx {
+                //         let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", log_err) });
+                //     }
+                // }
                 Ok(output_str)
             }
             Err(e) => {
                 let error_msg = format!("Tool Error: {}. Analyze the failure and try a different command or approach if possible.", e);
-                if let Err(log_err) = scribe.observe(InteractionType::Output, &error_msg).await {
-                    crate::error_log!("Failed to log tool error to memory: {}", log_err);
-                    if let Some(tx) = event_tx {
-                        let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", log_err) });
-                    }
-                }
+                // DISABLED: Scribe redesign pending
+                // if let Err(log_err) = scribe.observe(InteractionType::Output, &error_msg).await {
+                //     crate::error_log!("Failed to log tool error to memory: {}", log_err);
+                //     if let Some(tx) = event_tx {
+                //         let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", log_err) });
+                //     }
+                // }
                 Err(error_msg)
             }
         },
         None => {
             let error_msg = format!("Error: Tool '{}' not found. Check the available tools list.", tool_name);
-            if let Err(log_err) = scribe.observe(InteractionType::Output, &error_msg).await {
-                crate::error_log!("Failed to log tool-not-found error to memory: {}", log_err);
-                if let Some(tx) = event_tx {
-                    let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", log_err) });
-                }
-            }
+            // DISABLED: Scribe redesign pending
+            // if let Err(log_err) = scribe.observe(InteractionType::Output, &error_msg).await {
+            //     crate::error_log!("Failed to log tool-not-found error to memory: {}", log_err);
+            //     if let Some(tx) = event_tx {
+            //         let _ = tx.send(RuntimeEvent::StatusUpdate { message: format!("Memory logging error: {}", log_err) });
+            //     }
+            // }
             Err(error_msg)
         }
     }

@@ -18,8 +18,9 @@ use reqwest::{
     Client as HttpClient, StatusCode,
 };
 use serde::{Deserialize, Serialize};
+use parking_lot::Mutex;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use rand::Rng;
 use tokio::time::{sleep, Duration};
 
@@ -73,6 +74,8 @@ pub struct LlmClient {
     job_id: Mutex<Option<String>>,
     /// Cancellation token for aborting retries
     cancel_token: Mutex<Option<tokio_util::sync::CancellationToken>>,
+    /// Optional job registry for updating metrics
+    job_registry: Mutex<Option<crate::agent::v2::jobs::JobRegistry>>,
 }
 
 impl LlmClient {
@@ -93,6 +96,7 @@ impl LlmClient {
             is_worker: false,
             job_id: Mutex::new(None),
             cancel_token: Mutex::new(None),
+            job_registry: Mutex::new(None),
         })
     }
 
@@ -104,13 +108,13 @@ impl LlmClient {
 
     /// Set a status callback for reporting retry attempts and other status updates
     pub fn with_status_callback(self, callback: crate::llm::StatusCallback) -> Self {
-        *self.status_callback.lock().unwrap() = Some(callback);
+        *self.status_callback.lock() = Some(callback);
         self
     }
 
     /// Set a status callback after the client has been created (for use with Arc<LlmClient>)
     pub fn set_status_callback(&self, callback: crate::llm::StatusCallback) {
-        *self.status_callback.lock().unwrap() = Some(callback);
+        *self.status_callback.lock() = Some(callback);
     }
 
     /// Set the rate limiter for this client
@@ -127,30 +131,36 @@ impl LlmClient {
 
     /// Set the job ID for tracking metrics
     pub fn set_job_id(&self, job_id: Option<String>) {
-        *self.job_id.lock().unwrap() = job_id;
+        *self.job_id.lock() = job_id;
+    }
+
+    /// Get the job ID if set
+    pub fn get_job_id(&self) -> Option<String> {
+        self.job_id.lock().clone()
+    }
+
+    /// Set the job registry for updating metrics
+    pub fn set_job_registry(&self, job_registry: crate::agent::v2::jobs::JobRegistry) {
+        *self.job_registry.lock() = Some(job_registry);
     }
 
     /// Set the cancellation token for this client
     pub fn set_cancel_token(&self, token: tokio_util::sync::CancellationToken) {
-        *self.cancel_token.lock().unwrap() = Some(token);
+        *self.cancel_token.lock() = Some(token);
     }
 
     /// Check if the operation has been cancelled
     fn is_cancelled(&self) -> bool {
-        if let Ok(guard) = self.cancel_token.lock() {
-            if let Some(token) = guard.as_ref() {
-                return token.is_cancelled();
-            }
+        if let Some(token) = self.cancel_token.lock().as_ref() {
+            return token.is_cancelled();
         }
         false
     }
 
     /// Report a status update through the callback if one is set
     fn report_status(&self, message: &str) {
-        if let Ok(guard) = self.status_callback.lock() {
-            if let Some(callback) = guard.as_ref() {
-                callback(message);
-            }
+        if let Some(callback) = self.status_callback.lock().as_ref() {
+            callback(message);
         }
     }
 
@@ -184,36 +194,183 @@ impl LlmClient {
     }
 
     /// Update job metrics after a successful request
-    fn update_job_metrics(&self, prompt_tokens: u32, completion_tokens: u32, _context_tokens: usize) {
-        if let Ok(guard) = self.job_id.lock() {
-            if let Some(ref job_id) = *guard {
-                // This will be populated when we integrate with job registry
-                // For now, we just log it
-                crate::info_log!("Job {}: tokens used - prompt: {}, completion: {}", 
+    fn update_job_metrics(&self, prompt_tokens: u32, completion_tokens: u32, _estimated_input_tokens: usize) {
+        if let Some(ref job_id) = *self.job_id.lock() {
+            // Log the metrics
+            crate::info_log!("Job {}: tokens used - prompt: {}, completion: {}",
+                job_id, prompt_tokens, completion_tokens);
+            
+            // Debug: Check for suspicious values
+            if prompt_tokens > 1000000 || completion_tokens > 1000000 {
+                crate::error_log!("[METRICS BUG] Suspicious token values! job={}, prompt={}, completion={}",
                     job_id, prompt_tokens, completion_tokens);
+            }
+            
+            // Update the job registry if available
+            let registry_guard = self.job_registry.lock();
+            if let Some(ref registry) = *registry_guard {
+                // Calculate total context tokens (accumulated prompt + completion tokens)
+                // This gives us the actual context window usage
+                let (old_total, total_tokens) = registry.list_all_jobs()
+                    .iter()
+                    .find(|j| &j.id == job_id)
+                    .map(|j| {
+                        let old = j.metrics.total_tokens;
+                        let new = old + prompt_tokens + completion_tokens;
+                        (old, new)
+                    })
+                    .unwrap_or((0, prompt_tokens + completion_tokens));
+                
+                crate::info_log!("[METRICS CALC] job={}, old_total={}, new_prompt={}, new_completion={}, calculated_total={}",
+                    &job_id[..8.min(job_id.len())], old_total, prompt_tokens, completion_tokens, total_tokens);
+                
+                let max_context = self.config.max_context_tokens;
+                registry.update_metrics(job_id, prompt_tokens, completion_tokens, total_tokens as usize, max_context);
+                
+                // Publish metrics update event for real-time UI updates
+                if let Some(event_bus) = registry.get_event_bus() {
+                    let (current_prompt, current_completion, current_total) = registry.list_all_jobs()
+                        .iter()
+                        .find(|j| &j.id == job_id)
+                        .map(|j| (j.metrics.prompt_tokens, j.metrics.completion_tokens, j.metrics.total_tokens))
+                        .unwrap_or((prompt_tokens, completion_tokens, prompt_tokens + completion_tokens));
+                    
+                    event_bus.publish(crate::agent::event_bus::CoreEvent::WorkerMetricsUpdate {
+                        job_id: job_id.clone(),
+                        prompt_tokens: current_prompt,
+                        completion_tokens: current_completion,
+                        total_tokens: current_total,
+                        context_tokens: total_tokens as usize,
+                    });
+                }
             }
         }
     }
 
     /// Send a chat request and get a response
     pub async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse> {
-        // Estimate input tokens (rough approximation: 4 chars per token)
+        let agent_type = if self.is_worker { "WORKER" } else { "MAIN" };
+        let job_info = self.job_id.lock().as_ref().map(|j| format!("job={}", &j[..8.min(j.len())])).unwrap_or_default();
+        
+        // Estimate input tokens (rough approximation: 3 chars per token - more conservative)
         let estimated_input_tokens: usize = request.messages.iter()
-            .map(|m| m.content.len() / 4 + 1)
+            .map(|m| m.content.len() / 3 + 1)
             .sum();
+        
+        crate::info_log!("[{}] {} Chat request: model={}, messages={}, estimated_tokens={}",
+            agent_type, job_info, self.config.model, request.messages.len(), estimated_input_tokens);
+
+        // Pre-flight context size check
+        let max_context = self.config.max_context_tokens;
+        let threshold = (max_context as f64 * 0.8) as usize; // 80% threshold
+        
+        if estimated_input_tokens > threshold {
+            // Log context to file for debugging
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let filename = format!("/tmp/mylm_context_bloat_{}_{}.txt", agent_type.to_lowercase(), timestamp);
+            
+            let mut content = format!("Context Bloat Debug Log\n");
+            content.push_str(&format!("========================\n"));
+            content.push_str(&format!("Agent Type: {}\n", agent_type));
+            content.push_str(&format!("Job Info: {}\n", job_info));
+            content.push_str(&format!("Model: {}\n", self.config.model));
+            content.push_str(&format!("Max Context: {}\n", max_context));
+            content.push_str(&format!("Threshold (80%): {}\n", threshold));
+            content.push_str(&format!("Estimated Tokens: {}\n", estimated_input_tokens));
+            content.push_str(&format!("Exceeds Threshold: {}\n", estimated_input_tokens > threshold));
+            content.push_str(&format!("Message Count: {}\n\n", request.messages.len()));
+            content.push_str(&format!("MESSAGES:\n"));
+            content.push_str(&format!("=========\n\n"));
+            
+            for (i, msg) in request.messages.iter().enumerate() {
+                content.push_str(&format!("--- Message {} ---\n", i));
+                content.push_str(&format!("Role: {:?}\n", msg.role));
+                content.push_str(&format!("Content Length: {} chars\n", msg.content.len()));
+                content.push_str(&format!("Content Preview (first 500 chars):\n{}", &msg.content[..msg.content.len().min(500)]));
+                if msg.content.len() > 500 {
+                    content.push_str("\n... (truncated)");
+                }
+                content.push_str("\n\n");
+            }
+            
+            // Write to file
+            if let Err(e) = std::fs::write(&filename, content) {
+                crate::error_log!("[{}] {} Failed to write context debug file: {}", agent_type, job_info, e);
+            } else {
+                crate::error_log!("[{}] {} Context bloat detected! Debug log written to: {}", 
+                    agent_type, job_info, filename);
+            }
+            
+            // If exceeds max_context, return error immediately
+            if estimated_input_tokens > max_context {
+                return Err(anyhow::anyhow!(
+                    "Context limit exceeded: estimated {} tokens > max {} tokens. Debug log: {}",
+                    estimated_input_tokens, max_context, filename
+                ));
+            }
+        }
 
         // Check rate limit before making request
-        self.check_rate_limit(estimated_input_tokens).await?;
+        let rate_limit_start = std::time::Instant::now();
+        if let Err(e) = self.check_rate_limit(estimated_input_tokens).await {
+            crate::error_log!("[{}] {} Rate limit check failed after {:?}: {}", 
+                agent_type, job_info, rate_limit_start.elapsed(), e);
+            return Err(e);
+        }
+        let rate_limit_duration = rate_limit_start.elapsed();
+        if rate_limit_duration > std::time::Duration::from_millis(100) {
+            crate::warn_log!("[{}] {} Rate limit wait took {:?}", 
+                agent_type, job_info, rate_limit_duration);
+        }
 
+        let request_start = std::time::Instant::now();
         let result = match self.config.provider {
             LlmProvider::OpenAiCompatible | LlmProvider::MoonshotKimi => self.chat_openai(request).await,
             LlmProvider::GoogleGenerativeAi => self.chat_gemini(request).await,
         };
+        let request_duration = request_start.elapsed();
+        
+        match &result {
+            Ok(response) => {
+                if let Some(ref usage) = response.usage {
+                    crate::info_log!("[{}] {} Chat completed in {:?}: prompt={} completion={} total={}",
+                        agent_type, job_info, request_duration, 
+                        usage.prompt_tokens, usage.completion_tokens, usage.total_tokens);
+                } else {
+                    crate::info_log!("[{}] {} Chat completed in {:?} (no usage data)",
+                        agent_type, job_info, request_duration);
+                }
+            }
+            Err(e) => {
+                crate::error_log!("[{}] {} Chat failed after {:?}: {}", 
+                    agent_type, job_info, request_duration, e);
+            }
+        }
 
-        // Update metrics on success
+        // Update metrics and rate limiter on success
+        // CRITICAL FIX: Only update job metrics for worker calls, NOT for main agent processing.
+        // The main agent calls LLM to process worker results - we don't want to count those
+        // tokens toward the worker's job metrics (causes inflation/corruption).
         if let Ok(ref response) = result {
             if let Some(ref usage) = response.usage {
-                self.update_job_metrics(usage.prompt_tokens, usage.completion_tokens, estimated_input_tokens);
+                // Only workers update job metrics - main agent LLM calls for processing
+                // should not count toward worker job token usage
+                if self.is_worker {
+                    self.update_job_metrics(usage.prompt_tokens, usage.completion_tokens, estimated_input_tokens);
+                }
+                
+                // Record actual usage to correct rate limiter state if needed
+                if let Some(ref limiter) = self.rate_limiter {
+                    limiter.record_usage(
+                        &self.config.base_url,
+                        self.is_worker,
+                        usage.total_tokens,
+                        estimated_input_tokens as u32
+                    );
+                }
             }
         }
 
@@ -227,7 +384,7 @@ impl LlmClient {
     }
 
     /// Send a chat request with streaming response
-    #[allow(dead_code)]
+    
     pub fn chat_stream<'a>(
         &'a self,
         request: &'a ChatRequest,
@@ -275,20 +432,27 @@ impl LlmClient {
                         
                         // Record rate limit error
                         if let Some(ref limiter) = self.rate_limiter {
-                            limiter.record_rate_limit_error(&self.config.base_url, retry_after);
+                            limiter.record_rate_limit_error(&self.config.base_url, self.is_worker, retry_after);
                         }
 
                         if attempt >= max_retries {
+                            crate::error_log!("Rate limit (429) exceeded max retries ({}), giving up", max_retries);
                             return Ok(response);
                         }
 
                         // Use Retry-After if available, otherwise use exponential backoff
                         let wait_duration = retry_after.unwrap_or(delay);
+                        let agent_type = if self.is_worker { "WORKER" } else { "MAIN" };
+                        let job_info = self.job_id.lock().as_ref().map(|j| format!("job={}", &j[..8.min(j.len())])).unwrap_or_default();
+                        
+                        crate::error_log!("[{}] {} Rate limited (429), waiting {:?} before retry (attempt {}/{})", 
+                            agent_type, job_info, wait_duration, attempt + 1, max_retries);
+                        
                         let msg = format!("Rate limited (429), waiting {:?} before retry...", wait_duration);
                         self.report_status(&msg);
 
                         // Check cancellation during wait
-                        let token_opt = self.cancel_token.lock().unwrap().clone();
+                        let token_opt = self.cancel_token.lock().clone();
                         if let Some(token) = token_opt {
                             tokio::select! {
                                 _ = sleep(wait_duration) => {},
@@ -323,7 +487,7 @@ impl LlmClient {
             attempt += 1;
             
             // Check cancellation before sleep
-            let token_opt = self.cancel_token.lock().unwrap().clone();
+            let token_opt = self.cancel_token.lock().clone();
             if let Some(token) = token_opt {
                 tokio::select! {
                     _ = sleep(delay) => {},
@@ -402,6 +566,7 @@ impl LlmClient {
                                 arguments: tc.function.arguments.clone(),
                             },
                         }).collect()),
+                        reasoning_content: c.message.reasoning_content,
                     },
                     finish_reason: c.finish_reason,
                 }).collect();
@@ -577,6 +742,7 @@ impl LlmClient {
                             name: None,
                             tool_call_id: None,
                             tool_calls: None,
+                            reasoning_content: None,
                         },
                         finish_reason: c.finish_reason,
                     })
@@ -614,7 +780,7 @@ impl LlmClient {
     }
 
     /// OpenAI-compatible streaming chat
-    #[allow(dead_code)]
+    
     fn chat_stream_openai<'a>(
         &'a self,
         request: &'a ChatRequest,
@@ -695,7 +861,7 @@ impl LlmClient {
     }
 
     /// Gemini streaming chat
-    #[allow(dead_code)]
+    
     fn chat_stream_gemini<'a>(
         &'a self,
         _request: &'a ChatRequest,
@@ -744,13 +910,13 @@ impl LlmClient {
     }
 
     /// Get the model name
-    #[allow(dead_code)]
+    
     pub fn model(&self) -> &str {
         &self.config.model
     }
 
     /// Get the provider type
-    #[allow(dead_code)]
+    
     pub fn provider(&self) -> LlmProvider {
         self.config.provider
     }
@@ -794,7 +960,7 @@ struct OpenAiFunction {
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
+
 struct OpenAiResponse {
     #[serde(default)]
     id: String,
@@ -810,7 +976,7 @@ struct OpenAiResponse {
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
+
 struct OpenAiChoice {
     #[serde(default)]
     index: u32,
@@ -820,13 +986,17 @@ struct OpenAiChoice {
 }
 
 #[derive(Deserialize, Serialize)]
-#[allow(dead_code)]
+
 struct OpenAiMessage {
     role: String,
     #[serde(default)]
     content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<OpenAiResponseToolCall>>,
+    /// Reasoning content for thinking-enabled models (e.g., Kimi K2.5, DeepSeek)
+    /// Must be preserved when sending messages back to the API
+    #[serde(default, rename = "reasoning_content")]
+    reasoning_content: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -844,7 +1014,7 @@ struct OpenAiResponseToolFunction {
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
+
 struct OpenAiUsage {
     prompt_tokens: u32,
     completion_tokens: u32,
@@ -852,27 +1022,31 @@ struct OpenAiUsage {
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct OpenAiStreamResponse {
+    #[allow(dead_code)]
     id: String,
+    #[allow(dead_code)]
     object: String,
+    #[allow(dead_code)]
     created: u64,
+    #[allow(dead_code)]
     model: String,
     choices: Vec<OpenAiStreamChoice>,
     usage: Option<OpenAiUsage>,
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct OpenAiStreamChoice {
+    #[allow(dead_code)]
     index: u32,
     delta: OpenAiDelta,
+    #[allow(dead_code)]
     finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct OpenAiDelta {
+    #[allow(dead_code)]
     role: Option<String>,
     content: Option<String>,
 }

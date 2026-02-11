@@ -1,7 +1,7 @@
 use crate::terminal::app::{App, Focus, AppState};
 use crate::terminal::help::HelpSystem;
 use mylm_core::llm::chat::MessageRole;
-use mylm_core::agent::v2::jobs::JobStatus;
+use mylm_core::agent::v2::jobs::{JobStatus, ActionType};
 use std::sync::atomic::Ordering;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -17,8 +17,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     let top_bar_height = 2u16;
     let bottom_bar_height = 1u16;
 
-    // Job panel height (fixed at 6 rows when visible, 0 when hidden)
-    let job_panel_height = if app.show_jobs_panel { 6u16 } else { 0u16 };
+    // Job panel height (fixed at 8 rows when visible to show 2-line job entries)
+    let job_panel_height = if app.show_jobs_panel { 8u16 } else { 0u16 };
 
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -32,31 +32,35 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     render_top_bar(frame, app, main_layout[0], top_bar_height);
 
-    // Check if job detail view should be shown
-    if app.show_job_detail {
+    // Compute layout first - needed for all view modes
+    let terminal_visible = app.show_terminal && app.chat_width_percent < 100;
+    let chunks = if terminal_visible {
+        let chat_pct = app.chat_width_percent;
+        let term_pct = 100u16.saturating_sub(chat_pct);
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(term_pct), Constraint::Percentage(chat_pct)])
+            .split(main_layout[1])
+    } else {
+        // Terminal hidden or chat at 100%, chat takes full width
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Percentage(100)])
+            .split(main_layout[1])
+    };
+
+    // Render based on view state
+    if app.show_job_detail && terminal_visible {
+        // Job detail renders over terminal pane only (like Help)
+        render_job_detail(frame, app, chunks[0]);
+        render_chat(frame, app, chunks[1]);
+    } else if app.show_job_detail {
+        // Terminal hidden - use full width for job detail
         render_job_detail(frame, app, main_layout[1]);
     } else if app.show_memory_view {
         render_memory_view(frame, app, main_layout[1]);
     } else {
-        // Dynamic layout based on terminal visibility and chat width
-        // When chat width is 100% or terminal is hidden, chat takes full width
-        let terminal_visible = app.show_terminal && app.chat_width_percent < 100;
-        
-        let chunks = if terminal_visible {
-            let chat_pct = app.chat_width_percent;
-            let term_pct = 100u16.saturating_sub(chat_pct);
-            Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(term_pct), Constraint::Percentage(chat_pct)])
-                .split(main_layout[1])
-        } else {
-            // Terminal hidden or chat at 100%, chat takes full width
-            Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Min(0), Constraint::Percentage(100)])
-                .split(main_layout[1])
-        };
-
+        // Normal layout
         if terminal_visible {
             if app.show_help_view {
                 render_help_view(frame, app, chunks[0]);
@@ -167,7 +171,13 @@ fn render_memory_view(frame: &mut Frame, app: &mut App, area: Rect) {
         detail_lines.push(Line::from(""));
         detail_lines.push(Line::from(Span::styled("Content:", Style::default().add_modifier(Modifier::UNDERLINED))));
         
-        for line in node.memory.content.lines() {
+        // Clean up content - unescape JSON newlines and tabs for display
+        let cleaned_content = node.memory.content
+            .replace("\\n", "\n")
+            .replace("\\t", "\t")
+            .replace("\\\"", "\"");
+        
+        for line in cleaned_content.lines() {
             detail_lines.push(Line::from(line));
         }
         
@@ -192,13 +202,18 @@ fn render_memory_view(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     // Render Scratchpad
-    let scratchpad_content = app.scratchpad.read().unwrap_or_else(|e| e.into_inner()).clone();
+    let scratchpad_content = app.scratchpad.try_read().map(|g| g.to_string()).unwrap_or_default();
+    let scratchpad_display = if scratchpad_content.trim().is_empty() {
+        "(Empty - use scratchpad tool to add notes)".to_string()
+    } else {
+        scratchpad_content
+    };
     let scratchpad_block = Block::default()
         .borders(Borders::ALL)
         .title(" Scratchpad (Shared State) ")
         .border_style(Style::default().fg(Color::Magenta));
     
-    let scratchpad_p = Paragraph::new(scratchpad_content)
+    let scratchpad_p = Paragraph::new(scratchpad_display)
         .block(scratchpad_block)
         .wrap(Wrap { trim: true });
     
@@ -222,6 +237,7 @@ fn render_help_view(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// Render help panel as a centered modal popup
+/// Reserved for future help system UI (currently unused)
 #[allow(dead_code)]
 pub fn render_help_panel(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
@@ -267,6 +283,7 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
         AppState::Streaming(info) => (format!("Streaming ({})", info), Color::Green),
         AppState::ExecutingTool(tool) => (format!("Executing ({})", tool), Color::Cyan),
         AppState::WaitingForUser => ("Waiting".to_string(), Color::Magenta),
+        AppState::AwaitingApproval { tool, .. } => (format!("Approve? ({})", tool), Color::Yellow),
         AppState::Error(err) => (format!("Error ({})", err), Color::Red),
         AppState::ConfirmExit => ("Exit?".to_string(), Color::Yellow),
         AppState::NamingSession => ("Naming".to_string(), Color::Cyan),
@@ -475,8 +492,14 @@ fn render_terminal(frame: &mut Frame, app: &mut App, area: Rect) {
 
 
 fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
+    // Clear chat_input_area at the start to avoid stale data
+    app.chat_input_area = None;
+    
     // Store the offset for mouse coordinate translation
     app.chat_area_offset = Some((area.x, area.y));
+    
+    // Clear visual lines mapping at the start of rendering
+    app.chat_visual_lines.clear();
     
     let input_width = area.width.saturating_sub(2) as usize;
     let input_content = if app.state != AppState::Idle && app.state != AppState::WaitingForUser {
@@ -497,11 +520,16 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(3), 
+            Constraint::Min(3),
             Constraint::Length(progress_height),
             Constraint::Length(input_height)
         ])
         .split(area);
+    
+    // Set chat_input_area after layout is computed for mouse detection
+    app.chat_input_area = Some(chunks[2]);
+    // Store the starting column for chat history (after layout is determined)
+    app.chat_history_start_col = Some(chunks[0].x + 1);
     
     // Render PaCoRe progress bar if active
     if show_progress {
@@ -539,33 +567,54 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Chat history with manual wrapping for correct scrolling
     let available_width = chunks[0].width.saturating_sub(2) as usize;
-    let mut list_items = Vec::new();
-
+    
+    // First pass: build all visual lines data and fill chat_visual_lines
+    #[derive(Clone)]
+    struct VisualLineInfo {
+        full_text: String,
+        prefix_len: usize,
+        prefix_style: Style,
+        content_style: Style,
+    }
+    
+    let mut all_visual_lines: Vec<VisualLineInfo> = Vec::new();
+    let mut abs_line_idx: usize = 0;
+    
     for m in &app.chat_history {
         // Aggressively hide command outputs in non-verbose mode
         if !app.verbose_mode && m.content.contains("CMD_OUTPUT:") {
-            // Only show the placeholder for the observation/tool result itself, not for every message containing the string
             if m.role == MessageRole::Tool || (m.role == MessageRole::User && m.content.contains("Observation:")) {
-                list_items.push(ListItem::new(Line::from(vec![
-                    Span::styled("AI: ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                    Span::styled("Command executed. Check terminal.", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)),
-                ])));
-                list_items.push(ListItem::new(Line::from("")));
+                // Placeholder line: "AI: Command executed. Check terminal."
+                let prefix = "AI: ";
+                let prefix_len = prefix.len();
+                let prefix_style = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+                let content = "Command executed. Check terminal.";
+                let full_text = format!("{}{}", prefix, content);
+                all_visual_lines.push(VisualLineInfo { full_text: full_text.clone(), prefix_len, prefix_style, content_style: Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC) });
+                app.chat_visual_lines.push((full_text, abs_line_idx));
+                abs_line_idx += 1;
+                // Separator line (empty)
+                all_visual_lines.push(VisualLineInfo { full_text: String::new(), prefix_len: 0, prefix_style: Style::default(), content_style: Style::default() });
+                app.chat_visual_lines.push((String::new(), abs_line_idx));
+                abs_line_idx += 1;
             }
             continue;
         }
 
-        // Skip Tool messages for commands in non-verbose mode (redundant with above but safe)
+        // Skip Tool messages for commands in non-verbose mode
         if !app.verbose_mode && m.role == MessageRole::Tool && m.name.as_deref() == Some("execute_command") {
             continue;
         }
 
+        // Compact prefix without timestamp (timestamp shown as bullet point when needed)
         let (prefix, color) = match m.role {
             MessageRole::User => ("You: ", Color::Cyan),
             MessageRole::Assistant => ("AI: ", Color::Green),
             MessageRole::System => ("Sys: ", Color::Gray),
             _ => ("AI: ", Color::Green),
         };
+        let prefix_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+        let prefix_len = prefix.len();
 
         let mut lines_to_render = Vec::new();
         
@@ -643,9 +692,6 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
                                 lines_to_render.push((format!("Action: {} ({})", a, i), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
                             }
                         }
-                        // Final answer is usually followed by the same text outside JSON if the model is being redundant,
-                        // but if it's ONLY in JSON, we should show it.
-                        // However, usually we prefer to let the rest of the loop handle it.
                         continue;
                     }
                 }
@@ -653,7 +699,6 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
 
             let is_action = trimmed.starts_with("Action:") || trimmed.starts_with("**Action:**");
             if is_action {
-                // Always show actions to provide feedback on what the agent is doing
                 lines_to_render.push((line, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
                 continue;
             }
@@ -683,70 +728,164 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
         }
 
         if has_hidden_context {
-            lines_to_render.push(("[Context Attached]".to_string(), Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)));
+            // Show compact timestamp instead of "[Context Attached]"
+            let short_time = chrono::Local::now().format("%H:%M").to_string();
+            lines_to_render.push((format!("• {}", short_time), Style::default().fg(Color::DarkGray)));
         }
 
         if m.role == MessageRole::Assistant && lines_to_render.iter().all(|(l, _)| l.trim().is_empty()) {
             continue;
         }
 
-        // Wrap and render the lines
+        // Process lines for visual representation
         let content_width = available_width.saturating_sub(prefix.len());
-        let mut first_line = true;
-
+        let mut first_line_flag = true;
         for (text, style) in lines_to_render {
-            if text.is_empty() && !first_line {
-                list_items.push(ListItem::new(Line::from("")));
+            if text.is_empty() && !first_line_flag {
+                // Empty line (soft wrap break) - no prefix
+                all_visual_lines.push(VisualLineInfo { full_text: String::new(), prefix_len: 0, prefix_style: Style::default(), content_style: Style::default() });
+                app.chat_visual_lines.push((String::new(), abs_line_idx));
+                abs_line_idx += 1;
                 continue;
             }
             
             let wrapped = wrap_text(&text, content_width);
-            for line in wrapped {
-                let mut spans = Vec::new();
-                let current_row = chunks[0].y + 1 + list_items.len() as u16;
-                
-                if first_line {
-                    // Check if prefix is selected
-                    let mut prefix_spans = Vec::new();
-                    for (i, c) in prefix.chars().enumerate() {
-                        let is_selected = app.is_in_selection(chunks[0].x + 1 + i as u16, current_row, Focus::Chat);
-                        prefix_spans.push(Span::styled(
-                            c.to_string(),
-                            if is_selected { Style::default().bg(Color::Cyan).fg(Color::Black) } 
-                            else { Style::default().fg(color).add_modifier(Modifier::BOLD) }
-                        ));
-                    }
-                    spans.extend(prefix_spans);
-                    first_line = false;
-                } else {
-                    // Spacing for subsequent lines
-                    let mut space_spans = Vec::new();
-                    for i in 0..prefix.len() {
-                        let is_selected = app.is_in_selection(chunks[0].x + 1 + i as u16, current_row, Focus::Chat);
-                        space_spans.push(Span::styled(
-                            " ",
-                            if is_selected { Style::default().bg(Color::Cyan).fg(Color::Black) } else { Style::default() }
-                        ));
-                    }
-                    spans.extend(space_spans);
-                }
-                
-                // Add the actual text with selection check per character
-                for (i, c) in line.chars().enumerate() {
-                    let is_selected = app.is_in_selection(chunks[0].x + 1 + prefix.len() as u16 + i as u16, current_row, Focus::Chat);
-                    spans.push(Span::styled(
-                        c.to_string(),
-                        if is_selected { Style::default().bg(Color::Cyan).fg(Color::Black) } else { style }
-                    ));
-                }
-                
-                list_items.push(ListItem::new(Line::from(spans)));
+            for (wrapped_idx, line_str) in wrapped.iter().enumerate() {
+                let is_first = first_line_flag && wrapped_idx == 0;
+                let prefix_str = if is_first { prefix.to_string() } else { " ".repeat(prefix_len) };
+                let full_text = format!("{}{}", prefix_str, line_str);
+                let prefix_style = if is_first { prefix_style } else { Style::default() };
+                all_visual_lines.push(VisualLineInfo { full_text: full_text.clone(), prefix_len, prefix_style, content_style: style });
+                app.chat_visual_lines.push((full_text, abs_line_idx));
+                abs_line_idx += 1;
             }
+            first_line_flag = false;
         }
-        // Add separator line
-        list_items.push(ListItem::new(Line::from("")));
+        // Add separator line (empty)
+        all_visual_lines.push(VisualLineInfo { full_text: String::new(), prefix_len: 0, prefix_style: Style::default(), content_style: Style::default() });
+        app.chat_visual_lines.push((String::new(), abs_line_idx));
+        abs_line_idx += 1;
     }
 
+    // Add action stamps as conversation items at the end
+    let recent_stamps = app.context_manager.recent_stamps(10);
+    if !recent_stamps.is_empty() {
+        use mylm_core::context::ActionStampType;
+        
+        // Add a small header for stamps section
+        all_visual_lines.push(VisualLineInfo { 
+            full_text: "── Action Stamps ──".to_string(), 
+            prefix_len: 0, 
+            prefix_style: Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC), 
+            content_style: Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC) 
+        });
+        app.chat_visual_lines.push(("── Action Stamps ──".to_string(), abs_line_idx));
+        abs_line_idx += 1;
+        
+        // Render each stamp as a line item
+        for stamp in recent_stamps.iter().rev().take(5) {
+            let color = match stamp.stamp_type {
+                ActionStampType::ToolSuccess => Color::Green,
+                ActionStampType::ToolFailed => Color::Red,
+                ActionStampType::ContextCondensed => Color::Yellow,
+                ActionStampType::MemoryRecalled => Color::Magenta,
+                ActionStampType::FileRead => Color::Cyan,
+                ActionStampType::FileWritten => Color::Blue,
+                ActionStampType::CommandExecuted => Color::Yellow,
+                ActionStampType::WebSearch => Color::Cyan,
+                ActionStampType::Thinking => Color::DarkGray,
+                ActionStampType::TaskComplete => Color::Green,
+            };
+            
+            let icon = stamp.stamp_type.icon();
+            let mut stamp_text = format!("[{} {}]", icon, stamp.title);
+            
+            // Add detail if present
+            if let Some(ref detail) = stamp.detail {
+                if !detail.is_empty() {
+                    stamp_text.push_str(&format!(" - {}", detail));
+                }
+            }
+            
+            // Wrap text if needed
+            let content_width = available_width.saturating_sub(4);
+            let wrapped = wrap_text(&stamp_text, content_width);
+            
+            for (idx, line) in wrapped.iter().enumerate() {
+                let prefix = if idx == 0 { "  " } else { "    " };
+                let full_text = format!("{}{}", prefix, line);
+                all_visual_lines.push(VisualLineInfo { 
+                    full_text: full_text.clone(), 
+                    prefix_len: prefix.len(), 
+                    prefix_style: Style::default(), 
+                    content_style: Style::default().fg(color) 
+                });
+                app.chat_visual_lines.push((full_text, abs_line_idx));
+                abs_line_idx += 1;
+            }
+        }
+        
+        // Add separator after stamps
+        all_visual_lines.push(VisualLineInfo { full_text: String::new(), prefix_len: 0, prefix_style: Style::default(), content_style: Style::default() });
+        app.chat_visual_lines.push((String::new(), abs_line_idx));
+    }
+
+    let total_lines = all_visual_lines.len();
+    
+    // Smart Scrolling logic (adjust scroll if content grew)
+    let height = chunks[0].height.saturating_sub(2) as usize;
+    if let Some(last) = app.last_total_chat_lines {
+        if total_lines > last && !app.chat_auto_scroll {
+            let diff = total_lines - last;
+            app.chat_scroll = app.chat_scroll.saturating_add(diff);
+        }
+    }
+    app.last_total_chat_lines = Some(total_lines);
+    
+    // Calculate max scroll based on current content
+    let max_scroll = total_lines.saturating_sub(height);
+    
+    // Always clamp scroll to valid bounds first
+    app.chat_scroll = app.chat_scroll.clamp(0, max_scroll);
+    
+    let start_index = if app.chat_auto_scroll {
+        total_lines.saturating_sub(height)
+    } else {
+        max_scroll.saturating_sub(app.chat_scroll)
+    };
+    
+    let end_index = (start_index + height).min(total_lines);
+    
+    // Track visible range for selection extraction
+    app.chat_visible_start_idx = start_index;
+    app.chat_visible_end_idx = end_index;
+    
+    // Build list_items for visible lines only, with correct row calculation and selection
+    let mut list_items = Vec::new();
+    for (abs_line_idx, visual_line) in all_visual_lines.iter().enumerate().skip(start_index).take(end_index - start_index) {
+        let current_row = chunks[0].y + 1 + (abs_line_idx as u16 - start_index as u16);
+        let full_text = &visual_line.full_text;
+        if full_text.is_empty() {
+            list_items.push(ListItem::new(Line::from("")));
+            continue;
+        }
+        let mut spans = Vec::new();
+        for (char_idx, c) in full_text.chars().enumerate() {
+            let col = chunks[0].x + 1 + char_idx as u16;
+            let is_selected = app.is_in_selection(col, current_row, Focus::Chat);
+            let style = if is_selected {
+                Style::default().bg(Color::Cyan).fg(Color::Black)
+            } else if char_idx < visual_line.prefix_len {
+                visual_line.prefix_style
+            } else {
+                visual_line.content_style
+            };
+            spans.push(Span::styled(c.to_string(), style));
+        }
+        list_items.push(ListItem::new(Line::from(spans)));
+    }
+
+    // Create chat block with title and borders
     let mut chat_block = Block::default()
         .borders(Borders::ALL)
         .title(title)
@@ -769,6 +908,7 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
             AppState::Streaming(info) => (format!(" {} Streaming: {} ", frame, info), Color::Green),
             AppState::ExecutingTool(tool) => (format!(" {} Executing: {} ", frame, tool), Color::Cyan),
             AppState::WaitingForUser => (" ⏳ Waiting for Approval ".to_string(), Color::Magenta),
+            AppState::AwaitingApproval { tool, .. } => (format!(" ⚠️  Approve: {}? (Y/N) ", tool), Color::Yellow),
             AppState::Error(err) => (format!(" ❌ Error: {} ", err), Color::Red),
             AppState::ConfirmExit => (" ⚠️  Confirm Exit? ".to_string(), Color::Yellow),
             AppState::NamingSession => (" 💾 Name Session ".to_string(), Color::Cyan),
@@ -783,35 +923,7 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
         ]));
     }
 
-    // Smart Scrolling logic
-    let height = chunks[0].height.saturating_sub(2) as usize;
-    let total_lines = list_items.len();
-
-    // If content grew and we're not auto-scrolling, increment scroll to stay fixed
-    if let Some(last) = app.last_total_chat_lines {
-        if total_lines > last && !app.chat_auto_scroll {
-            let diff = total_lines - last;
-            app.chat_scroll = app.chat_scroll.saturating_add(diff);
-        }
-    }
-    app.last_total_chat_lines = Some(total_lines);
-    
-    // Calculate max scroll based on current content
-    let max_scroll = total_lines.saturating_sub(height);
-    
-    // Always clamp scroll to valid bounds first
-    app.chat_scroll = app.chat_scroll.clamp(0, max_scroll);
-    
-    let start_index = if app.chat_auto_scroll {
-        total_lines.saturating_sub(height)
-    } else {
-        max_scroll.saturating_sub(app.chat_scroll)
-    };
-    
-    let end_index = (start_index + height).min(total_lines);
-    let items_to_show = list_items.drain(start_index..end_index).collect::<Vec<_>>();
-
-    let chat_list = List::new(items_to_show).block(chat_block);
+    let chat_list = List::new(list_items).block(chat_block);
     frame.render_widget(chat_list, chunks[0]);
 
     // Chat input
@@ -1093,7 +1205,7 @@ fn render_jobs_panel(frame: &mut Frame, app: &mut App, area: Rect) {
 
     // Show different title when focused
     let title = if app.focus == Focus::Jobs {
-        format!(" Background Jobs [{} active] | ↑↓:select | c:cancel | a:cancel-all | Enter:details | Esc:close ", 
+        format!(" Background Jobs [{} active] | ↑↓:select | c:cancel | a:cancel-all | Enter:journey | Esc:close ",
             jobs.iter().filter(|j| matches!(j.status, JobStatus::Running)).count())
     } else {
         " Background Jobs [NOT FOCUSED - Press F2 to focus, F4 to close] ".to_string()
@@ -1122,39 +1234,114 @@ fn render_jobs_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     for (idx, job) in jobs.iter().enumerate() {
         let short_id = &job.id[..8.min(job.id.len())];
         let status_str = match job.status {
-            JobStatus::Running => "● Running",
-            JobStatus::Completed => "✓ Done",
-            JobStatus::Failed => "✗ Failed",
-            JobStatus::Cancelled => "⊘ Cancelled",
+            JobStatus::Running => "●",
+            JobStatus::Completed => "✓",
+            JobStatus::Failed => "✗",
+            JobStatus::Cancelled => "⊘",
+            JobStatus::TimeoutPending => "⏱",
+            JobStatus::Stalled => "⚠",
         };
         let status_color = match job.status {
             JobStatus::Running => Color::Yellow,
             JobStatus::Completed => Color::Green,
             JobStatus::Failed => Color::Red,
             JobStatus::Cancelled => Color::Magenta,
+            JobStatus::TimeoutPending => Color::Yellow,
+            JobStatus::Stalled => Color::Red,
         };
 
-        // Truncate description to fit (accounting for status text)
-        let max_desc_len = area.width.saturating_sub(30) as usize;
-        let desc = if job.description.len() > max_desc_len {
-            format!("{}...", &job.description[..max_desc_len.saturating_sub(3)])
+        // Get current step from action log
+        let current_step = job.current_action()
+            .unwrap_or_else(|| match job.status {
+                JobStatus::Completed => "Completed".to_string(),
+                JobStatus::Failed => "Failed".to_string(),
+                JobStatus::Cancelled => "Cancelled".to_string(),
+                _ => "Starting...".to_string(),
+            });
+
+        // Calculate progress based on action log
+        let total_steps = job.action_log.iter()
+            .filter(|e| matches!(e.action_type, ActionType::ToolCall | ActionType::Thought))
+            .count();
+        let progress = if total_steps > 0 {
+            format!(" [{} steps]", total_steps)
         } else {
-            job.description.clone()
+            String::new()
         };
 
         let is_selected = app.selected_job_index == Some(idx);
         let prefix = if is_selected { "► " } else { "  " };
 
-        let line = Line::from(vec![
+        // Token usage with progress bar (will be placed at end of line1)
+        let (used_tokens, max_tokens) = job.context_window();
+        let token_ratio = if max_tokens > 0 { used_tokens as f64 / max_tokens as f64 } else { 0.0 };
+        let bar_width = 10; // Width of progress bar in characters
+        let filled = (token_ratio * bar_width as f64).round() as usize;
+        let filled = filled.clamp(0, bar_width);
+        let empty = bar_width - filled;
+        
+        // Choose color based on usage
+        let token_color = if token_ratio >= 0.8 {
+            Color::Red
+        } else if token_ratio >= 0.5 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+
+        // Build progress bar with unicode blocks
+        let progress_bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+        let token_text = format!(" {}↑/{} ", used_tokens, max_tokens);
+        
+        // Calculate space needed for token/progress section
+        let token_section_len = progress_bar.len() + token_text.len();
+        
+        // First line: status icon, short_id, description, [N steps], tokens:X/Y [progress bar]
+        // We need to reserve space for: prefix(2) + "#ID"(9) + status(1) + spaces + progress + token_section
+        let reserved_len = 2 + 9 + 1 + 3 + progress.len() + 3 + token_section_len;
+        let max_desc_len = area.width.saturating_sub(reserved_len as u16) as usize;
+        
+        let desc = if max_desc_len > 5 && job.description.len() > max_desc_len {
+            format!("{}...", &job.description[..max_desc_len.saturating_sub(3)])
+        } else {
+            job.description.clone()
+        };
+
+        let line1 = Line::from(vec![
             Span::raw(prefix),
-            Span::styled(format!("#{}", short_id), Style::default().fg(Color::DarkGray)),
-            Span::raw(" "),
             Span::styled(status_str, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
             Span::raw(" "),
-            Span::raw(desc),
+            Span::styled(format!("#{}", short_id), Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
+            Span::styled(desc, Style::default().fg(Color::White)),
+            Span::styled(progress, Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
+            Span::styled(progress_bar, Style::default().fg(token_color)),
+            Span::styled(token_text, Style::default().fg(Color::DarkGray)),
         ]);
 
-        items.push(ListItem::new(line));
+        // Second line: current step (indented) - optional if there's a current action
+        let line2 = if !current_step.is_empty() {
+            let max_step_len = area.width.saturating_sub(15) as usize;
+            let step_display = if current_step.len() > max_step_len {
+                format!("{}...", &current_step[..max_step_len.saturating_sub(3)])
+            } else {
+                current_step
+            };
+            Some(Line::from(vec![
+                Span::raw("       "),
+                Span::styled("└─ ", Style::default().fg(Color::DarkGray)),
+                Span::styled(step_display, Style::default().fg(Color::Cyan)),
+            ]))
+        } else {
+            None
+        };
+
+        if let Some(line2) = line2 {
+            items.push(ListItem::new(vec![line1, line2]));
+        } else {
+            items.push(ListItem::new(line1));
+        }
     }
 
     let list = List::new(items)
@@ -1164,178 +1351,245 @@ fn render_jobs_panel(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn render_job_detail(frame: &mut Frame, app: &mut App, area: Rect) {
-    // Clear the area and render a popup-like view
-    frame.render_widget(Clear, area);
-
+    // Use a split view: left side for journey/steps, right side for details
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Job Details (Esc/q: close, ↑↓: scroll) ")
+        .title(" Job Journey (Esc/q: close, ↑↓: scroll) ")
         .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
 
     let inner_area = block.inner(area);
     frame.render_widget(block, area);
 
-    // Get all jobs (including completed and failed) and find the selected one
+    // Get all jobs and find the selected one
     let jobs = app.job_registry.list_all_jobs();
-    let content = if let Some(selected_idx) = app.selected_job_index {
-        if let Some(job) = jobs.get(selected_idx) {
-            let mut lines = Vec::new();
+    let Some(selected_idx) = app.selected_job_index else {
+        let paragraph = Paragraph::new("No job selected")
+            .wrap(Wrap { trim: true });
+        frame.render_widget(paragraph, inner_area);
+        return;
+    };
+    
+    let Some(job) = jobs.get(selected_idx) else {
+        let paragraph = Paragraph::new("Job not found")
+            .wrap(Wrap { trim: true });
+        frame.render_widget(paragraph, inner_area);
+        return;
+    };
 
-            // Job ID
-            lines.push(Line::from(vec![
-                Span::styled("Job ID: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw(&job.id),
-            ]));
+    // Build journey content - narrative flow of execution
+    let mut lines = Vec::new();
 
-            // Tool name
-            lines.push(Line::from(vec![
-                Span::styled("Tool: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw(&job.tool_name),
-            ]));
+    // Header with mission
+    lines.push(Line::from(vec![
+        Span::styled("╔══════════════════════════════════════════════════════════════╗", Style::default().fg(Color::Cyan)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("║  ", Style::default().fg(Color::Cyan)),
+        Span::styled("MISSION", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled("                                                    ║", Style::default().fg(Color::Cyan)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("╚══════════════════════════════════════════════════════════════╝", Style::default().fg(Color::Cyan)),
+    ]));
+    
+    // Word wrap the description nicely
+    for line in wrap_text(&job.description, inner_area.width.saturating_sub(4) as usize) {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(line, Style::default().fg(Color::White)),
+        ]));
+    }
+    lines.push(Line::from(""));
 
-            // Status
-            let (status_text, status_color) = match job.status {
-                JobStatus::Running => ("Running", Color::Yellow),
-                JobStatus::Completed => ("Completed", Color::Green),
-                JobStatus::Failed => ("Failed", Color::Red),
-                JobStatus::Cancelled => ("Cancelled", Color::Magenta),
-            };
-            lines.push(Line::from(vec![
-                Span::styled("Status: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::styled(status_text, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
-            ]));
+    // Status line
+    let (status_text, status_color) = match job.status {
+        JobStatus::Running => ("▶ RUNNING", Color::Yellow),
+        JobStatus::Completed => ("✓ COMPLETED", Color::Green),
+        JobStatus::Failed => ("✗ FAILED", Color::Red),
+        JobStatus::Cancelled => ("⊘ CANCELLED", Color::Magenta),
+        JobStatus::TimeoutPending => ("⏱ TIMEOUT PENDING", Color::Yellow),
+        JobStatus::Stalled => ("⚠ STALLED", Color::Red),
+    };
+    lines.push(Line::from(vec![
+        Span::raw("  Status: "),
+        Span::styled(status_text, Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+        Span::raw(format!("  |  Job: #{}  |  Tool: {}", &job.id[..8.min(job.id.len())], job.tool_name)),
+    ]));
+    lines.push(Line::from(""));
 
-            // Started at
-            lines.push(Line::from(vec![
-                Span::styled("Started: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw(job.started_at.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
-            ]));
+    // Journey Timeline
+    lines.push(Line::from(vec![
+        Span::styled("╔══════════════════════════════════════════════════════════════╗", Style::default().fg(Color::Cyan)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("║  ", Style::default().fg(Color::Cyan)),
+        Span::styled("EXECUTION JOURNEY", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled("                                           ║", Style::default().fg(Color::Cyan)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("╚══════════════════════════════════════════════════════════════╝", Style::default().fg(Color::Cyan)),
+    ]));
+    lines.push(Line::from(""));
 
-            // Finished at (if applicable)
-            if let Some(finished) = job.finished_at {
-                lines.push(Line::from(vec![
-                    Span::styled("Finished: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                    Span::raw(finished.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
-                ]));
-            }
-
-            // Last activity
-            lines.push(Line::from(vec![
-                Span::styled("Last Activity: ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw(job.last_activity.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
-            ]));
-
-            lines.push(Line::from(""));
-
-            // Metrics
-            let metrics = &job.metrics;
-            lines.push(Line::from(vec![
-                Span::styled("Metrics:", Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED)),
-            ]));
-            lines.push(Line::from(vec![
-                Span::raw(format!("  Tokens: {} prompt / {} completion / {} total", 
-                    metrics.prompt_tokens, metrics.completion_tokens, metrics.total_tokens)),
-            ]));
-            lines.push(Line::from(vec![
-                Span::raw(format!("  Requests: {} | Errors: {} | Rate Limits: {}", 
-                    metrics.request_count, metrics.error_count, metrics.rate_limit_hits)),
-            ]));
-            lines.push(Line::from(vec![
-                Span::raw(format!("  Context Window: {} tokens", metrics.context_tokens)),
-            ]));
-            lines.push(Line::from(vec![
-                Span::raw(format!("  Worker Job: {}", if job.is_worker { "Yes" } else { "No" })),
-            ]));
-
-            lines.push(Line::from(""));
-
-            // Description
-            lines.push(Line::from(vec![
-                Span::styled("Description:", Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED)),
-            ]));
-            for line in job.description.lines() {
-                lines.push(Line::from(line));
-            }
-
-            // Output
-            if !job.output.is_empty() {
-                lines.push(Line::from(""));
-                lines.push(Line::from(vec![
-                    Span::styled("Output:", Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED)),
-                ]));
-                for line in job.output.lines() {
-                    lines.push(Line::from(line));
-                }
-            }
-
-            // Error
-            if let Some(ref error) = job.error {
-                lines.push(Line::from(""));
-                lines.push(Line::from(vec![
-                    Span::styled("Error:", Style::default().fg(Color::Red).add_modifier(Modifier::UNDERLINED)),
-                ]));
-                for line in error.lines() {
-                    lines.push(Line::from(Span::styled(line, Style::default().fg(Color::Red))));
-                }
-            }
-
-            // Result
-            if let Some(ref result) = job.result {
-                lines.push(Line::from(""));
-                lines.push(Line::from(vec![
-                    Span::styled("Result:", Style::default().fg(Color::Green).add_modifier(Modifier::UNDERLINED)),
-                ]));
-                let result_str = serde_json::to_string_pretty(result).unwrap_or_default();
-                let result_lines: Vec<String> = result_str.lines().map(|s| s.to_string()).collect();
-                for line in result_lines {
-                    lines.push(Line::from(Span::styled(line, Style::default().fg(Color::Green))));
-                }
-            }
-
-            // Action Log
-            if !job.action_log.is_empty() {
-                lines.push(Line::from(""));
-                lines.push(Line::from(vec![
-                    Span::styled("Action Log:", Style::default().fg(Color::Cyan).add_modifier(Modifier::UNDERLINED)),
-                ]));
-                for entry in &job.action_log {
-                    let icon = match entry.action_type {
-                        mylm_core::agent::v2::jobs::ActionType::Thought => "💭",
-                        mylm_core::agent::v2::jobs::ActionType::ToolCall => "🔧",
-                        mylm_core::agent::v2::jobs::ActionType::ToolResult => "📤",
-                        mylm_core::agent::v2::jobs::ActionType::Error => "❌",
-                        mylm_core::agent::v2::jobs::ActionType::FinalAnswer => "✓",
-                        mylm_core::agent::v2::jobs::ActionType::System => "⚙",
-                    };
-                    let timestamp = entry.timestamp.format("%H:%M:%S");
+    // Build journey from action log
+    if job.action_log.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("  Waiting for execution to start...", Style::default().fg(Color::DarkGray)),
+        ]));
+    } else {
+        let mut step_num = 1;
+        let mut last_was_tool = false;
+        
+        for entry in &job.action_log {
+            match entry.action_type {
+                ActionType::Thought => {
+                    if !last_was_tool {
+                        lines.push(Line::from(""));
+                    }
                     lines.push(Line::from(vec![
-                        Span::styled(format!("[{}] ", timestamp), Style::default().fg(Color::DarkGray)),
-                        Span::raw(format!("{} ", icon)),
-                        Span::raw(&entry.content),
+                        Span::styled(format!("  Step {}: ", step_num), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                        Span::styled("💭 Thinking", Style::default().fg(Color::Cyan)),
+                        Span::styled(format!(" [{}]", entry.timestamp.format("%H:%M:%S")), Style::default().fg(Color::DarkGray)),
+                    ]));
+                    for line in wrap_text(&entry.content, inner_area.width.saturating_sub(8) as usize) {
+                        lines.push(Line::from(vec![
+                            Span::raw("           "),
+                            Span::styled(line, Style::default().fg(Color::Gray)),
+                        ]));
+                    }
+                    step_num += 1;
+                    last_was_tool = false;
+                }
+                ActionType::ToolCall => {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("  Step {}: ", step_num), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                        Span::styled("🔧 Action", Style::default().fg(Color::Blue)),
+                        Span::styled(format!(" [{}]", entry.timestamp.format("%H:%M:%S")), Style::default().fg(Color::DarkGray)),
+                    ]));
+                    lines.push(Line::from(vec![
+                        Span::raw("           "),
+                        Span::styled(&entry.content, Style::default().fg(Color::White)),
+                    ]));
+                    step_num += 1;
+                    last_was_tool = true;
+                }
+                ActionType::ToolResult => {
+                    lines.push(Line::from(vec![
+                        Span::raw("           "),
+                        Span::styled("└─ ", Style::default().fg(Color::DarkGray)),
+                        Span::styled("📤 Result: ", Style::default().fg(Color::Green)),
+                        Span::styled(&entry.content, Style::default().fg(Color::Gray)),
+                    ]));
+                    last_was_tool = false;
+                }
+                ActionType::Error => {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(vec![
+                        Span::styled("  ⚠️  ", Style::default().fg(Color::Red)),
+                        Span::styled("ERROR", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                        Span::styled(format!(" [{}]", entry.timestamp.format("%H:%M:%S")), Style::default().fg(Color::DarkGray)),
+                    ]));
+                    for line in wrap_text(&entry.content, inner_area.width.saturating_sub(8) as usize) {
+                        lines.push(Line::from(vec![
+                            Span::raw("      "),
+                            Span::styled(line, Style::default().fg(Color::Red)),
+                        ]));
+                    }
+                    last_was_tool = false;
+                }
+                ActionType::FinalAnswer => {
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(vec![
+                        Span::styled("  ════════════════════════════════════════════════════════════", Style::default().fg(Color::Green)),
+                    ]));
+                    lines.push(Line::from(vec![
+                        Span::styled("  ✓ ", Style::default().fg(Color::Green)),
+                        Span::styled("TASK COMPLETE", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    ]));
+                    lines.push(Line::from(vec![
+                        Span::styled("  ════════════════════════════════════════════════════════════", Style::default().fg(Color::Green)),
+                    ]));
+                    last_was_tool = false;
+                }
+                ActionType::System => {
+                    lines.push(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("⚙ ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(&entry.content, Style::default().fg(Color::DarkGray)),
                     ]));
                 }
             }
-
-            lines
-        } else {
-            vec![Line::from("No job selected")]
         }
-    } else {
-        vec![Line::from("No job selected")]
-    };
+    }
+
+    // Output section if available
+    if !job.output.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("╔══════════════════════════════════════════════════════════════╗", Style::default().fg(Color::Cyan)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("║  ", Style::default().fg(Color::Cyan)),
+            Span::styled("FINAL OUTPUT", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("                                          ║", Style::default().fg(Color::Cyan)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("╚══════════════════════════════════════════════════════════════╝", Style::default().fg(Color::Cyan)),
+        ]));
+        lines.push(Line::from(""));
+        for line in job.output.lines() {
+            lines.push(Line::from(vec![Span::raw(format!("  {}", line))]));
+        }
+    }
+
+    // Error section
+    if let Some(ref error) = job.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("╔══════════════════════════════════════════════════════════════╗", Style::default().fg(Color::Red)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("║  ", Style::default().fg(Color::Red)),
+            Span::styled("ERROR DETAILS", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled("                                          ║", Style::default().fg(Color::Red)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("╚══════════════════════════════════════════════════════════════╝", Style::default().fg(Color::Red)),
+        ]));
+        lines.push(Line::from(""));
+        for line in error.lines() {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {}", line), Style::default().fg(Color::Red)),
+            ]));
+        }
+    }
+
+    // Metrics footer
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("─" .repeat(inner_area.width as usize), Style::default().fg(Color::DarkGray)),
+    ]));
+    let metrics = &job.metrics;
+    lines.push(Line::from(vec![
+        Span::styled("  📊 Metrics: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(format!("Tokens: {}↑ {}↓ ({} total) | Requests: {} | Errors: {}",
+            metrics.prompt_tokens, metrics.completion_tokens, metrics.total_tokens,
+            metrics.request_count, metrics.error_count)),
+    ]));
 
     // Apply scrolling
     let visible_height = inner_area.height as usize;
-    let total_lines = content.len();
+    let total_lines = lines.len();
     let max_scroll = total_lines.saturating_sub(visible_height);
     app.job_scroll = app.job_scroll.min(max_scroll);
 
     let start_idx = app.job_scroll;
     let end_idx = (start_idx + visible_height).min(total_lines);
-    let visible_content: Vec<Line> = content[start_idx..end_idx].to_vec();
+    let visible_content: Vec<Line> = lines[start_idx..end_idx].to_vec();
 
     let paragraph = Paragraph::new(visible_content)
-        .wrap(Wrap { trim: true });
+        .wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, inner_area);
 }

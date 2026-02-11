@@ -1,3 +1,10 @@
+//! Unit tests for configuration v2 system.
+//!
+//! Tests cover profile resolution, environment variable overrides,
+//! TOML parsing, serialization, and configuration loading/saving.
+//! Uses isolated temporary directories to avoid interfering with
+//! user configuration files.
+
 use super::*;
 use lazy_static::lazy_static;
 use std::sync::Mutex;

@@ -8,6 +8,13 @@ use serde::{Deserialize, Serialize};
 use crate::agent::protocol::AgentError;
 
 /// Short-Key Action representation.
+///
+/// Fields:
+/// - `t`: Thought/reasoning (optional, default empty)
+/// - `a`: Action/tool name to execute (optional)
+/// - `i`: Input arguments for the action (optional)
+/// - `f`: Final answer/message to user (optional)
+/// - `c`: Confirm flag - when true, chat first and wait for user approval before acting
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ShortKeyAction {
     #[serde(rename = "t", default)]
@@ -18,6 +25,10 @@ pub struct ShortKeyAction {
     pub input: Option<serde_json::Value>,
     #[serde(rename = "f")]
     pub final_answer: Option<String>,
+    /// Confirm flag: when true, present the thought/action to user first,
+    /// store the action as pending, and wait for approval before executing.
+    #[serde(rename = "c", default)]
+    pub confirm: bool,
 }
 
 /// Try to parse one or more [`ShortKeyAction`] from arbitrary model output.

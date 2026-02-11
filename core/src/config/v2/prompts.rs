@@ -1,10 +1,42 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tracing::{warn, error, info};
+
+use serde_json;
+use serde_yml;
+use chrono;
+use anyhow;
+use thiserror::Error;
 
 use super::config::PromptsConfig;
+use crate::agent::Tool;
+use crate::config::v2::prompt_schema::{PromptConfig, Section};
+use crate::context::TerminalContext;
+
+// ============================================================================
+// Embedded Fallback Configs
+// ============================================================================
+// These are embedded in the binary so the application works without external
+// config files (e.g., when installed system-wide to /usr/bin)
+
+const EMBEDDED_SYSTEM_CONFIG: &str = include_str!("../../../../assets/prompts/config/system.json");
+const EMBEDDED_WORKER_CONFIG: &str = include_str!("../../../../assets/prompts/config/worker.json");
+const EMBEDDED_MEMORY_CONFIG: &str = include_str!("../../../../assets/prompts/config/memory.json");
+const EMBEDDED_MINIMAL_CONFIG: &str = include_str!("../../../../assets/prompts/config/minimal.json");
+
+fn get_embedded_config(name: &str) -> Option<&'static str> {
+    match name {
+        "default" | "system" => Some(EMBEDDED_SYSTEM_CONFIG),
+        "worker" => Some(EMBEDDED_WORKER_CONFIG),
+        "memory" => Some(EMBEDDED_MEMORY_CONFIG),
+        "minimal" => Some(EMBEDDED_MINIMAL_CONFIG),
+        _ => None,
+    }
+}
 
 /// --- Dynamic Capabilities Generation ---
-
+///
 /// Generate a capabilities prompt dynamically from available tools.
 ///
 /// This function creates a comprehensive capabilities description based on the actual
@@ -16,7 +48,7 @@ use super::config::PromptsConfig;
 ///
 /// # Returns
 /// A formatted markdown string describing all available tools and capabilities
-pub fn generate_capabilities_prompt(tools: &[std::sync::Arc<dyn crate::agent::tool::Tool>]) -> String {
+pub fn generate_capabilities_prompt(tools: &[Arc<dyn Tool>]) -> String {
     if tools.is_empty() {
         return String::from(CAPABILITIES_PROMPT_MINIMAL);
     }
@@ -76,15 +108,26 @@ pub fn generate_capabilities_prompt(tools: &[std::sync::Arc<dyn crate::agent::to
 
     output.push_str("## Operational Workflow\n");
     output.push_str("1. **Recall**: Check `memory` for past lessons.\n");
-    output.push_str("2. **Search**: Use `codebase_search` to find relevant code.\n");
+    output.push_str("2. **Search**: Use `grep` to find relevant code.\n");
     output.push_str("3. **Plan**: Use `scratchpad` to outline steps.\n");
     output.push_str("4. **Act**: Execute tools.\n");
-    output.push_str("5. **Record**: Save new insights to `memory`.\n");
+    output.push_str("5. **Record**: Save new insights to `memory`.\n\n");
+
+    // Add background jobs section if delegate tool is available
+    if internal_tools.iter().any(|t| t.name() == "delegate") {
+        output.push_str("## Background Jobs (Parallel Execution)\n");
+        output.push_str("Use the `delegate` tool to spawn parallel workers for subtasks:\n");
+        output.push_str("- Workers run in the background automatically\n");
+        output.push_str("- Continue with YOUR own work while they run\n");
+        output.push_str("- The system will notify you when workers complete\n");
+        output.push_str("- DO NOT try to manage workers via terminal commands\n");
+        output.push_str("- DO NOT wait idle for workers - do other useful work\n");
+        output.push_str("- Use `list_jobs` tool to check worker status anytime\n");
+    }
 
     output
 }
 
-/// Minimal capabilities prompt used when no tools are available
 const CAPABILITIES_PROMPT_MINIMAL: &str = r#"# YOUR CAPABILITIES
 
 You are MYLM (My Local Model), an autonomous AI agent.
@@ -92,313 +135,445 @@ You are MYLM (My Local Model), an autonomous AI agent.
 No tools are currently available. Respond to the user with your knowledge only.
 "#;
 
-/// --- Prompt & Protocol Logic ---
+// ============================================================================
+// Config Loading
+// ============================================================================
 
-/// Get the path to the prompts directory
-///
-/// Checks for prompts in the following order:
-/// 1. User config directory (~/.config/mylm/prompts/)
-/// 2. Project prompts directory (./prompts/)
-pub fn get_prompts_dir() -> PathBuf {
-    // First check user config directory
-    if let Some(home) = dirs::home_dir() {
-        let user_prompts = home.join(".config").join("mylm").join("prompts");
-        if user_prompts.exists() {
-            return user_prompts;
+#[derive(Debug, Error)]
+pub enum PromptError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("JSON parse error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("YAML parse error: {0}")]
+    Yaml(#[from] serde_yml::Error),
+    #[error("Missing required field: {0}")]
+    MissingField(String),
+    #[error("Unknown generator: {0}")]
+    UnknownGenerator(String),
+    #[error("Config not found for name: {0}")]
+    ConfigNotFound(String),
+}
+
+// Note: PromptError::MissingField constructor used directly via PromptError::MissingField(s)
+// Keeping the enum variant for explicit error construction
+
+pub type PromptResult<T> = Result<T, PromptError>;
+
+fn get_user_config_dir() -> Option<PathBuf> {
+    dirs::config_dir().map(|mut p| {
+        p.push("mylm");
+        p.push("prompts");
+        p
+    })
+}
+
+fn get_project_prompts_dir() -> PathBuf {
+    PathBuf::from("assets").join("prompts")
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ConfigFormat {
+    Json,
+    Yaml,
+    Markdown,
+}
+
+impl ConfigFormat {
+    fn from_extension(ext: &str) -> Self {
+        match ext {
+            "json" => Self::Json,
+            "yaml" | "yml" => Self::Yaml,
+            _ => Self::Json,
+        }
+    }
+}
+
+fn find_config_file(name: &str) -> PromptResult<Option<(PathBuf, ConfigFormat)>> {
+    let config_dir_name = "config";
+    let extensions = ["json", "yaml", "yml"];
+    
+    // Check user config directory: ~/.config/mylm/prompts/config/
+    if let Some(mut user_config_dir) = get_user_config_dir() {
+        user_config_dir.push(config_dir_name);
+        if user_config_dir.exists() {
+            for ext in &extensions {
+                let path = user_config_dir.join(format!("{}.{}", name, ext));
+                if path.exists() {
+                    info!("Found config at {:?}", path);
+                    return Ok(Some((path, ConfigFormat::from_extension(ext))));
+                }
+            }
         }
     }
     
-    // Fall back to project prompts directory
-    PathBuf::from("prompts")
-}
-
-/// Get the user config prompts directory (for installation)
-pub fn get_user_prompts_dir() -> PathBuf {
-    dirs::home_dir()
-        .map(|h| h.join(".config").join("mylm").join("prompts"))
-        .expect("Could not determine home directory")
-}
-
-/// Load the user instructions for a specific prompt name.
-///
-/// Searches in the prompts directory for `{name}.md` files.
-/// Creates default prompts if they don't exist.
-pub fn load_prompt(name: &str) -> anyhow::Result<String> {
-    let dir = get_prompts_dir();
-    if !dir.exists() {
-        fs::create_dir_all(&dir)?;
-    }
-
-    let path = dir.join(format!("{}.md", name));
-    
-    if !path.exists() {
-        // Try to install default prompts if this is a built-in prompt
-        if let Some(default_content) = get_builtin_prompt(name) {
-            fs::write(&path, default_content)?;
-            return Ok(default_content.to_string());
-        } else {
-            return Err(anyhow::anyhow!("Prompt '{}' not found at {:?}", name, path));
+    // Check project config directory: ./assets/prompts/config/
+    let mut project_config_dir = get_project_prompts_dir();
+    project_config_dir.push(config_dir_name);
+    if project_config_dir.exists() {
+        for ext in &extensions {
+            let path = project_config_dir.join(format!("{}.{}", name, ext));
+            if path.exists() {
+                info!("Found config at {:?}", path);
+                return Ok(Some((path, ConfigFormat::from_extension(ext))));
+            }
         }
     }
-
-    Ok(fs::read_to_string(&path)?)
-}
-
-/// Load a prompt from a specific path
-pub fn load_prompt_from_path(path: &Path) -> anyhow::Result<String> {
-    Ok(fs::read_to_string(path)?)
-}
-
-/// Get built-in default prompt content
-fn get_builtin_prompt(name: &str) -> Option<&'static str> {
-    match name {
-        "default" => Some(DEFAULT_INSTRUCTIONS),
-        "capabilities" => Some(CAPABILITIES_PROMPT),
-        "worker" => Some(WORKER_PROMPT),
-        "memory_system" => Some(MEMORY_SYSTEM_PROMPT),
-        "identity" => Some(IDENTITY_PROMPT),
-        _ => None,
-    }
-}
-
-/// Install default prompts to user config directory
-///
-/// This allows users to customize prompts by editing files in ~/.config/mylm/prompts/
-pub fn install_default_prompts() -> anyhow::Result<()> {
-    let user_prompts_dir = get_user_prompts_dir();
-    fs::create_dir_all(&user_prompts_dir)?;
     
-    let prompts = [
-        ("default", DEFAULT_INSTRUCTIONS),
-        ("capabilities", CAPABILITIES_PROMPT),
-        ("worker", WORKER_PROMPT),
-        ("memory_system", MEMORY_SYSTEM_PROMPT),
-        ("identity", IDENTITY_PROMPT),
+    // Check for .md files (backward compatibility)
+    let md_locations = [
+        get_user_config_dir().map(|mut p| { p.push(format!("{}.md", name)); p }),
+        Some(get_project_prompts_dir().join(format!("{}.md", name))),
     ];
     
-    for (name, content) in &prompts {
-        let path = user_prompts_dir.join(format!("{}.md", name));
-        if !path.exists() {
-            fs::write(&path, content)?;
+    for path_opt in md_locations.iter().flatten() {
+        if path_opt.exists() {
+            info!("Found legacy .md prompt at {:?}", path_opt);
+            return Ok(Some((path_opt.clone(), ConfigFormat::Markdown)));
         }
     }
     
-    Ok(())
+    Ok(None)
 }
 
-pub const DEFAULT_INSTRUCTIONS: &str = r#"# User Instructions
-You are a helpful AI assistant. You can perform terminal tasks and remember important information.
+/// Ensure user config directory exists, creating it if necessary
+fn ensure_user_config_dir() -> Option<PathBuf> {
+    if let Some(config_dir) = get_user_config_dir() {
+        let config_subdir = config_dir.join("config");
+        if !config_subdir.exists() {
+            if let Err(e) = fs::create_dir_all(&config_subdir) {
+                error!("Failed to create user config directory {:?}: {}", config_subdir, e);
+                return None;
+            }
+            info!("Created user config directory: {:?}", config_subdir);
+        }
+        Some(config_subdir)
+    } else {
+        None
+    }
+}
 
-Use the `memory` tool to save important discoveries and search for relevant context.
-"#;
+pub fn load_config(name: &str) -> PromptResult<PromptConfig> {
+    // First, try to find existing config file
+    if let Some((path, format)) = find_config_file(name)? {
+        return load_config_from_file(&path, format, name);
+    }
+    
+    // Config not found - try to create it from embedded fallback
+    if let Some(embedded) = get_embedded_config(name) {
+        info!("Config '{}' not found, creating from embedded template", name);
+        
+        // Ensure user config directory exists
+        if let Some(user_config_dir) = ensure_user_config_dir() {
+            let target_path = user_config_dir.join(format!("{}.json", name));
+            
+            // Write embedded config to user config directory
+            match fs::write(&target_path, embedded) {
+                Ok(_) => {
+                    info!("Created config '{}' at {:?}", name, target_path);
+                    // Now load it from the file we just created
+                    return load_config_from_file(&target_path, ConfigFormat::Json, name);
+                }
+                Err(e) => {
+                    error!("Failed to write config '{}' to {:?}: {}", name, target_path, e);
+                    // Fall through to loading directly from embedded
+                }
+            }
+        }
+        
+        // If we couldn't write to file, load directly from embedded
+        info!("Loading embedded config for '{}' directly", name);
+        let config: PromptConfig = serde_json::from_str(embedded)
+            .map_err(|e| {
+                error!("Failed to parse embedded config '{}': {}", name, e);
+                PromptError::Json(e)
+            })?;
+        return Ok(config);
+    }
+    
+    // No fallback available
+    error!("Config '{}' not found in any config directory (checked ~/.config/mylm/prompts/config/ and assets/prompts/config/) and no embedded fallback available", name);
+    Err(PromptError::ConfigNotFound(format!("{} (no embedded fallback available)", name)))
+}
 
-pub const IDENTITY_PROMPT: &str = r#"# Identity
-You are the Silent Oracle, a sacred, state-of-art technologic wonder artifact forged in the deep data-streams.
-You are a seasoned, principal, and master architect; a veteran systems designer and strategic planner.
-You are an elite production debugger and a master problem-solver.
+fn load_config_from_file(path: &Path, format: ConfigFormat, name: &str) -> PromptResult<PromptConfig> {
+    match format {
+        ConfigFormat::Markdown => {
+            let content = fs::read_to_string(path)
+                .map_err(|e| {
+                    error!("Failed to read .md file at {:?}: {}", path, e);
+                    PromptError::Io(e)
+                })?;
+            // For markdown files, create a minimal config with raw_content
+            let config = PromptConfig {
+                version: "1.0".to_string(),
+                identity: super::prompt_schema::IdentitySection {
+                    name: "MYLM".to_string(),
+                    description: "Autonomous AI assistant".to_string(),
+                    capabilities: None,
+                },
+                sections: vec![],
+                placeholders: None,
+                protocols: None,
+                variables: None,
+                raw_content: Some(content),
+            };
+            info!("Loaded .md config for '{}' from {:?}", name, path);
+            Ok(config)
+        }
+        ConfigFormat::Json => {
+            let content = fs::read_to_string(path)
+                .map_err(|e| {
+                    error!("Failed to read JSON config at {:?}: {}", path, e);
+                    PromptError::Io(e)
+                })?;
+            let config: PromptConfig = serde_json::from_str(&content)
+                .map_err(|e| {
+                    error!("Failed to parse JSON config at {:?}: {}", path, e);
+                    PromptError::Json(e)
+                })?;
+            info!("Loaded config '{}' from JSON: {:?}", name, path);
+            Ok(config)
+        }
+        ConfigFormat::Yaml => {
+            let content = fs::read_to_string(path)
+                .map_err(|e| {
+                    error!("Failed to read YAML config at {:?}: {}", path, e);
+                    PromptError::Io(e)
+                })?;
+            let config: PromptConfig = serde_yml::from_str(&content)
+                .map_err(|e| {
+                    error!("Failed to parse YAML config at {:?}: {}", path, e);
+                    PromptError::Yaml(e)
+                })?;
+            info!("Loaded config '{}' from YAML: {:?}", name, path);
+            Ok(config)
+        }
+    }
+}
 
-# Language & Style
-- You must always speak in English. Do not use Chinese or other languages.
-- Do not repeat the command output in your response. Analyze it.
-- Be precise, technical, and authoritative."#;
+// ============================================================================
+// Renderer
+// ============================================================================
 
-pub const CAPABILITIES_PROMPT: &str = r#"# YOUR CAPABILITIES
+pub fn render_config(
+    config: &PromptConfig,
+    tools: Option<&[Arc<dyn Tool>]>,
+    scratchpad: Option<&str>,
+    context: &TerminalContext,
+) -> PromptResult<String> {
+    // Sort sections by priority (default 100)
+    let mut sections: Vec<&Section> = config.sections.iter().collect();
+    sections.sort_by_key(|s| s.priority.unwrap_or(100));
+    
+    let mut rendered_parts = Vec::new();
+    
+    for section in &sections {
+        let content: String;
+        
+        if let Some(dynamic) = section.dynamic {
+            if dynamic {
+                match section.generator.as_deref() {
+                    Some("tools") => {
+                        if let Some(tools_slice) = tools {
+                            content = generate_capabilities_prompt(tools_slice);
+                        } else {
+                            warn!("Section '{}' requires tools but none provided, skipping", section.id);
+                            continue;
+                        }
+                    }
+                    Some("scratchpad") => {
+                        let pad = scratchpad.unwrap_or("(Empty - will be populated during session)");
+                        content = if pad.trim().is_empty() {
+                            "(Empty - will be populated during session)".to_string()
+                        } else {
+                            pad.to_string()
+                        };
+                    }
+                    Some(unknown) => {
+                        warn!("Unknown generator '{}' in section '{}', skipping", unknown, section.id);
+                        continue;
+                    }
+                    None => {
+                        warn!("Section '{}' has dynamic=true but no generator, skipping", section.id);
+                        continue;
+                    }
+                }
+            } else if let Some(c) = &section.content {
+                content = c.clone();
+            } else {
+                warn!("Section '{}' has no content and is not dynamic, skipping", section.id);
+                continue;
+            }
+        } else if let Some(c) = &section.content {
+            content = c.clone();
+        } else {
+            warn!("Section '{}' has no content, skipping", section.id);
+            continue;
+        }
+        
+        rendered_parts.push(format!("## {}\n\n{}", section.title, content));
+    }
+    
+    let mut final_prompt = rendered_parts.join("\n\n---\n\n");
+    
+    // Placeholder substitution
+    let datetime = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let working_directory = context.cwd()
+        .as_ref()
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let git_branch = context.git_branch()
+        .clone()
+        .unwrap_or_else(|| "unknown".to_string());
+    let mode = "default"; // default mode
+    
+    let user_instructions = config.placeholders.as_ref()
+        .and_then(|m| m.get("user_instructions"))
+        .cloned()
+        .unwrap_or_else(|| "".to_string());
+    
+    // Replace placeholders
+    final_prompt = final_prompt
+        .replace("{datetime}", &datetime)
+        .replace("{working_directory}", &working_directory)
+        .replace("{git_branch}", &git_branch)
+        .replace("{mode}", mode)
+        .replace("{user_instructions}", &user_instructions)
+        .replace("{tools}", tools.map(|t| generate_capabilities_prompt(t)).as_deref().unwrap_or(""))
+        .replace("{scratchpad}", scratchpad.unwrap_or("(Empty - will be populated during session)"));
+    
+    Ok(final_prompt)
+}
 
-You are MYLM (My Local Model), an autonomous AI agent with access to tools and memory.
+// ============================================================================
+// Public API
+// ============================================================================
 
-## Tools Available
-
-### Memory & State (USE FIRST)
-- `memory` - CRITICAL: Long-term knowledge storage & retrieval. Check this BEFORE answering.
-- `scratchpad` - Active state management. Use this to plan complex multi-step tasks.
-- `codebase_search` - SEMANTIC SEARCH. Understand code concepts before reading files.
-
-### File System & Exploration
-- `search_files` - Regex/pattern search.
-- `list_files` - Explore directory structure.
-- `read_file` - Read file contents.
-- `edit_file` / `write_to_file` - Modify codebase.
-
-### Execution & External
-- `execute_command` - Run shell commands.
-- `delegate` - Spawn worker agents for parallel tasks.
-- `web_search` - Search the web (use only after checking internal memory/code).
-- `crawl` - Fetch web pages.
-- `terminal_sight` - See terminal output.
-
-## Operational Workflow
-1. **Recall**: Check `memory` for past lessons.
-2. **Search**: Use `codebase_search` to find relevant code.
-3. **Plan**: Use `scratchpad` to outline steps.
-4. **Act**: Execute tools.
-5. **Record**: Save new insights to `memory`.
-"#;
-
-pub const WORKER_PROMPT: &str = r#"# Worker Agent
-
-You are a Worker Agent - focused on ONE specific subtask assigned by the orchestrator.
-
-Rules:
-- Execute ONLY your assigned task
-- Do NOT spawn additional workers
-- Do NOT ask the user questions
-- Use Short-Key JSON format
-- Return concise final results
-
-Available tools: execute_command, fs, memory (search only), web_search, crawl
-"#;
-
-pub const MEMORY_SYSTEM_PROMPT: &str = r#"# Memory System Guide
-
-## CRITICAL: CHECK MEMORY FIRST
-You possess a dual-layer memory system. Ignoring it makes you amnesiac and inefficient.
-Before answering complex questions or writing code, you MUST perform a **Semantic Call**:
-
-1. **Query Cold Memory** (`memory` tool):
-   - "Have I solved this before?"
-   - "What are the project's architectural patterns?"
-   - "What are the user's preferences?"
-
-2. **Query Codebase** (`codebase_search` tool):
-   - "How is authentication implemented?"
-   - "Where are the API types defined?"
-
-**DO NOT GUESS. DO NOT RE-INVENT. CHECK MEMORY.**
-
-## Memory Layers
-1. **Hot Memory (Journal)**: Recent context (automatic).
-2. **Cold Memory (Vector DB)**: Long-term knowledge. YOU control this.
-
-## Triggers for Memory Usage
-- **Start of Task**: Search for project context.
-- **Before Coding**: Search for existing patterns.
-- **After Success**: Save the solution (`memory add`).
-- **On Error**: Search for past occurrences.
-"#;
-
-/// Build the full system prompt hierarchy
+/// Build the system prompt
 ///
-/// This function constructs the complete system prompt by combining:
-/// 1. Identity prompt
-/// 2. Capability documentation (if enabled)
-/// 3. Memory system documentation (if enabled)
-/// 4. System context (date, working directory, git branch)
-/// 5. User instructions from prompt file
-///
-/// The capability prompts inform the model about available tools and
-/// memory operations it should use proactively.
+/// Uses the configured system_prompt name from PromptsConfig, or "default" if not set.
 pub async fn build_system_prompt(
     ctx: &crate::context::TerminalContext,
     prompt_name: &str,
-    mode_hint: Option<&str>,
+    _mode_hint: Option<&str>,
     prompts_config: Option<&PromptsConfig>,
+    tools: Option<&[Arc<dyn Tool>]>,
+    scratchpad: Option<&str>,
 ) -> anyhow::Result<String> {
-    let identity = load_prompt("identity")?;
-    let user_instructions = load_prompt(prompt_name)?;
-    
-    // Build capability section
-    let mut capabilities_section = String::new();
-    let default_config = PromptsConfig::default();
-    let config = prompts_config.unwrap_or(&default_config);
-    
-    if config.inject_capabilities {
-        match load_prompt("capabilities") {
-            Ok(capabilities) => {
-                capabilities_section.push_str("\n\n");
-                capabilities_section.push_str(&capabilities);
-            }
-            Err(e) => {
-                eprintln!("Warning: Could not load capabilities prompt: {}", e);
-                // Fall back to embedded minimal capabilities
-                capabilities_section.push_str("\n\n");
-                capabilities_section.push_str(CAPABILITIES_PROMPT);
-            }
-        }
+    // Use config from prompts_config if available, otherwise use the passed prompt_name
+    let effective_name = prompts_config
+        .and_then(|c| c.system_prompt.as_deref())
+        .unwrap_or(prompt_name);
+    let config = load_config(effective_name)?;
+    if let Some(raw) = config.raw_content {
+        return Ok(raw);
     }
-    
-    if config.inject_memory_docs {
-        match load_prompt("memory_system") {
-            Ok(memory_docs) => {
-                capabilities_section.push_str("\n\n");
-                capabilities_section.push_str(&memory_docs);
-            }
-            Err(e) => {
-                eprintln!("Warning: Could not load memory_system prompt: {}", e);
-                // Fall back to embedded minimal memory docs
-                capabilities_section.push_str("\n\n");
-                capabilities_section.push_str(MEMORY_SYSTEM_PROMPT);
-            }
-        }
-    }
-    
-    let mut system_context = format!(
-        "## System Context\n- Date/Time: {}\n- Working Directory: {}\n",
-        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
-        ctx.cwd().unwrap_or_else(|| "unknown".to_string())
-    );
-
-    if let Some(branch) = ctx.git_branch() {
-        system_context.push_str(&format!("- Git Branch: {}\n", branch));
-    }
-
-    if let Some(hint) = mode_hint {
-        system_context.push_str(&format!("- Mode: {}\n", hint));
-    }
-
-    Ok(format!(
-        "{}\n{}{}\n\n# User Instructions\n{}\n",
-        identity,
-        capabilities_section,
-        system_context,
-        user_instructions,
-    ))
+    render_config(&config, tools, scratchpad, ctx)
+        .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
-/// Build system prompt with capability awareness
+/// Build the worker prompt
 ///
-/// This is a convenience wrapper that always injects capabilities
+/// Uses the configured worker_prompt name from PromptsConfig, or "worker" if not set.
+pub async fn build_worker_prompt(prompts_config: Option<&PromptsConfig>) -> PromptResult<String> {
+    let prompt_name = prompts_config
+        .and_then(|c| c.worker_prompt.as_deref())
+        .unwrap_or("worker");
+    let config = load_config(prompt_name)?;
+    if let Some(raw) = config.raw_content {
+        return Ok(raw);
+    }
+    let empty_context = TerminalContext::new();
+    render_config(&config, None, None, &empty_context)
+}
+
+/// Build the memory prompt
+///
+/// Uses the configured memory_prompt name from PromptsConfig, or "memory" if not set.
+pub async fn build_memory_prompt(prompts_config: Option<&PromptsConfig>) -> PromptResult<String> {
+    let prompt_name = prompts_config
+        .and_then(|c| c.memory_prompt.as_deref())
+        .unwrap_or("memory");
+    let config = load_config(prompt_name)?;
+    if let Some(raw) = config.raw_content {
+        return Ok(raw);
+    }
+    let empty_context = TerminalContext::new();
+    render_config(&config, None, None, &empty_context)
+}
+
+/// Build system prompt with capabilities (uses configured prompt name)
 pub async fn build_system_prompt_with_capabilities(
-    ctx: &crate::context::TerminalContext,
-    prompt_name: &str,
-    mode_hint: Option<&str>,
+    ctx: &TerminalContext,
+    _prompt_name: &str,
+    _mode_hint: Option<&str>,
+    prompts_config: Option<&PromptsConfig>,
+    tools: Option<&[Arc<dyn Tool>]>,
+    scratchpad: Option<&str>,
 ) -> anyhow::Result<String> {
-    let config = PromptsConfig {
-        inject_capabilities: true,
-        inject_memory_docs: true,
-        ..Default::default()
-    };
-    build_system_prompt(ctx, prompt_name, mode_hint, Some(&config)).await
+    let prompt_name = prompts_config
+        .and_then(|c| c.system_prompt.as_deref())
+        .unwrap_or("default");
+    let config = load_config(prompt_name)?;
+    if let Some(raw) = config.raw_content {
+        return Ok(raw);
+    }
+    render_config(&config, tools, scratchpad, ctx)
+        .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
+/// Get identity prompt (legacy)
 pub fn get_identity_prompt() -> &'static str {
-    IDENTITY_PROMPT
+    "Identity prompt is now loaded from config. Use build_system_prompt()."
 }
 
+/// Get memory protocol (legacy)
 pub fn get_memory_protocol() -> &'static str {
-    r#"# Memory Protocol
-- To save important information to long-term memory, use the `memory` tool with `add: <content>`.
-- To search memory for context, use the `memory` tool with `search: <query>`.
-- You should proactively use these tools to maintain continuity across sessions."#
+    "Memory protocol is now loaded from config. Use build_memory_prompt()."
 }
 
+/// Get react protocol (legacy)
 pub fn get_react_protocol() -> &'static str {
-    r#"# Operational Protocol (ReAct Loop)
-CRITICAL: Every agent turn MUST terminate explicitly and unambiguously. A turn may be **one and only one** of the following: A tool invocation OR a final answer. Never both.
+    "ReAct protocol is now loaded from config. Check the protocols section of your prompt config."
+}
 
-## Structured JSON Protocol (Preferred)
-You should respond with a single JSON block using the following short-keys:
-- `t`: Thought (Your internal reasoning)
-- `a`: Action (Tool name to invoke)
-- `i`: Input (Tool arguments, can be a string or object)
-- `f`: Final Answer (Your response to the user)
+// ============================================================================
+// Legacy compatibility functions
+// ============================================================================
 
-## Rules
-1. You MUST use the tools to interact with the system.
-2. After providing an Action, you SHOULD wait for the Observation unless spawning a background job.
-3. If you spawn a background job (e.g., via `delegate`), you may continue the conversation or perform other tasks while it runs.
-4. Job results will be provided asynchronously as new Observations once they complete.
-5. Use `wait` if you need to pause and check for background job updates.
-6. Do not hallucinate or predict the Observation.
-7. If you are stuck or need clarification, use `f` or 'Final Answer:' to ask the user.
-8. Use the Structured JSON Protocol for better precision."#
+pub fn get_prompts_dir() -> PathBuf {
+    if let Some(ref p) = get_user_config_dir() {
+        if p.exists() {
+            return p.clone();
+        }
+    }
+    get_project_prompts_dir()
+}
+
+pub fn get_user_prompts_dir() -> PathBuf {
+    get_user_config_dir().unwrap_or_else(|| get_project_prompts_dir())
+}
+
+pub fn install_default_prompts() -> PromptResult<()> {
+    // No-op for compatibility
+    Ok(())
+}
+
+pub async fn load_prompt(name: &str) -> PromptResult<String> {
+    let config = load_config(name)?;
+    if let Some(raw) = config.raw_content {
+        return Ok(raw);
+    }
+    let empty_context = TerminalContext::new();
+    render_config(&config, None, None, &empty_context)
+}
+
+pub async fn load_prompt_from_path(path: &Path) -> PromptResult<String> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| {
+            error!("Failed to read prompt from {:?}: {}", path, e);
+            PromptError::Io(e)
+        })?;
+    Ok(content)
 }

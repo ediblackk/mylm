@@ -165,17 +165,25 @@ impl Journal {
     pub fn log(&mut self, entry_type: InteractionType, content: &str) -> Result<()> {
         let timestamp = Utc::now().format("%H:%M:%S").to_string();
         
+        // Truncate content to prevent massive journal entries
+        const MAX_JOURNAL_ENTRY_CHARS: usize = 2000;
+        let truncated_content = if content.len() > MAX_JOURNAL_ENTRY_CHARS {
+            format!("{}...[truncated {} chars]", &content[..MAX_JOURNAL_ENTRY_CHARS], content.len() - MAX_JOURNAL_ENTRY_CHARS)
+        } else {
+            content.to_string()
+        };
+        
         let mut file = OpenOptions::new()
             .append(true)
             .create(true)
             .open(&self.path)?;
         
-        writeln!(file, "### [{}] {}\n{}\n---\n", timestamp, entry_type, content)?;
+        writeln!(file, "### [{}] {}\n{}\n---\n", timestamp, entry_type, truncated_content)?;
         
         self.entries.push(JournalEntry {
             timestamp,
             entry_type,
-            content: content.to_string(),
+            content: truncated_content,
         });
 
         Ok(())

@@ -1,11 +1,6 @@
 //! Slash command handling for the terminal UI
 use crate::terminal::app::state::AppStateContainer;
-use crate::terminal::agent_runner::run_agent_loop;
-
 use mylm_core::config::ConfigUiExt;
-use mylm_core::executor::allowlist::CommandAllowlist;
-use mylm_core::executor::safety::SafetyChecker;
-use mylm_core::executor::CommandExecutor;
 use mylm_core::llm::chat::ChatMessage;
 use std::sync::atomic::Ordering;
 
@@ -28,6 +23,8 @@ impl AppStateContainer {
             "/logs" => self.handle_logs_command(&parts),
             "/pacore" => self.handle_pacore_command(&parts),
             "/jobs" => self.handle_jobs_command(&parts),
+            "/prompt" => self.handle_prompt_command(event_tx),
+            "/context" => self.handle_context_command(event_tx),
             _ => {
                 self.chat_history.push(ChatMessage::assistant(format!(
                     "Unknown command: {}",
@@ -35,6 +32,114 @@ impl AppStateContainer {
                 )));
             }
         }
+    }
+
+    fn handle_prompt_command(&mut self, event_tx: UnboundedSender<TuiEvent>) {
+        let agent = self.agent.clone();
+        let event_tx_clone = event_tx.clone();
+        
+        tokio::spawn(async move {
+            let tools_desc = agent.get_tools_description().await;
+            let full_prompt = agent.get_system_prompt().await;
+            
+            // Save to logs directory
+            let logs_dir = std::path::PathBuf::from("mylm/logs");
+            let _ = std::fs::create_dir_all(&logs_dir);
+            let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+            let log_path = logs_dir.join(format!("system_prompt_{}.txt", timestamp));
+            
+            let message = match std::fs::write(&log_path, &full_prompt) {
+                Ok(_) => format!(
+                    "## System Prompt Debug\n\n### Available Tools ({})\n\n{}\n\n---\n\nFull system prompt saved to: `{}` ({} chars)",
+                    tools_desc.lines().filter(|l| l.starts_with("- ")).count(),
+                    tools_desc,
+                    log_path.display(),
+                    full_prompt.len()
+                ),
+                Err(e) => format!(
+                    "## System Prompt Debug (Error saving: {})\n\n### Available Tools ({})\n\n{}",
+                    e,
+                    tools_desc.lines().filter(|l| l.starts_with("- ")).count(),
+                    tools_desc
+                ),
+            };
+            
+            let _ = event_tx_clone.send(TuiEvent::AgentResponse(message, mylm_core::llm::TokenUsage::default()));
+        });
+    }
+
+    fn handle_context_command(&mut self, event_tx: UnboundedSender<TuiEvent>) {
+        let agent = self.agent.clone();
+        let event_tx_clone = event_tx.clone();
+        
+        tokio::spawn(async move {
+            // Clone data from agent wrapper
+            let history_clone = agent.history().await;
+            let system_prompt = match &agent {
+                mylm_core::agent::AgentWrapper::V2(a) => {
+                    let guard = a.lock().await;
+                    guard.get_system_prompt().await
+                }
+                mylm_core::agent::AgentWrapper::V1(_) => {
+                    "V1 Agent system prompt not available".to_string()
+                }
+            };
+            
+            // Calculate token estimates for each message
+            let mut context_dump = String::new();
+            context_dump.push_str("# LLM Context Dump\n\n");
+            context_dump.push_str(&format!("Generated: {}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S")));
+            context_dump.push_str(&format!("Total messages: {}\n\n", history_clone.len()));
+            
+            // System prompt section
+            context_dump.push_str("## System Prompt\n\n");
+            context_dump.push_str(&format!("```\n{}\n```\n\n", system_prompt));
+            
+            // Message history section
+            context_dump.push_str("## Conversation History\n\n");
+            let mut total_tokens = 0;
+            
+            for (idx, msg) in history_clone.iter().enumerate() {
+                let tokens = mylm_core::context::TokenCounter::estimate(&msg.content);
+                total_tokens += tokens;
+                
+                context_dump.push_str(&format!(
+                    "### Message {} | Role: {:?} | Tokens: {}\n\n```\n{}\n```\n\n",
+                    idx,
+                    msg.role,
+                    tokens,
+                    msg.content
+                ));
+            }
+            
+            context_dump.push_str(&format!("\n## Summary\n\n"));
+            context_dump.push_str(&format!("- Total messages: {}\n", history_clone.len()));
+            context_dump.push_str(&format!("- Estimated tokens: {}\n", total_tokens));
+            
+            // Save to logs directory
+            let logs_dir = std::path::PathBuf::from("mylm/logs");
+            let _ = std::fs::create_dir_all(&logs_dir);
+            let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+            let log_path = logs_dir.join(format!("context_dump_{}.md", timestamp));
+            
+            let message = match std::fs::write(&log_path, &context_dump) {
+                Ok(_) => format!(
+                    "## Context Dump\n\n- Total messages: {}\n- Estimated tokens: {}\n- Full context saved to: `{}`",
+                    history_clone.len(),
+                    total_tokens,
+                    log_path.display()
+                ),
+                Err(e) => format!(
+                    "## Context Dump (Error saving file: {})\n\n- Total messages: {}\n- Estimated tokens: {}\n\nContext preview (first 2000 chars):\n\n```\n{}...\n```",
+                    e,
+                    history_clone.len(),
+                    total_tokens,
+                    &context_dump[..2000.min(context_dump.len())]
+                ),
+            };
+            
+            let _ = event_tx_clone.send(TuiEvent::AgentResponse(message, mylm_core::llm::TokenUsage::default()));
+        });
     }
 
     fn handle_profile_command(&mut self, parts: &[&str], event_tx: UnboundedSender<TuiEvent>) {
@@ -115,7 +220,7 @@ impl AppStateContainer {
         }
     }
 
-    fn handle_exec_command(&mut self, parts: &[&str], event_tx: UnboundedSender<TuiEvent>) {
+    fn handle_exec_command(&mut self, parts: &[&str], _event_tx: UnboundedSender<TuiEvent>) {
         if parts.len() < 2 {
             self.chat_history
                 .push(ChatMessage::assistant("Usage: /exec <command>".to_string()));
@@ -124,44 +229,30 @@ impl AppStateContainer {
         let command = parts[1..].join(" ");
 
         self.state = mylm_core::terminal::app::AppState::ExecutingTool(command.clone());
-        let agent = self.agent.clone();
-        let event_tx_clone = event_tx.clone();
-        let interrupt_flag = self.interrupt_flag.clone();
-        interrupt_flag.store(false, Ordering::SeqCst);
-
-        let auto_approve = self.auto_approve.clone();
-        let max_driver_loops = 30;
-        let task = tokio::spawn(async move {
-            let allowlist = CommandAllowlist::new();
-            let executor = CommandExecutor::new(allowlist, SafetyChecker::new());
-            let last_obs = if let Err(e) = executor.check_safety(&command) {
-                let err_msg = format!("Error: Safety Check Failed: {}", e);
-                let err_log = format!(
-                    "\r\n\x1b[31m[Safety Check Failed]:\x1b[0m {}\r\n",
-                    e
-                );
-                let _ = event_tx_clone.send(TuiEvent::PtyWrite(err_log.into_bytes()));
-                Some(err_msg)
-            } else {
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                let _ = event_tx_clone.send(TuiEvent::ExecuteTerminalCommand(command, tx));
-                match rx.await {
-                    Ok(out) => Some(out),
-                    Err(_) => Some("Error: Execution failed".to_string()),
-                }
-            };
-
-            run_agent_loop(
-                agent,
-                event_tx_clone,
-                interrupt_flag,
-                auto_approve,
-                max_driver_loops,
-                last_obs,
-            )
-            .await;
-        });
-        self.active_task = Some(task);
+        
+        // Use orchestrator for /exec command
+        if let Some(orchestrator) = &self.orchestrator {
+            let history = self.chat_history.clone();
+            let auto_approve = self.auto_approve.load(Ordering::SeqCst);
+            
+            let mut orchestrator = orchestrator.clone();
+            orchestrator.set_auto_approve(auto_approve);
+            
+            // Set terminal delegate for tool execution
+            if let Some(ref delegate) = self.terminal_delegate {
+                orchestrator.set_terminal_delegate(delegate.clone());
+            }
+            
+            let task = tokio::spawn(async move {
+                let _ = orchestrator.start_task(command, history).await;
+            });
+            self.active_task = Some(task);
+        } else {
+            self.chat_history.push(ChatMessage::assistant(
+                "Error: Orchestrator not initialized".to_string()
+            ));
+            self.state = mylm_core::terminal::app::AppState::Idle;
+        }
     }
 
     fn handle_help_command(&mut self) {
@@ -175,6 +266,8 @@ impl AppStateContainer {
             /jobs cancel <id> - Cancel a specific job\n\
             /jobs cancel-all - Cancel all jobs\n\
             /jobs list - List all jobs\n\
+            /prompt - Dump system prompt to file\n\
+            /context - Dump LLM context to mylm/logs/\n\
             /verbose - Toggle verbose mode\n\
             /help - Show this help\n\n\
             Input Shortcuts:\n\
@@ -389,6 +482,8 @@ impl AppStateContainer {
                         mylm_core::agent::v2::jobs::JobStatus::Completed => "✅",
                         mylm_core::agent::v2::jobs::JobStatus::Failed => "❌",
                         mylm_core::agent::v2::jobs::JobStatus::Cancelled => "🛑",
+                        mylm_core::agent::v2::jobs::JobStatus::TimeoutPending => "⏱",
+                        mylm_core::agent::v2::jobs::JobStatus::Stalled => "⚠️",
                     };
                     msg.push_str(&format!(
                         "{} {} | {} | {:?}\n",

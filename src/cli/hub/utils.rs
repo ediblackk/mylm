@@ -109,30 +109,19 @@ pub fn display_config_summary(config: &Config) {
     println!();
 }
 
-/// Print the mylm ASCII art banner
+/// Print compact mylm dashboard header
 pub async fn print_banner(_config: &Config) {
     let green = Style::new().green().bold();
     let cyan = Style::new().cyan();
     let dim = Style::new().dim();
 
-    // Full mylm ASCII art banner (7 lines)
-    let banner = r#"
-    __  ___  __  __  __     __  ___
-   /  |/  / / / / / / /    /  |/  /
-  / /|_/ / / / / / / /    / /|_/ /
- / /  / / / /____ / / / / / / / /
-/_/  /_/  \__, / /_____//_/  /_/
-         /____/
-    "#;
-
-    println!("{}", green.apply_to(banner));
-
-    // Just version info - no model/ctx/git
+    // Compact dashboard line - no extra newlines
     println!(
-        "           {} {}-{} {}",
-        dim.apply_to("mylm"),
+        "{} {}  {}  {}  {}",
+        green.apply_to("mylm"),
         cyan.apply_to(format!("v{}", env!("CARGO_PKG_VERSION"))),
-        cyan.apply_to(format!("{} ({})", env!("BUILD_NUMBER"), env!("GIT_HASH"))),
-        dim.apply_to("— Terminal AI, Built in Rust")
+        dim.apply_to(format!("build {}", env!("BUILD_NUMBER"))),
+        dim.apply_to(format!("{}", &env!("GIT_HASH")[..8.min(env!("GIT_HASH").len())])),
+        dim.apply_to("Terminal AI")
     );
 }

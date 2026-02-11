@@ -44,13 +44,16 @@ impl MemoryManager {
     /// recent interactions and can reference them proactively.
     pub async fn inject_hot_memory(&self, history: &mut Vec<ChatMessage>, limit: usize) {
         // Skip memory injection in incognito mode
+        crate::info_log!("inject_hot_memory called: disable_memory={}, history_len={}", self.disable_memory, history.len());
         if self.disable_memory {
+            crate::info_log!("inject_hot_memory: SKIPPED (disable_memory=true)");
             return;
         }
 
         // Inject hot memory (recent journal entries) into context
         // This ensures the model is aware of recent activity and can use memory proactively
         if let Ok(hot_memory_context) = self.get_hot_memory_context(limit).await {
+            crate::info_log!("inject_hot_memory: hot_memory_context size={} chars (limit={})", hot_memory_context.len(), limit);
             if !hot_memory_context.is_empty() {
                 // Insert hot memory after system prompt but before user messages
                 let hot_memory_msg = ChatMessage::system(format!(
@@ -84,11 +87,18 @@ impl MemoryManager {
         let recent_entries = &entries[start..];
 
         let mut context = String::new();
+        const MAX_HOT_MEMORY_LINE_CHARS: usize = 200;
         for entry in recent_entries {
+            let first_line = entry.content.lines().next().unwrap_or(&entry.content);
+            let truncated = if first_line.len() > MAX_HOT_MEMORY_LINE_CHARS {
+                format!("{}...", &first_line[..MAX_HOT_MEMORY_LINE_CHARS])
+            } else {
+                first_line.to_string()
+            };
             context.push_str(&format!("- [{}] {}: {}\n",
                 entry.timestamp,
                 entry.entry_type,
-                entry.content.lines().next().unwrap_or(&entry.content) // First line only
+                truncated
             ));
         }
 
@@ -98,7 +108,7 @@ impl MemoryManager {
     /// Inject relevant memories into the conversation history based on the last user message.
     pub async fn inject_memory_context(
         &self,
-        history: &mut Vec<ChatMessage>,
+        history: &mut [ChatMessage],
         auto_context: bool,
     ) -> Result<(), Box<dyn StdError + Send + Sync>> {
         if !auto_context || self.disable_memory {

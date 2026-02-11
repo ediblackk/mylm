@@ -114,6 +114,11 @@ lto = true
 codegen-units = 1
 strip = true
 
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+
 [build-dependencies]
 sha2 = "0.10"
 hex = "0.4"

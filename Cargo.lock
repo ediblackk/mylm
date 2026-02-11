@@ -5444,6 +5444,7 @@ dependencies = [
  "lance-arrow",
  "lancedb",
  "lazy_static",
+ "parking_lot",
  "portable-pty",
  "rand 0.8.5",
  "regex",
@@ -8582,6 +8583,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

@@ -1,0 +1,10 @@
+/target
+.fastembed_cache/
+sessions/
+/design
+/plans
+/remotecode
+ONBOARDING.md
+/server
+/shared
+/prompts

@@ -1,3 +1,8 @@
+//! Recovery mechanism for agent V2 when LLM responses fail to parse.
+//!
+//! Provides `RecoveryWorker` which analyzes failed content and error messages
+//! to generate corrected Short-Key JSON responses using a recovery LLM prompt.
+
 use crate::llm::{LlmClient, chat::{ChatMessage, ChatRequest}};
 use crate::agent::v2::protocol::{ShortKeyAction, parse_short_key_actions_from_content};
 use std::error::Error;

@@ -6,15 +6,13 @@
 //! - `app/commands.rs` - Slash command processing
 //! - `app/clipboard.rs` - Clipboard operations
 //! - `app/session.rs` - Session persistence
-//! - `agent_runner.rs` - Agent loop and PaCoRe execution
+//! - `agent_runner.rs` - Legacy agent loop (deprecated)
 
-use crate::terminal::agent_runner::{run_agent_loop, run_pacore_task};
 use crate::terminal::app::state::AppStateContainer;
 
+use mylm_core::agent::ChatSessionMessage;
 use mylm_core::context::pack::ContextBuilder;
 use mylm_core::llm::chat::ChatMessage;
-use std::sync::atomic::Ordering;
-
 use tokio::sync::mpsc::UnboundedSender;
 
 pub use mylm_core::terminal::app::{AppState, TuiEvent};
@@ -60,6 +58,26 @@ impl AppStateContainer {
             }
 
             self.chat_history.push(ChatMessage::user(&final_message));
+            
+            // Update context manager with new message for token tracking
+            self.context_manager.set_history(&self.chat_history);
+            
+            // Set conversation topic from first user message to prevent context jumping
+            if self.chat_history.len() <= 2 {
+                // Extract key terms from the message as the topic
+                let topic = input.split_whitespace()
+                    .take(5)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                if !topic.is_empty() {
+                    self.context_manager.set_topic(&topic);
+                }
+            }
+            
+            // Pre-flight check for token count warning
+            if let Some(warning) = self.context_manager.preflight_check(Some(&final_message)) {
+                self.status_message = Some(format!("⚠️ {}", warning));
+            }
 
             // Auto-save session
             if !self.incognito {
@@ -74,73 +92,47 @@ impl AppStateContainer {
             self.chat_scroll = 0;
             self.chat_auto_scroll = true;
 
-            // Check if PaCoRe is enabled
-            if self.pacore_enabled {
-                let agent = self.agent.clone();
+            // Use orchestrator chat session mode for proper job tracking
+            // and interleaved user chat + background worker processing
+            self.run_chat_session(event_tx).await;
+        }
+    }
+    
+    /// Run chat session using the orchestrator
+    /// 
+    /// This manages:
+    /// - Starting the chat session if not already active
+    /// - Submitting user messages to the queue
+    /// - Background worker coordination via orchestrator
+    async fn run_chat_session(&mut self, event_tx: UnboundedSender<TuiEvent>) {
+        if let Some(orchestrator) = &self.orchestrator {
+            if self.chat_session_handle.is_none() {
+                // Start new chat session
+                // Simplified: removed session start log
                 let history = self.chat_history.clone();
-                let event_tx_clone = event_tx.clone();
-                let interrupt_flag = self.interrupt_flag.clone();
-                let pacore_rounds = self.pacore_rounds.clone();
-                let config = self.config.clone();
-
-                interrupt_flag.store(false, Ordering::SeqCst);
-
-                let task = tokio::spawn(async move {
-                    run_pacore_task(
-                        agent,
-                        history,
-                        event_tx_clone,
-                        interrupt_flag,
-                        &pacore_rounds,
-                        config,
-                    )
-                    .await;
-                });
-
-                self.active_task = Some(task);
+                let (_task_handle, session_handle) = orchestrator.start_chat_session(history).await;
+                self.chat_session_handle = Some(session_handle);
             } else {
-                // Standard agent loop
-                let agent = self.agent.clone();
-                let history = self.chat_history.clone();
-                self.context_manager.set_history(&history);
-                let context_ratio = self.context_manager.get_context_ratio();
-                let event_tx_clone = event_tx.clone();
-                let interrupt_flag = self.interrupt_flag.clone();
-                let auto_approve = self.auto_approve.clone();
-                let max_driver_loops = 30;
-                interrupt_flag.store(false, Ordering::SeqCst);
-
-                let task = tokio::spawn(async move {
-                    let final_history = {
-                        let agent_lock = agent.lock().await;
-                        if context_ratio > agent_lock.llm_client.config().condense_threshold {
-                            match agent_lock.condense_history(&history).await {
-                                Ok(new_history) => new_history,
-                                Err(_) => history,
-                            }
-                        } else {
-                            history
-                        }
-                    };
-
-                    {
-                        let mut agent_lock = agent.lock().await;
-                        agent_lock.reset(final_history).await;
-                    }
-
-                    run_agent_loop(
-                        agent,
-                        event_tx_clone,
-                        interrupt_flag,
-                        auto_approve,
-                        max_driver_loops,
-                        None,
-                    )
-                    .await;
-                });
-
-                self.active_task = Some(task);
+                // Chat session already running, just submit the new message
+                // Simplified: removed message submit log
+                let last_message = self.chat_history.last()
+                    .cloned()
+                    .unwrap_or_else(|| ChatMessage::user(""));
+                if let Some(handle) = &self.chat_session_handle {
+                    mylm_core::info_log!("run_chat_session: Sending message via handle");
+                    handle.send(ChatSessionMessage::UserMessage(last_message)).await;
+                    mylm_core::info_log!("run_chat_session: Message sent successfully");
+                } else {
+                    mylm_core::error_log!("run_chat_session: No session handle available!");
+                }
             }
+        } else {
+            // Fallback if orchestrator not available
+            mylm_core::error_log!("run_chat_session: No orchestrator available");
+            let _ = event_tx.send(TuiEvent::AgentResponse(
+                "Error: Chat session not available".to_string(),
+                mylm_core::llm::TokenUsage::default(),
+            ));
         }
     }
 }

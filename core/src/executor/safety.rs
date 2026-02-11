@@ -2,7 +2,7 @@
 
 /// Safety level for a command
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
+
 pub enum CommandSafety {
     /// Command is safe to execute
     Safe,
@@ -10,7 +10,7 @@ pub enum CommandSafety {
     Dangerous(String),
 }
 
-#[allow(dead_code)]
+
 impl CommandSafety {
     /// Check if the command is dangerous
     pub fn is_dangerous(&self) -> bool {
@@ -30,7 +30,7 @@ impl CommandSafety {
 #[derive(Debug, Default)]
 pub struct SafetyChecker;
 
-#[allow(dead_code)]
+
 impl SafetyChecker {
     /// Create a new safety checker
     pub fn new() -> Self {

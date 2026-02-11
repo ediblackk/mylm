@@ -4,31 +4,30 @@ use crate::llm::{
     chat::{ChatFunction, ChatMessage, ChatRequest, ChatTool},
     LlmClient, LlmConfig, LlmProvider,
 };
-use crate::terminal::app::TuiEvent;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use std::error::Error as StdError;
-use tokio::sync::mpsc;
 
 /// A tool for searching the web using various providers (Kimi, Google, etc.)
 pub struct WebSearchTool {
     config: WebSearchConfig,
     client: reqwest::Client,
-    event_tx: mpsc::UnboundedSender<TuiEvent>,
 }
 
 impl WebSearchTool {
-    pub fn new(config: WebSearchConfig, event_tx: mpsc::UnboundedSender<TuiEvent>) -> Self {
+    pub fn new(config: WebSearchConfig) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .user_agent("mylm-assistant/0.1")
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        Self { config, client, event_tx }
+        Self { config, client }
     }
 
     async fn call_kimi(&self, query: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
-        let _ = self.event_tx.send(TuiEvent::StatusUpdate(format!("Searching (Kimi): {}", query)));
+        // Note: Tool execution progress is logged to job registry by execute_parallel_tools
+        // We don't send StatusUpdate here to avoid spamming the main AI Chat status bar
+        // when running in background workers
         let base_url = "https://api.moonshot.ai/v1".to_string();
         let model = "kimi-k2-turbo-preview".to_string();
 
@@ -42,6 +41,7 @@ impl WebSearchTool {
             base_url,
             model,
             Some(api_key),
+            128000,
         );
         let client = LlmClient::new(llm_config)?;
 
@@ -102,7 +102,9 @@ impl WebSearchTool {
         &self,
         query: &str,
     ) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
-        let _ = self.event_tx.send(TuiEvent::StatusUpdate(format!("Searching (SerpAPI): {}", query)));
+        // Note: Tool execution progress is logged to job registry by execute_parallel_tools
+        // We don't send StatusUpdate here to avoid spamming the main AI Chat status bar
+        // when running in background workers
         
         let api_key = self.config.api_key.clone().unwrap_or_default();
         if api_key.is_empty() {

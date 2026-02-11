@@ -95,6 +95,7 @@ impl SessionManager {
     /// Save a session asynchronously.
     /// Non-blocking, fire-and-forget. The session is cloned and sent to the
     /// background task via channel.
+    /// Reserved for future use (currently using set_current_session instead)
     #[allow(dead_code)]
     pub async fn save_session_async(&self, session: &Session) {
         let session_clone = session.clone();
@@ -124,6 +125,7 @@ impl SessionManager {
     }
     
     /// Get the current session (cloned).
+    /// Reserved for future use
     #[allow(dead_code)]
     pub async fn get_current_session(&self) -> Option<Session> {
         let guard = self.current_session.read().await;
@@ -213,6 +215,7 @@ impl SessionManager {
     /// Delete a session by ID.
     /// Deletes session_{id}.json and any associated temp files.
     /// Returns Result<(), std::io::Error> for caller to handle.
+    /// Reserved for future session management UI
     #[allow(dead_code)]
     pub async fn delete_session(id: &str) -> Result<(), std::io::Error> {
         let sessions_dir = Self::resolve_sessions_dir();

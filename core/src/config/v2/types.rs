@@ -86,6 +86,27 @@ pub enum ConfigError {
     InvalidProfile(String),
 }
 
+/// Escalation mode for restricted commands
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum EscalationMode {
+    /// Escalate to main agent for approval
+    EscalateToMain,
+    /// Block restricted commands (no escalation)
+    BlockRestricted,
+    /// Allow all commands (debugging only - dangerous!)
+    AllowAll,
+}
+
+impl std::fmt::Display for EscalationMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EscalationMode::EscalateToMain => write!(f, "EscalateToMain"),
+            EscalationMode::BlockRestricted => write!(f, "BlockRestricted"),
+            EscalationMode::AllowAll => write!(f, "AllowAll"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct AgentPermissions {
@@ -99,4 +120,60 @@ pub struct AgentPermissions {
     /// These take precedence over auto_approve.
     /// Examples: ["rm -rf *", "dd if=", "mkfs *"]
     pub forbidden_commands: Option<Vec<String>>,
+    /// Worker shell execution permissions (for background workers)
+    pub worker_shell: Option<WorkerShellConfig>,
+}
+
+/// Configuration for worker shell command permissions
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WorkerShellConfig {
+    /// Commands allowed without escalation (e.g., "ls *", "cat *", "sleep *")
+    pub allowed_patterns: Option<Vec<String>>,
+    /// Commands requiring escalation to main agent (e.g., "rm *", "curl *")
+    pub restricted_patterns: Option<Vec<String>>,
+    /// Commands always forbidden (e.g., "sudo *", "rm -rf /")
+    pub forbidden_patterns: Option<Vec<String>>,
+    /// How to handle restricted commands
+    pub escalation_mode: Option<EscalationMode>,
+}
+
+impl WorkerShellConfig {
+    /// Get default allowed patterns (harmless commands)
+    pub fn default_allowed() -> Vec<String> {
+        vec![
+            "ls *".to_string(),
+            "cat *".to_string(),
+            "head *".to_string(),
+            "tail *".to_string(),
+            "pwd".to_string(),
+            "echo *".to_string(),
+            "sleep *".to_string(),
+            "date".to_string(),
+            "which *".to_string(),
+            "git status*".to_string(),
+            "git log*".to_string(),
+            "git diff*".to_string(),
+            "git branch*".to_string(),
+            "cargo check*".to_string(),
+            "cargo build*".to_string(),
+            "cargo test*".to_string(),
+        ]
+    }
+    
+    /// Get default restricted patterns (potentially harmful)
+    pub fn default_restricted() -> Vec<String> {
+        vec![
+            "rm *".to_string(),
+            "mv *".to_string(),
+            "cp *".to_string(),
+            "curl *".to_string(),
+            "wget *".to_string(),
+            "ssh *".to_string(),
+            "scp *".to_string(),
+            "git push*".to_string(),
+            "git reset*".to_string(),
+            "npm publish*".to_string(),
+        ]
+    }
 }

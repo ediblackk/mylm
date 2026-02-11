@@ -77,11 +77,9 @@ pub fn matches_pattern(command: &str, pattern: &str) -> bool {
     }
 
     // Last part: if not empty, must match at end
-    if let Some((last_idx, last)) = parts.iter().enumerate().last() {
-        if last_idx > 0 && !last.is_empty() {
-            if !command.ends_with(last) {
-                return false;
-            }
+    if let Some((last_idx, last)) = parts.iter().enumerate().next_back() {
+        if last_idx > 0 && !last.is_empty() && !command.ends_with(last) {
+            return false;
         }
     }
 

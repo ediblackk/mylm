@@ -138,10 +138,30 @@ pub async fn handle_select_worker_model(config: &mut Config) -> Result<bool> {
         return Ok(false);
     }
 
-    // Step 1: Select Provider for worker
+    // Show current setting
+    let resolved = config.resolve_profile();
+    let current_worker_model = if resolved.agent.worker_model == resolved.agent.main_model {
+        format!("Same as Main ({})", resolved.agent.main_model)
+    } else {
+        resolved.agent.worker_model.clone()
+    };
+    println!("📌 Current worker model: {}", 
+        Style::new().green().apply_to(&current_worker_model)
+    );
+    println!();
+
+    // Step 1: Select Provider for worker (with cancel option)
     let provider_names: Vec<String> = config.providers.keys().cloned().collect();
-    let selected_provider =
-        InquireSelect::new("Select provider for worker:", provider_names).prompt()?;
+    let selected_provider = match InquireSelect::new("Select provider for worker:", provider_names)
+        .prompt() 
+    {
+        Ok(p) => p,
+        Err(inquire::InquireError::OperationCanceled) | Err(inquire::InquireError::OperationInterrupted) => {
+            println!("↩️  Cancelled - keeping current setting.");
+            return Ok(false);
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     // Step 2: Select Model from this provider
     let provider_cfg = config.providers.get(&selected_provider).unwrap();
@@ -157,11 +177,28 @@ pub async fn handle_select_worker_model(config: &mut Config) -> Result<bool> {
         Err(_) => Vec::new(),
     };
 
-    // Add "Same as Main LLM" option
+    // Add "Same as Main LLM" option at the top
     let same_as_main = format!("🔄 Same as Main ({})", config.endpoint.model);
     models.insert(0, same_as_main.clone());
+    
+    // Add Cancel option
+    let cancel_option = "❌ Cancel (Go Back)".to_string();
+    models.push(cancel_option.clone());
 
-    let selected = InquireSelect::new("Select worker model:", models).prompt()?;
+    let selected = match InquireSelect::new("Select worker model:", models).prompt() {
+        Ok(m) => m,
+        Err(inquire::InquireError::OperationCanceled) | Err(inquire::InquireError::OperationInterrupted) => {
+            println!("↩️  Cancelled - keeping current setting.");
+            return Ok(false);
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    // Handle cancel selection
+    if selected == cancel_option {
+        println!("↩️  Cancelled - keeping current setting.");
+        return Ok(false);
+    }
 
     let worker_model = if selected == same_as_main {
         None // Use main model
@@ -229,6 +266,12 @@ pub async fn handle_select_worker_model(config: &mut Config) -> Result<bool> {
         permissions: None,
         main_rpm: None,
         workers_rpm: None,
+        worker_limit: None,
+        rate_limit_tier: None,
+        max_actions_before_stall: None,
+        max_consecutive_messages: None,
+        max_recovery_attempts: None,
+        max_tool_failures: None,
     });
 
     config.save_to_default_location()?;

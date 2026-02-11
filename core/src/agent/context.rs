@@ -137,7 +137,7 @@ pub fn build_context_from_memories(memories: &[Memory]) -> String {
             i + 1,
             mem.r#type,
             mem.content,
-            "memory_id".to_string(),
+            "memory_id",
             mem.id,
             timestamp,
         ));
@@ -149,7 +149,7 @@ pub fn build_context_from_memories(memories: &[Memory]) -> String {
 
 /// Inject relevant memories into the conversation history based on the last user message.
 pub async fn inject_memory_context(
-    history: &mut Vec<ChatMessage>,
+    history: &mut [ChatMessage],
     memory_store: Option<&Arc<VectorStore>>,
     auto_context: bool,
 ) -> Result<(), Box<dyn StdError + Send + Sync>> {

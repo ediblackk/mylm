@@ -112,7 +112,7 @@ impl SystemInfo {
     }
 
     /// Get memory usage as a formatted string
-    #[allow(dead_code)]
+    
     pub fn memory_usage(&self) -> String {
         format!(
             "Memory: {}/{} ({:.1}%)",
@@ -127,7 +127,7 @@ impl SystemInfo {
     }
 
     /// Get swap usage as a formatted string
-    #[allow(dead_code)]
+    
     pub fn swap_usage(&self) -> String {
         format!(
             "Swap: {}/{} ({:.1}%)",
@@ -142,7 +142,7 @@ impl SystemInfo {
     }
 
     /// Get disk usage as a formatted string
-    #[allow(dead_code)]
+    
     pub fn disk_usage(&self) -> Vec<String> {
         self.disks
             .iter()
@@ -160,7 +160,7 @@ impl SystemInfo {
     }
 
     /// Format bytes to human readable format
-    #[allow(dead_code)]
+    
     pub fn format_bytes(bytes: u64) -> String {
         const KB: u64 = 1024;
         const MB: u64 = KB * 1024;
@@ -201,14 +201,14 @@ impl Default for SystemInfo {
 }
 
 /// Get basic system information (lightweight, non-blocking)
-#[allow(dead_code)]
+
 pub fn get_system_info() -> Result<SystemInfo> {
     SystemInfo::new()
         .context("Failed to collect system information")
 }
 
 /// Get a brief system summary for AI context
-#[allow(dead_code)]
+
 pub fn get_system_summary() -> Result<String> {
     let info = SystemInfo::new()?;
 

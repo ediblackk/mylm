@@ -6,11 +6,13 @@
 //! - `hub/models.rs` - Main and worker model selection
 //! - `hub/web_search.rs` - Web search settings
 //! - `hub/agent_settings.rs` - Agent settings (iterations, PaCoRe, tmux)
+//! - `hub/prompt_settings.rs` - Prompt customization settings
 //! - `hub/utils.rs` - Shared utilities and helpers
 
 pub mod agent_settings;
 pub mod menus;
 pub mod models;
+pub mod prompt_settings;
 pub mod providers;
 pub mod utils;
 pub mod web_search;
@@ -38,20 +40,29 @@ pub use web_search::handle_web_search_settings;
 // Agent settings
 pub use agent_settings::{
     handle_max_iterations, handle_set_allowed_tools, handle_set_auto_approve_commands,
-    handle_set_forbidden_commands, handle_set_main_rpm, handle_set_pacore_rounds,
-    handle_set_rate_limit, handle_set_workers_rpm, handle_toggle_pacore,
-    handle_toggle_tmux_autostart, show_agent_settings_menu, show_iterations_settings_menu,
-    show_pacore_settings_menu, show_permissions_menu, show_rate_limit_settings_menu,
+    handle_set_forbidden_commands, handle_set_main_rpm, handle_set_max_tool_failures, handle_set_pacore_rounds,
+    handle_set_rate_limit, handle_set_rate_limit_tier, handle_set_worker_limit,
+    handle_set_workers_rpm, handle_toggle_agent_version, handle_toggle_pacore, handle_toggle_tmux_autostart,
+    show_agent_settings_menu, show_iterations_settings_menu, show_pacore_settings_menu,
+    show_permissions_menu, show_rate_limit_settings_menu, show_worker_resilience_menu,
+    show_worker_shell_menu, handle_set_worker_allowed_commands, handle_set_worker_restricted_commands,
+    handle_set_worker_forbidden_commands, handle_set_worker_escalation_mode, handle_reset_worker_shell_defaults,
+};
+
+// Prompt settings
+pub use prompt_settings::{
+    handle_memory_prompt, handle_system_prompt, handle_worker_prompt,
+    show_prompt_settings_menu, view_current_prompts, PromptMenuChoice,
 };
 
 /// Show the interactive hub menu
 pub async fn show_hub(config: &Config) -> Result<HubChoice> {
-    // Clear the loading line, then use alternate screen buffer
-    print!("\r\x1B[K"); // Clear current line
-    print!("\x1B[?1049h"); // Enter alternate screen
+    // Clear screen and move cursor to top-left
+    print!("\x1B[2J\x1B[H");
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
     print_banner(config).await;
+    println!(); // Single newline after banner
 
     let mut options = Vec::new();
 
@@ -81,20 +92,14 @@ pub async fn show_hub(config: &Config) -> Result<HubChoice> {
     ]);
 
     let ans: Result<HubChoice, _> =
-        InquireSelect::new("Welcome to mylm! What would you like to do?", options)
+        InquireSelect::new("Welcome to MyLM! What would you like to do?", options)
             .with_page_size(20)
             .prompt();
 
-    let result = match ans {
+    match ans {
         Ok(choice) => Ok(choice),
         Err(_) => Ok(HubChoice::Exit),
-    };
-
-    // Exit alternate screen buffer
-    print!("\x1B[?1049l");
-    let _ = std::io::Write::flush(&mut std::io::stdout());
-
-    result
+    }
 }
 
 /// Show session selection menu
@@ -130,6 +135,7 @@ pub fn show_settings_dashboard(config: &Config) -> Result<SettingsMenuChoice> {
         SettingsMenuChoice::SelectWorkerModel,
         SettingsMenuChoice::WebSearchSettings,
         SettingsMenuChoice::AgentSettings,
+        SettingsMenuChoice::PromptSettings,
         SettingsMenuChoice::Back,
     ];
 

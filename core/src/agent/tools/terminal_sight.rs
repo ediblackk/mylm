@@ -1,18 +1,18 @@
 use crate::agent::tool::{Tool, ToolKind, ToolOutput};
-use crate::terminal::app::TuiEvent;
+use crate::agent::traits::TerminalExecutor;
 use async_trait::async_trait;
 use std::error::Error as StdError;
-use tokio::sync::{mpsc, oneshot};
+use std::sync::Arc;
 
 /// A tool for peeking at the current terminal screen buffer.
 /// Useful for monitoring long-running tasks or checking terminal state without executing commands.
 pub struct TerminalSightTool {
-    event_tx: mpsc::UnboundedSender<TuiEvent>,
+    terminal: Arc<dyn TerminalExecutor>,
 }
 
 impl TerminalSightTool {
-    pub fn new(event_tx: mpsc::UnboundedSender<TuiEvent>) -> Self {
-        Self { event_tx }
+    pub fn new(terminal: Arc<dyn TerminalExecutor>) -> Self {
+        Self { terminal }
     }
 }
 
@@ -23,7 +23,7 @@ impl Tool for TerminalSightTool {
     }
 
     fn description(&self) -> &str {
-        "Get a snapshot of the current terminal screen content. Use this to see what is currently displayed, including TUI apps, progress bars, or the result of previously executed commands."
+        "Get a snapshot of the current terminal screen content. CRITICAL: You MUST use this tool after running execute_command to see the command output. You cannot see terminal output without using this tool."
     }
 
     fn usage(&self) -> &str {
@@ -39,17 +39,16 @@ impl Tool for TerminalSightTool {
     }
 
     async fn call(&self, _args: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
-        let (tx, rx) = oneshot::channel::<String>();
-        self.event_tx.send(TuiEvent::GetTerminalScreen(tx))
-            .map_err(|_| anyhow::anyhow!("Failed to contact UI for terminal sight"))?;
+        let screen = self.terminal.get_screen().await?;
 
-        let screen = rx.await.map_err(|_| anyhow::anyhow!("UI failed to provide terminal sight"))?;
-
+        crate::info_log!("TerminalSightTool: screen len={}, empty={}", screen.len(), screen.trim().is_empty());
+        
         if screen.trim().is_empty() {
             Ok(ToolOutput::Immediate(serde_json::Value::String(
                 "Terminal is currently empty or has no visible text.".to_string(),
             )))
         } else {
+            crate::info_log!("TerminalSightTool: returning screen content ({} bytes)", screen.len());
             Ok(ToolOutput::Immediate(serde_json::Value::String(format!(
                 "## Terminal Screen Snapshot:\n\n{}",
                 screen

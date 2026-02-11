@@ -1,7 +1,13 @@
 use crate::agent::tool::{Tool, ToolKind, ToolOutput};
 use crate::agent::v2::jobs::{JobRegistry, JobStatus};
 use async_trait::async_trait;
+use serde::Deserialize;
 use std::error::Error as StdError;
+
+#[derive(Deserialize)]
+struct ListJobsArgs {
+    all: Option<bool>,
+}
 
 /// A tool for listing the status of background jobs.
 pub struct ListJobsTool {
@@ -21,30 +27,39 @@ impl Tool for ListJobsTool {
     }
 
     fn description(&self) -> &str {
-        "List all background jobs and their current status (Running, Completed, Failed)."
+        "List status of background jobs spawned via delegate. Use this to check worker progress, not shell commands."
     }
 
     fn usage(&self) -> &str {
-        "No arguments required. Returns a JSON list of jobs."
+        "Optional arguments: {\"all\": boolean} - if true (default), lists all jobs. If false, lists only running jobs."
     }
 
     fn kind(&self) -> ToolKind {
         ToolKind::Internal
     }
 
-    async fn call(&self, _args: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
-        let jobs = self.job_registry.list_all_jobs();
+    async fn call(&self, args: &str) -> Result<ToolOutput, Box<dyn StdError + Send + Sync>> {
+        let args: ListJobsArgs = serde_json::from_str(args).unwrap_or(ListJobsArgs { all: None });
+        let all = args.all.unwrap_or(true);
+
+        let jobs = if all {
+            self.job_registry.list_all_jobs()
+        } else {
+            self.job_registry.list_active_jobs()
+        };
         
         let mut summary = String::from("Background Jobs:\n");
         if jobs.is_empty() {
-            summary.push_str("No active or recent jobs.");
+            summary.push_str("No matching jobs.");
         } else {
             for job in jobs {
-                let status_icon = match job.status {
-                    JobStatus::Running => "⏳",
-                    JobStatus::Completed => "✅",
-                    JobStatus::Failed => "❌",
-                    JobStatus::Cancelled => "🛑",
+                let (status_icon, status_text) = match job.status {
+                    JobStatus::Running => ("⏳", "Running"),
+                    JobStatus::Completed => ("✅", "Completed"),
+                    JobStatus::Failed => ("❌", "Failed"),
+                    JobStatus::Cancelled => ("🛑", "Cancelled"),
+                    JobStatus::TimeoutPending => ("⏳", "TimeoutPending"),
+                    JobStatus::Stalled => ("⚠️", "Stalled"),
                 };
                 
                 let duration = if let Some(end) = job.finished_at {
@@ -54,8 +69,9 @@ impl Tool for ListJobsTool {
                 };
 
                 summary.push_str(&format!(
-                    "- [{}] {} ({}) - {} [{}]\n",
+                    "- [{} {}] {} ({}) - {} [{}]\n",
                     status_icon,
+                    status_text,
                     job.id,
                     job.tool_name,
                     job.description,

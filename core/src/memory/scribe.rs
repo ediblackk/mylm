@@ -1,3 +1,28 @@
+//! SCRIBE - DISABLED FOR REDESIGN
+//!
+//! ## Current Status: DISABLED
+//! All scribe.observe() calls throughout the codebase have been commented out.
+//! The scribe module is preserved for future redesign.
+//!
+//! ## Problems with Current Design:
+//! 1. **Redundant logging**: Journal already exists as independent component
+//! 2. **Performance overhead**: File I/O on every agent step (every thought, tool call, output)
+//! 3. **Confusing architecture**: Scratchpad is separate from Scribe, unclear responsibilities
+//! 4. **Disabled auto-write**: Vector store writes were already disabled (see observe() comment)
+//!
+//! ## Redesign Goals:
+//! 1. Merge Journal into Scratchpad (unified "Hot Memory")
+//! 2. Scribe only for explicit consolidation (sleep()) - not per-step logging
+//! 3. Remove duplicate logging - one place for recent activity
+//! 4. Optional async background logging (fire-and-forget)
+//!
+//! ## Files Affected by Disable:
+//! - core/src/agent/v2/core.rs (2 calls)
+//! - core/src/agent/v2/execution.rs (6 calls)
+//! - core/src/agent/v2/driver/legacy.rs (4 calls)
+//!
+//! To re-enable: Uncomment the DISABLED blocks in those files.
+
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use anyhow::{Result, Context};
@@ -38,11 +63,17 @@ impl Scribe {
     }
 
     pub async fn observe(&self, entry_type: InteractionType, content: &str) -> Result<()> {
+        let _t0 = std::time::Instant::now();
         let mut journal = self.journal.lock().await;
         journal.log(entry_type.clone(), content)?;
+        // Disabled: scribe DEBUG_PERF logging - crate::info_log!("DEBUG_PERF: scribe journal log took {:?}", t0.elapsed());
 
+        // NOTE: Vector store writes are now explicit via memory tool
+        // or during consolidation via sleep(). This avoids delays
+        // from auto-recording every action.
+        /*
         // Also record to vector store for long-term memory if it's significant
-        // For now, we record everything as a UserNote or similar, 
+        // For now, we record everything as a UserNote or similar,
         // but we could map InteractionType to MemoryType.
         let memory_type = match entry_type {
             InteractionType::Thought => MemoryType::Decision,
@@ -51,32 +82,53 @@ impl Scribe {
             InteractionType::Chat => MemoryType::UserNote,
         };
 
+        let t1 = std::time::Instant::now();
         self.store.add_memory_typed(content, memory_type, None, None, None, None).await?;
+        crate::info_log!("DEBUG_PERF: scribe store add took {:?}", t1.elapsed());
+        */
         
         Ok(())
     }
 
     pub async fn recall(&self, query: &str, limit: usize) -> Result<String> {
         // 1. Fetch "Hot" memory from Journal (recent entries)
+        const MAX_ENTRY_CHARS: usize = 500; // Limit each journal entry to prevent context bloat
         let hot_context = {
             let journal = self.journal.lock().await;
             let entries = journal.entries();
             let start = entries.len().saturating_sub(10); // Last 10 entries
             let mut context = String::from("### Recent Journal Entries (Hot Context)\n");
             for entry in &entries[start..] {
-                context.push_str(&format!("[{}] {}: {}\n", entry.timestamp, entry.entry_type, entry.content));
+                // CRITICAL FIX: Truncate entry content to prevent massive context bloat
+                // Use char_indices to handle Unicode safely
+                let truncated_content = if entry.content.chars().count() > MAX_ENTRY_CHARS {
+                    let truncated: String = entry.content.chars().take(MAX_ENTRY_CHARS).collect();
+                    format!("{}...[truncated {} chars]", truncated, entry.content.chars().count() - MAX_ENTRY_CHARS)
+                } else {
+                    entry.content.clone()
+                };
+                context.push_str(&format!("[{}] {}: {}\n", entry.timestamp, entry.entry_type, truncated_content));
             }
             context
         };
 
         // 2. Fetch "Cold" memory from Vector Store
+        const MAX_MEMORY_CHARS: usize = 500; // Limit each memory entry
         let cold_memories = self.store.search_memory(query, limit).await?;
         let mut cold_context = String::from("\n### Semantic Memory (Cold Context)\n");
         if cold_memories.is_empty() {
             cold_context.push_str("No relevant long-term memories found.\n");
         } else {
             for mem in cold_memories {
-                cold_context.push_str(&format!("- [{}] {}\n", mem.r#type, mem.content));
+                // CRITICAL FIX: Truncate memory content to prevent context bloat
+                // Use chars() to handle Unicode safely
+                let truncated_content = if mem.content.chars().count() > MAX_MEMORY_CHARS {
+                    let truncated: String = mem.content.chars().take(MAX_MEMORY_CHARS).collect();
+                    format!("{}...[truncated {} chars]", truncated, mem.content.chars().count() - MAX_MEMORY_CHARS)
+                } else {
+                    mem.content.clone()
+                };
+                cold_context.push_str(&format!("- [{}] {}\n", mem.r#type, truncated_content));
             }
         }
 

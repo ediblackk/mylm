@@ -343,7 +343,7 @@ impl TerminalContext {
     }
 
     /// Get a formatted summary for AI context
-    #[allow(dead_code)]
+    
     pub fn get_summary(&self) -> String {
         let mut summary = vec![
             format!("Current Directory: {}", self.current_dir_str),
@@ -420,14 +420,14 @@ impl Default for TerminalContext {
 }
 
 /// Get terminal context (lightweight, non-blocking)
-#[allow(dead_code)]
+
 pub fn get_terminal_context() -> Result<TerminalContext> {
     TerminalContext::new()
         .context("Failed to collect terminal context")
 }
 
 /// Get current working directory
-#[allow(dead_code)]
+
 pub fn get_current_dir() -> Result<PathBuf> {
     env::current_dir().context("Failed to get current directory")
 }

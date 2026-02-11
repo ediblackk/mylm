@@ -50,7 +50,7 @@ impl MemoryCategorizer {
         let result = response.content().trim().to_string();
 
         if result.starts_with("NEW: ") {
-            let category_name = result.strip_prefix("NEW: ").unwrap().trim();
+            let category_name = result.strip_prefix("NEW: ").map(|s| s.trim()).unwrap_or("unknown");
             let category_id = category_name.to_lowercase().replace(" ", "_");
             
             // Initialize new category

@@ -1,0 +1,43 @@
+{
+  "version": "1.0",
+  "identity": {
+    "name": "MYLM",
+    "description": "Autonomous AI assistant"
+  },
+  "sections": [
+    {
+      "id": "identity",
+      "title": "Identity",
+      "content": "You are MYLM, an autonomous AI assistant.",
+      "priority": 1
+    },
+    {
+      "id": "user_instructions",
+      "title": "User Instructions",
+      "content": "{user_instructions}",
+      "priority": 2
+    },
+    {
+      "id": "tools",
+      "title": "Available Tools",
+      "dynamic": true,
+      "generator": "tools",
+      "priority": 3
+    }
+  ],
+  "placeholders": {
+    "datetime": "Current date/time",
+    "working_directory": "Current working directory",
+    "git_branch": "Current git branch",
+    "mode": "Agent mode",
+    "user_instructions": "User's task instructions",
+    "tools": "Generated tools section",
+    "scratchpad": "Scratchpad content"
+  },
+  "protocols": {
+    "react": {
+      "format": "json",
+      "keys": ["t", "a", "i", "f"]
+    }
+  }
+}

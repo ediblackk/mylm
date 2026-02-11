@@ -1,3 +1,8 @@
+//! Build script for mylm - generates version and build metadata.
+//!
+//! Computes source code hash and increments build numbers on changes.
+//! Captures git commit hash for version tracking in the compiled binary.
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

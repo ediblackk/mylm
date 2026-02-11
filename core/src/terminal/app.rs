@@ -10,6 +10,7 @@ pub enum AppState {
     Streaming(String),     // Progress or partial content
     ExecutingTool(String), // Tool name
     WaitingForUser,        // Auto-approve off
+    AwaitingApproval { tool: String, args: String }, // Waiting for user to approve/deny
     Error(String),
     ConfirmExit,           // Esc -> Confirmation dialog
     NamingSession,         // S -> Name the session
@@ -33,4 +34,10 @@ pub enum TuiEvent {
     MemoryGraphUpdate(MemoryGraph),
     PaCoReProgress { completed: usize, total: usize, current_round: usize, total_rounds: usize },
     Tick,
+    /// Approval request for a tool execution
+    AwaitingApproval {
+        tool: String,
+        args: String,
+        tx: tokio::sync::oneshot::Sender<bool>,
+    },
 }

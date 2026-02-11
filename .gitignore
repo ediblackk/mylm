@@ -1,10 +1,37 @@
-/target
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug logs
+debug.log
+
+# Environment
+.env
+
+# Session data (if stored locally)
+/sessions/
+
+# Build artifacts
+*.o
+*.so
+*.rlib
+*.dll
+
+# Test artifacts
+/test-results/
+
+# ML model cache
 .fastembed_cache/
-sessions/
-/design
-/plans
-/remotecode
-ONBOARDING.md
-/server
-/shared
-/prompts
+.fastembed/

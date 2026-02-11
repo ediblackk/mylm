@@ -62,7 +62,7 @@ pub struct Memory {
     pub metadata: Option<serde_json::Value>,
     pub category_id: Option<String>,
     #[serde(skip)]
-    #[allow(dead_code)]
+    
     pub embedding: Option<Vec<f32>>,
 }
 
@@ -73,7 +73,7 @@ impl std::fmt::Display for Memory {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
+
 pub struct MemoryCategory {
     pub id: String,
     pub name: String,
@@ -125,7 +125,7 @@ impl VectorStore {
         ]))
     }
 
-    #[allow(dead_code)]
+    
     fn get_category_schema(&self) -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
@@ -532,7 +532,7 @@ impl VectorStore {
         Ok(memories)
     }
 
-    #[allow(dead_code)]
+    
     pub async fn search_by_type(
         &self,
         query: &str,
@@ -543,7 +543,7 @@ impl VectorStore {
         Ok(all_results.into_iter().filter(|r| r.r#type == memory_type).take(limit).collect())
     }
 
-    #[allow(dead_code)]
+    
     pub async fn get_all_categories(&self) -> Result<Vec<MemoryCategory>> {
         let table = self.get_or_create_table("categories", self.get_category_schema()).await?;
         let results = table.query().execute().await?;
@@ -652,7 +652,7 @@ impl VectorStore {
         Ok(memories)
     }
 
-    #[allow(dead_code)]
+    
     pub async fn update_category(&self, category: MemoryCategory) -> Result<()> {
         let model = self.embedding_model.clone();
         let text = format!("{}: {}", category.name, category.summary);

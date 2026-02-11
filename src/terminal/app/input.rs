@@ -141,11 +141,10 @@ impl AppStateContainer {
 
     pub fn end_selection(&mut self) -> Option<String> {
         self.is_selecting = false;
-        let result = self.get_selected_text();
-        self.selection_start = None;
-        self.selection_end = None;
-        self.selection_pane = None;
-        result
+        self.get_selected_text()
+        // Note: We intentionally do NOT clear selection_start/selection_end here
+        // so the visual highlight persists until the user starts a new selection
+        // or explicitly clears it (e.g., pressing Escape or after copy/paste)
     }
 
     pub fn clear_selection(&mut self) {
@@ -192,7 +191,7 @@ impl AppStateContainer {
         true
     }
 
-    fn get_selected_text(&self) -> Option<String> {
+    pub fn get_selected_text(&self) -> Option<String> {
         let (start, end, pane) =
             match (self.selection_start, self.selection_end, self.selection_pane) {
                 (Some(s), Some(e), Some(p)) => (s, e, p),
@@ -274,27 +273,100 @@ impl AppStateContainer {
 
     fn get_chat_selected_text(
         &self,
-        _start_x: u16,
-        _start_y: u16,
-        _end_x: u16,
-        _end_y: u16,
+        start_x: u16,
+        start_y: u16,
+        end_x: u16,
+        end_y: u16,
     ) -> Option<String> {
-        let mut all_lines = Vec::new();
-        for m in &self.chat_history {
-            let prefix = match m.role {
-                mylm_core::llm::chat::MessageRole::User => "You: ",
-                mylm_core::llm::chat::MessageRole::Assistant => "AI: ",
-                mylm_core::llm::chat::MessageRole::System => "Sys: ",
-                _ => "AI: ",
-            };
-            all_lines.push(format!("{}{}", prefix, m.content));
+        mylm_core::info_log!("get_chat_selected_text: start=({}, {}), end=({}, {})", start_x, start_y, end_x, end_y);
+        // Normalize selection coordinates
+        let (start_x, start_y, end_x, end_y) = if start_y < end_y || (start_y == end_y && start_x <= end_x) {
+            (start_x, start_y, end_x, end_y)
+        } else {
+            (end_x, end_y, start_x, start_y)
+        };
+
+        let start_col = self.chat_history_start_col.unwrap_or(0);
+        let area_y = self.chat_area_offset.map(|(_, y)| y).unwrap_or(0);
+        mylm_core::info_log!("get_chat_selected_text: start_col={}, area_y={}, visible_start_idx={}", start_col, area_y, self.chat_visible_start_idx);
+
+        // Collect visual lines that fall within the vertical selection range
+        let mut selected_lines = Vec::new();
+        for (line_text, abs_row) in &self.chat_visual_lines {
+            // Skip lines not in visible window
+            if *abs_row < self.chat_visible_start_idx {
+                continue;
+            }
+            if *abs_row >= self.chat_visible_end_idx {
+                break; // Beyond visible area
+            }
+            // Compute the screen row for this visual line: area_y + 1 + (abs_row - visible_start_idx)
+            let screen_row = area_y + 1 + (*abs_row as u16 - self.chat_visible_start_idx as u16);
+            if screen_row >= start_y && screen_row <= end_y {
+                selected_lines.push((line_text, *abs_row));
+                mylm_core::info_log!("get_chat_selected_text: matched line abs_row={}, text={:?}", abs_row, line_text);
+            }
         }
 
-        if all_lines.is_empty() {
+        if selected_lines.is_empty() {
             return None;
         }
 
-        Some(all_lines.join("\n\n"))
+        let mut result_parts = Vec::new();
+        let total_selected = selected_lines.len();
+
+        for (i, (line_text, _)) in selected_lines.iter().enumerate() {
+            let is_first = i == 0;
+            let is_last = i == total_selected - 1;
+
+            let line_len = line_text.chars().count();
+            let line_end_col = start_col + line_len as u16; // exclusive column after last char
+
+            // Check horizontal intersection for first/last lines
+            if is_first && start_x >= line_end_col {
+                continue; // selection starts after line ends
+            }
+            if is_last && end_x < start_col {
+                continue; // selection ends before line starts
+            }
+
+            // Determine character range to extract (by char index)
+            let char_start = if is_first {
+                let s = start_x as i16 - start_col as i16;
+                if s < 0 { 0 } else { s as usize }
+            } else {
+                0
+            };
+
+            let char_end = if is_last {
+                let e = end_x as i16 - start_col as i16 + 1; // +1 because end_x inclusive
+                if e < 0 {
+                    0
+                } else {
+                    (e as usize).min(line_len)
+                }
+            } else {
+                line_len
+            };
+
+            if char_start >= char_end {
+                // No characters selected in this line
+                result_parts.push(String::new());
+                continue;
+            }
+
+            // Extract substring by character indices
+            let chars: Vec<char> = line_text.chars().collect();
+            let selected: String = chars[char_start..char_end].iter().collect();
+            result_parts.push(selected);
+        }
+
+        // If all parts are empty, return None
+        if result_parts.iter().all(|s| s.is_empty()) {
+            return None;
+        }
+
+        Some(result_parts.join("\n"))
     }
 
     // Streaming
@@ -325,12 +397,40 @@ impl AppStateContainer {
 
     pub fn add_assistant_message(&mut self, content: String, usage: TokenUsage) {
         use mylm_core::llm::chat::ChatMessage;
-        self.chat_history.push(ChatMessage::assistant(content));
+        self.chat_history.push(ChatMessage::assistant(content.clone()));
 
         let input_price = self.input_price;
         let output_price = self.output_price;
 
         self.session_monitor.add_usage(&usage, input_price, output_price);
+        
+        // Update context manager with new message for token tracking
+        self.context_manager.set_history(&self.chat_history);
+
+        if self.chat_auto_scroll {
+            self.chat_scroll = 0;
+        }
+    }
+
+    pub fn add_system_message(&mut self, content: &str) {
+        use mylm_core::llm::chat::ChatMessage;
+        self.chat_history.push(ChatMessage::system(content.to_string()));
+        
+        // Update context manager with new message for token tracking
+        self.context_manager.set_history(&self.chat_history);
+
+        if self.chat_auto_scroll {
+            self.chat_scroll = 0;
+        }
+    }
+
+    /// Add assistant message without token usage (for simple UI messages)
+    pub fn add_assistant_message_simple(&mut self, content: &str) {
+        use mylm_core::llm::chat::ChatMessage;
+        self.chat_history.push(ChatMessage::assistant(content.to_string()));
+        
+        // Update context manager with new message for token tracking
+        self.context_manager.set_history(&self.chat_history);
 
         if self.chat_auto_scroll {
             self.chat_scroll = 0;
@@ -355,8 +455,6 @@ impl AppStateContainer {
             .map(|m| m.content.chars().take(100).collect::<String>())
             .unwrap_or_else(|| "New Session".to_string());
 
-        let agent = self.agent.lock().await;
-
         crate::terminal::session::Session {
             id: self.session_id.clone(),
             timestamp: chrono::Utc::now(),
@@ -371,8 +469,8 @@ impl AppStateContainer {
                 elapsed_seconds: self.session_monitor.duration().as_secs(),
             },
             terminal_history: self.raw_buffer.clone(),
-            agent_session_id: agent.session_id.clone(),
-            agent_history: agent.history.clone(),
+            agent_session_id: self.agent.session_id().await,
+            agent_history: self.agent.history().await,
         }
     }
 }

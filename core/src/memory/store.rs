@@ -62,7 +62,7 @@ pub struct Memory {
     pub metadata: Option<serde_json::Value>,
     pub category_id: Option<String>,
     #[serde(skip)]
-    #[allow(dead_code)]
+    
     pub embedding: Option<Vec<f32>>,
 }
 
@@ -73,7 +73,7 @@ impl std::fmt::Display for Memory {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
+
 pub struct MemoryCategory {
     pub id: String,
     pub name: String,
@@ -125,7 +125,7 @@ impl VectorStore {
         ]))
     }
 
-    #[allow(dead_code)]
+    
     fn get_category_schema(&self) -> Arc<Schema> {
         Arc::new(Schema::new(vec![
             Field::new("id", DataType::Utf8, false),
@@ -253,15 +253,46 @@ impl VectorStore {
     		.await
     		.context("Failed to create migrated table")?;
     	
-    	// TODO: In LanceDB 0.23, we need to drop the old table and rename the new one
-    	// However, the API for dropping tables may vary. For now, we'll return the new table
-    	// and let the caller handle the replacement. Since we're using the same connection,
-    	// we need to ensure subsequent calls use the new table.
-    	// A simpler approach: we can't easily replace in-place, so we'll just use the new table
-    	// and the old table will be orphaned. This is acceptable for migration.
+    	// Drop the old table and rename the new one to replace it
+    	// This ensures subsequent get_or_create_table calls get the migrated data
+    	info!("Dropping old table '{}' and renaming migrated table...", name);
     	
-    	info!("Migration complete. New table created. Old table '{}' remains but will be ignored.", name);
-    	Ok(new_table)
+    	// Drop old table if it exists (empty namespace for default)
+    	if let Err(e) = self.conn.drop_table(name, &[]).await {
+    		warn!("Failed to drop old table '{}': {}. Continuing anyway.", name, e);
+    	}
+    	
+    	// Rename the migrated table to the original name
+    	// LanceDB doesn't have a direct rename, so we need to:
+    	// 1. Create a new table with the correct name
+    	// 2. Copy data from migrated table
+    	// 3. Drop the migrated table
+    	let migrated_data: Vec<RecordBatch> = new_table
+    		.query()
+    		.execute()
+    		.await?
+    		.try_collect()
+    		.await?;
+    	
+    	if migrated_data.is_empty() {
+    		// No data to migrate - just create empty table with correct schema
+    		self.create_empty_table(name, new_schema).await
+    	} else {
+    		let batches_iter = RecordBatchIterator::new(migrated_data.into_iter().map(Ok), new_schema.clone());
+    		let final_table = self.conn
+    			.create_table(name, Box::new(batches_iter))
+    			.execute()
+    			.await
+    			.context("Failed to create final table after migration")?;
+    		
+    		// Drop the temporary migrated table
+    		if let Err(e) = self.conn.drop_table(&temp_name, &[]).await {
+    			warn!("Failed to drop temporary table '{}': {}. Continuing anyway.", temp_name, e);
+    		}
+    		
+    		info!("Migration complete. Table '{}' successfully migrated to new schema.", name);
+    		Ok(final_table)
+    	}
     }
    
     /// Repair the memory database by attempting to migrate all tables to the correct schema.
@@ -291,9 +322,40 @@ impl VectorStore {
     	}
     	
     	info!("Database repair completed:\n{}", report);
+    	
+    	// Clean up orphaned migrated tables
+    	match self.cleanup_orphaned_tables().await {
+    		Ok(count) => {
+    			if count > 0 {
+    				report.push_str(&format!("\n🧹 Cleaned up {} orphaned migrated tables\n", count));
+    			}
+    		},
+    		Err(e) => {
+    			report.push_str(&format!("\n⚠️  Failed to clean up orphaned tables: {}\n", e));
+    		}
+    	}
+    	
     	Ok(report)
-    	   }
-    	  
+    }
+    
+    /// Clean up orphaned migrated tables (tables with "_migrated_" suffix)
+    async fn cleanup_orphaned_tables(&self) -> Result<usize> {
+    	let table_names: Vec<String> = self.conn.table_names().execute().await?;
+    	let mut cleaned = 0;
+    	
+    	for name in &table_names {
+    		if name.contains("_migrated_") {
+    			info!("Dropping orphaned migrated table: {}", name);
+    			if let Err(e) = self.conn.drop_table(name, &[]).await {
+    				warn!("Failed to drop orphaned table '{}': {}", name, e);
+    			} else {
+    				cleaned += 1;
+    			}
+    		}
+    	}
+    	
+    	Ok(cleaned)
+    }
 
     pub async fn add_memory(&self, content: &str) -> Result<()> {
         self.add_memory_typed(content, MemoryType::UserNote, None, None, None, None).await
@@ -426,6 +488,7 @@ impl VectorStore {
         let query_embedding = embeddings.first().context("No embedding generated")?.clone();
         
         let table = self.get_or_create_table("memories", self.get_memory_schema()).await?;
+        info!("store: starting vector search for query: {}", query);
         let results = table
             .query()
             .nearest_to(query_embedding)?
@@ -434,7 +497,9 @@ impl VectorStore {
             .await
             .context("Search query failed")?;
 
+        info!("store: collecting results from vector search");
         let batches: Vec<RecordBatch> = results.try_collect::<Vec<_>>().await?;
+        info!("store: vector search complete, got {} batches", batches.len());
         
         let mut memories = Vec::new();
         for batch in batches {
@@ -491,7 +556,7 @@ impl VectorStore {
         Ok(memories)
     }
 
-    #[allow(dead_code)]
+    
     pub async fn search_by_type(
         &self,
         query: &str,
@@ -502,7 +567,7 @@ impl VectorStore {
         Ok(all_results.into_iter().filter(|r| r.r#type == memory_type).take(limit).collect())
     }
 
-    #[allow(dead_code)]
+    
     pub async fn get_all_categories(&self) -> Result<Vec<MemoryCategory>> {
         let table = self.get_or_create_table("categories", self.get_category_schema()).await?;
         let results = table.query().execute().await?;
@@ -611,7 +676,7 @@ impl VectorStore {
         Ok(memories)
     }
 
-    #[allow(dead_code)]
+    
     pub async fn update_category(&self, category: MemoryCategory) -> Result<()> {
         let model = self.embedding_model.clone();
         let text = format!("{}: {}", category.name, category.summary);
@@ -687,7 +752,7 @@ impl VectorStore {
             .join("mylm")
             .join("models");
         
-        let store = Self::new(data_dir.to_str().unwrap()).await?;
+        let store = Self::new(data_dir.to_str().ok_or_else(|| anyhow::anyhow!("Invalid data directory path"))?).await?;
         let _ = store.search_memory("warmup", 1).await;
         println!("✅ AI models ready.");
         Ok(())

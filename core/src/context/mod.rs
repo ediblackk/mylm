@@ -16,9 +16,13 @@ pub mod system;
 pub mod terminal;
 pub mod pack;
 pub mod manager;
+pub mod action_stamp;
 
 // Re-export context manager types
 pub use manager::{ContextConfig, ContextManager, ContextError, Message, TokenCounter};
+
+// Re-export action stamp types
+pub use action_stamp::{ActionStamp, ActionStampType, ActionStampRegistry, stamps};
 
 /// Collected terminal context
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -178,7 +182,7 @@ impl TerminalContext {
     }
 
     /// Build a prompt for the LLM with all context
-    #[allow(dead_code)]
+    
     pub fn build_prompt(&self, user_query: &str) -> String {
         let mut prompt = String::new();
 

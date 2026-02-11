@@ -58,6 +58,10 @@ pub struct SessionStats {
     pub base_duration: Duration,
     pub active_context_tokens: u32,
     pub max_context_tokens: u32,
+    /// Input price per 1M tokens
+    pub input_price_per_million: f64,
+    /// Output price per 1M tokens
+    pub output_price_per_million: f64,
 }
 
 impl Default for SessionStats {
@@ -70,7 +74,9 @@ impl Default for SessionStats {
             start_time: Instant::now(),
             base_duration: Duration::from_secs(0),
             active_context_tokens: 0,
-            max_context_tokens: 32768,
+            max_context_tokens: 0,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
         }
     }
 }
@@ -94,18 +100,22 @@ pub struct SessionMonitor {
 }
 
 impl SessionMonitor {
-    pub fn new() -> Self {
+    pub fn new(max_context_tokens: u32) -> Self {
         Self {
-            stats: SessionStats::default(),
+            stats: SessionStats {
+                max_context_tokens,
+                ..SessionStats::default()
+            },
         }
     }
 
     /// Set initial stats for resumed session
-    pub fn resume_stats(&mut self, metadata: &SessionMetadata) {
+    pub fn resume_stats(&mut self, metadata: &SessionMetadata, max_context_tokens: u32) {
         self.stats.input_tokens = metadata.input_tokens;
         self.stats.output_tokens = metadata.output_tokens;
         self.stats.total_tokens = metadata.total_tokens;
         self.stats.active_context_tokens = metadata.total_tokens;
+        self.stats.max_context_tokens = max_context_tokens;
         self.stats.cost = metadata.cost;
         self.stats.base_duration = Duration::from_secs(metadata.elapsed_seconds);
         self.stats.start_time = Instant::now();
@@ -121,13 +131,19 @@ impl SessionMonitor {
         self.stats.active_context_tokens = usage.total_tokens;
 
         // Cost per token = price_per_1m / 1,000,000
-        let input_cost = usage.prompt_tokens as f64 * (input_price_1m / 1_000_000.0);
-        let output_cost = usage.completion_tokens as f64 * (output_price_1m / 1_000_000.0);
+        // Use provided prices or fall back to stored prices
+        let input_price = if input_price_1m > 0.0 { input_price_1m } else { self.stats.input_price_per_million };
+        let output_price = if output_price_1m > 0.0 { output_price_1m } else { self.stats.output_price_per_million };
+        
+        let input_cost = usage.prompt_tokens as f64 * (input_price / 1_000_000.0);
+        let output_cost = usage.completion_tokens as f64 * (output_price / 1_000_000.0);
         self.stats.cost += input_cost + output_cost;
     }
 
-    pub fn set_max_context(&mut self, max_tokens: u32) {
-        self.stats.max_context_tokens = max_tokens;
+    /// Set pricing for cost calculation
+    pub fn set_pricing(&mut self, input_price_per_million: f64, output_price_per_million: f64) {
+        self.stats.input_price_per_million = input_price_per_million;
+        self.stats.output_price_per_million = output_price_per_million;
     }
 
     pub fn get_context_ratio(&self) -> f64 {

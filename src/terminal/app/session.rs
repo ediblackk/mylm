@@ -56,7 +56,6 @@ impl AppStateContainer {
             let agent = self.agent.clone();
             let history = self.chat_history.clone();
             tokio::spawn(async move {
-                let agent = agent.lock().await;
                 if let Ok(new_history) = agent.condense_history(&history).await {
                     let _ = event_tx.send(TuiEvent::CondensedHistory(new_history));
                 }

@@ -9,13 +9,30 @@ use futures_util::{StreamExt, SinkExt};
 use uuid::Uuid;
 use anyhow::{Context, Result};
 use base64::Engine;
+use async_trait::async_trait;
 
 use mylm_core::config::Config;
-use mylm_core::agent::core::AgentDecision;
+use mylm_core::agent::v2::AgentDecision;
 use mylm_core::agent::tool::ToolOutput;
+use mylm_core::agent::traits::TerminalExecutor;
 use mylm_core::llm::chat::ChatMessage;
 use mylm_core::terminal::app::TuiEvent;
 use mylm_core::protocol::{ServerEvent, ClientMessage, MessageEnvelope, ServerInfo, Capabilities, SessionSummary, SystemInfo};
+use std::time::Duration;
+
+/// Stub TerminalExecutor for headless server sessions where no real terminal exists.
+pub struct HeadlessTerminalExecutor;
+
+#[async_trait]
+impl TerminalExecutor for HeadlessTerminalExecutor {
+    async fn execute_command(&self, _cmd: String, _timeout: Option<Duration>) -> Result<String, String> {
+        Err("Terminal operations not available in headless mode".to_string())
+    }
+    
+    async fn get_screen(&self) -> Result<String, String> {
+        Ok(String::new()) // empty screen
+    }
+}
 
 pub struct AppState {
     pub config: Arc<Mutex<Config>>,
@@ -157,7 +174,13 @@ async fn handle_client_message(
             let auto_approve = false; // V2 doesn't have allow_execution setting, default to false for safety
             
             let (event_tx, event_rx) = mpsc::unbounded_channel::<TuiEvent>();
-            let agent = mylm_core::factory::create_agent_for_session(&config, event_tx.clone()).await?;
+            let event_bus = Arc::new(mylm_core::agent::event_bus::EventBus::new());
+            let agent = mylm_core::factory::create_agent_for_session(
+                &config, 
+                event_bus,
+                Arc::new(HeadlessTerminalExecutor),
+                None, // No escalation channel for server mode
+            ).await?;
             let agent = Arc::new(Mutex::new(agent));
 
             let created_at = SystemTime::now()
@@ -526,6 +549,7 @@ async fn run_agent_for_user_message(
                             mylm_core::agent::AgentDecision::Action { tool, args, kind } => AgentDecision::Action { tool, args, kind },
                             mylm_core::agent::AgentDecision::MalformedAction(e) => AgentDecision::MalformedAction(e),
                             mylm_core::agent::AgentDecision::Error(e) => AgentDecision::Error(e),
+                            mylm_core::agent::AgentDecision::Stall { reason, tool_failures } => AgentDecision::Stall { reason, tool_failures },
                         })
                 }
                 mylm_core::BuiltAgent::V2(agent) => {
@@ -535,6 +559,7 @@ async fn run_agent_for_user_message(
                             mylm_core::agent::v2::AgentDecision::Action { tool, args, kind } => AgentDecision::Action { tool, args, kind },
                             mylm_core::agent::v2::AgentDecision::MalformedAction(e) => AgentDecision::MalformedAction(e),
                             mylm_core::agent::v2::AgentDecision::Error(e) => AgentDecision::Error(e),
+                            mylm_core::agent::v2::AgentDecision::Stall { reason, tool_failures } => AgentDecision::Stall { reason, tool_failures },
                         })
                 }
             }
@@ -680,6 +705,16 @@ async fn run_agent_for_user_message(
                         let _ = tx.send(ServerEvent::Error {
                             code: "agent_error".to_string(),
                             message: err,
+                        });
+                        break;
+                    }
+                    AgentDecision::Stall { reason, tool_failures } => {
+                        let _ = tx.send(ServerEvent::Error {
+                            code: "worker_stalled".to_string(),
+                            message: format!(
+                                "Worker stalled after {} consecutive tool failures: {}",
+                                tool_failures, reason
+                            ),
                         });
                         break;
                     }

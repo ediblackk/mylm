@@ -5,7 +5,7 @@ use crate::config::ContextProfile;
 pub struct ContextPack {
     pub title: String,
     pub content: String,
-    #[allow(dead_code)]
+    
     pub token_estimate: usize,
 }
 

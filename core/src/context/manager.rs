@@ -5,6 +5,7 @@
 
 use crate::llm::chat::{ChatMessage, MessageRole};
 use crate::llm::LlmClient;
+use crate::context::action_stamp::{ActionStamp, ActionStampRegistry};
 use serde::{Deserialize, Serialize};
 use std::error::Error as StdError;
 use std::sync::Arc;
@@ -18,6 +19,13 @@ pub struct ContextConfig {
     pub condense_threshold: f64,
     /// Maximum tokens for LLM output/reserve
     pub max_output_tokens: usize,
+    /// Input price per 1M tokens (for cost calculation)
+    pub input_price_per_million: f64,
+    /// Output price per 1M tokens (for cost calculation)
+    pub output_price_per_million: f64,
+    /// Maximum total byte size for the context (API safety limit)
+    /// Default is 3MB to stay safely under typical 4MB API limits
+    pub max_bytes: usize,
 }
 
 impl ContextConfig {
@@ -27,6 +35,9 @@ impl ContextConfig {
             max_tokens,
             condense_threshold: 0.8,
             max_output_tokens: 4096,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            max_bytes: 3 * 1024 * 1024, // 3MB default
         }
     }
 
@@ -42,9 +53,29 @@ impl ContextConfig {
         self
     }
 
+    /// Set pricing for cost calculation
+    pub fn with_pricing(mut self, input_price: f64, output_price: f64) -> Self {
+        self.input_price_per_million = input_price;
+        self.output_price_per_million = output_price;
+        self
+    }
+
+    /// Set the maximum byte size limit
+    pub fn with_max_bytes(mut self, bytes: usize) -> Self {
+        self.max_bytes = bytes;
+        self
+    }
+
     /// Calculate the effective context limit (max_tokens - reserve)
     pub fn effective_limit(&self) -> usize {
         self.max_tokens.saturating_sub(self.max_output_tokens)
+    }
+
+    /// Calculate cost for given token usage
+    pub fn calculate_cost(&self, input_tokens: usize, output_tokens: usize) -> f64 {
+        let input_cost = input_tokens as f64 * (self.input_price_per_million / 1_000_000.0);
+        let output_cost = output_tokens as f64 * (self.output_price_per_million / 1_000_000.0);
+        input_cost + output_cost
     }
 }
 
@@ -54,6 +85,9 @@ impl Default for ContextConfig {
             max_tokens: 128_000,
             condense_threshold: 0.8,
             max_output_tokens: 4096,
+            input_price_per_million: 0.0,
+            output_price_per_million: 0.0,
+            max_bytes: 3 * 1024 * 1024, // 3MB default
         }
     }
 }
@@ -67,6 +101,8 @@ pub struct Message {
     pub content: String,
     /// Pre-calculated token count
     pub token_count: usize,
+    /// Byte size of the content (for API limit enforcement)
+    pub byte_size: usize,
 }
 
 impl Message {
@@ -74,10 +110,12 @@ impl Message {
     pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
         let content_str = content.into();
         let token_count = TokenCounter::estimate(&content_str);
+        let byte_size = content_str.len(); // UTF-8 byte length
         Self {
             role: role.into(),
             content: content_str,
             token_count,
+            byte_size,
         }
     }
 
@@ -158,6 +196,10 @@ impl StdError for ContextError {}
 pub struct ContextManager {
     config: ContextConfig,
     history: Vec<Message>,
+    /// Action stamps for tracking agent actions
+    pub action_stamps: ActionStampRegistry,
+    /// Current conversation topic/focus (to prevent context jumping)
+    pub conversation_topic: Option<String>,
 }
 
 impl ContextManager {
@@ -166,16 +208,145 @@ impl ContextManager {
         Self {
             config,
             history: Vec::new(),
+            action_stamps: ActionStampRegistry::new(50),
+            conversation_topic: None,
+        }
+    }
+
+    /// Add an action stamp to the registry
+    pub fn add_stamp(&mut self, stamp: ActionStamp) {
+        self.action_stamps.add(stamp);
+    }
+
+    /// Get recent action stamps
+    pub fn recent_stamps(&self, count: usize) -> Vec<ActionStamp> {
+        self.action_stamps.recent(count).iter().map(|s| (*s).clone()).collect()
+    }
+
+    /// Set the conversation topic to prevent context jumping
+    pub fn set_topic(&mut self, topic: impl Into<String>) {
+        self.conversation_topic = Some(topic.into());
+    }
+
+    /// Get the current conversation topic
+    pub fn topic(&self) -> Option<&str> {
+        self.conversation_topic.as_deref()
+    }
+
+    /// Check if a message is on-topic with the current conversation
+    /// This helps prevent context jumping
+    pub fn is_on_topic(&self, message: &str) -> bool {
+        if let Some(ref topic) = self.conversation_topic {
+            // Simple heuristic: check if key terms from topic appear in message
+            let topic_lower = topic.to_lowercase();
+            let msg_lower = message.to_lowercase();
+            
+            // Extract key words from topic (words longer than 4 chars)
+            let topic_words: Vec<&str> = topic_lower
+                .split_whitespace()
+                .filter(|w| w.len() > 4)
+                .collect();
+            
+            // If no significant words, consider it on-topic
+            if topic_words.is_empty() {
+                return true;
+            }
+            
+            // Check if at least one topic word appears in message
+            let matches = topic_words.iter().filter(|&&w| msg_lower.contains(w)).count();
+            
+            // Require at least 1 match or consider it potentially off-topic
+            matches > 0
+        } else {
+            // No topic set, anything is on-topic
+            true
+        }
+    }
+
+    /// Estimate tokens for a message before adding it
+    /// Returns (estimated_tokens, would_fit, remaining_tokens)
+    pub fn estimate_message(&self, content: &str) -> (usize, bool, usize) {
+        let estimated = TokenCounter::estimate(content);
+        let current: usize = self.history.iter().map(|m| m.token_count).sum();
+        let limit = self.config.effective_limit();
+        let remaining = limit.saturating_sub(current);
+        
+        (estimated, estimated <= remaining, remaining)
+    }
+
+    /// Pre-flight check before sending to LLM
+    /// Returns warning message if context might be problematic
+    pub fn preflight_check(&self, new_content: Option<&str>) -> Option<String> {
+        let current: usize = self.history.iter().map(|m| m.token_count).sum();
+        let limit = self.config.effective_limit();
+        let ratio = current as f64 / limit as f64;
+        
+        let mut warnings = Vec::new();
+        
+        // Check if we're near the token limit
+        if ratio > self.config.condense_threshold {
+            warnings.push(format!(
+                "Context at {:.0}% token capacity - condensation recommended",
+                ratio * 100.0
+            ));
+        }
+        
+        // Check byte size limit (hard API limit)
+        let byte_size = self.total_byte_size();
+        if byte_size > self.config.max_bytes {
+            warnings.push(format!(
+                "Context exceeds byte limit: {:.1}MB / {:.1}MB",
+                byte_size as f64 / (1024.0 * 1024.0),
+                self.config.max_bytes as f64 / (1024.0 * 1024.0)
+            ));
+        } else if byte_size as f64 > self.config.max_bytes as f64 * 0.8 {
+            warnings.push(format!(
+                "Context at {:.0}% byte capacity",
+                (byte_size as f64 / self.config.max_bytes as f64) * 100.0
+            ));
+        }
+        
+        // Check new content size
+        if let Some(content) = new_content {
+            let estimated = TokenCounter::estimate(content);
+            let remaining = limit.saturating_sub(current);
+            
+            if estimated > remaining {
+                warnings.push(format!(
+                    "Message may not fit (est. {} tokens, {} remaining)",
+                    estimated, remaining
+                ));
+            }
+            
+            // Check if new content would exceed byte limit
+            let new_content_bytes = content.len();
+            if byte_size + new_content_bytes > self.config.max_bytes {
+                warnings.push(format!(
+                    "Message may exceed byte limit (+{} bytes)",
+                    new_content_bytes
+                ));
+            }
+        }
+        
+        if warnings.is_empty() {
+            None
+        } else {
+            Some(warnings.join("; "))
         }
     }
 
     /// Create a new ContextManager from LlmClient configuration
     pub fn from_llm_client(client: &LlmClient) -> Self {
         let llm_config = client.config();
+        // Use default byte limit (3MB) to stay under typical 4MB API limits
+        // This is a safety measure independent of the token-based limit
         let config = ContextConfig {
             max_tokens: llm_config.max_context_tokens,
             condense_threshold: llm_config.condense_threshold,
             max_output_tokens: llm_config.max_tokens.unwrap_or(4096) as usize,
+            input_price_per_million: llm_config.input_price_per_1m,
+            output_price_per_million: llm_config.output_price_per_1m,
+            max_bytes: 3 * 1024 * 1024, // 3MB default - hard safety limit
         };
         Self::new(config)
     }
@@ -223,15 +394,48 @@ impl ContextManager {
         self.history.iter().map(|m| m.token_count).sum()
     }
 
+    /// Get the total byte size of all messages in history
+    pub fn total_byte_size(&self) -> usize {
+        self.history.iter().map(|m| m.byte_size).sum()
+    }
+
+    /// Check if history exceeds the byte size limit
+    pub fn exceeds_byte_limit(&self) -> bool {
+        self.total_byte_size() > self.config.max_bytes
+    }
+
+    /// Get byte usage statistics (current, max)
+    pub fn get_byte_usage(&self) -> (usize, usize) {
+        let current = self.total_byte_size();
+        (current, self.config.max_bytes)
+    }
+
     /// Prepare context for LLM request
     /// - If over threshold: condense first, then prune
+    /// - If over byte limit: prune aggressively
     /// - Otherwise: just prune if needed
-    /// Returns optimized history as ChatMessages
+    ///   Returns optimized history as ChatMessages
     pub async fn prepare_context(
         &mut self,
         llm_client: Option<&Arc<LlmClient>>,
     ) -> Result<Vec<ChatMessage>, ContextError> {
-        // Check if we need condensation
+        let byte_size_before = self.total_byte_size();
+        let token_count_before = self.total_tokens();
+        
+        // CRITICAL: Check byte size limit first - this is a hard API limit
+        if self.exceeds_byte_limit() {
+            let (current_bytes, max_bytes) = self.get_byte_usage();
+            crate::warn_log!(
+                "Context exceeds byte limit: {} / {} bytes ({:.1}MB / {:.1}MB). Pruning aggressively.",
+                current_bytes,
+                max_bytes,
+                current_bytes as f64 / (1024.0 * 1024.0),
+                max_bytes as f64 / (1024.0 * 1024.0)
+            );
+            self.prune_to_byte_limit();
+        }
+        
+        // Check if we need condensation based on token threshold
         if self.needs_condensation() {
             if let Some(client) = llm_client {
                 match self.condense_history(client).await {
@@ -246,8 +450,22 @@ impl ContextManager {
             }
         }
 
-        // Prune to ensure we're within limits
+        // Final prune to ensure we're within limits
         let pruned = self.prune_history();
+        
+        // Log if we made significant changes
+        let byte_size_after = self.total_byte_size();
+        let token_count_after = self.total_tokens();
+        if byte_size_before != byte_size_after || token_count_before != token_count_after {
+            crate::info_log!(
+                "Context pruned: {} -> {} tokens, {:.1}MB -> {:.1}MB",
+                token_count_before,
+                token_count_after,
+                byte_size_before as f64 / (1024.0 * 1024.0),
+                byte_size_after as f64 / (1024.0 * 1024.0)
+            );
+        }
+        
         Ok(pruned.iter().map(|m| m.to_chat_message()).collect())
     }
 
@@ -311,11 +529,92 @@ impl ContextManager {
         pruned
     }
 
+    /// Prune history to fit within byte size limit
+    /// This is a more aggressive pruning that prioritizes recent messages
+    /// and is used when we hit the hard API byte size limit
+    pub fn prune_to_byte_limit(&mut self) -> Vec<Message> {
+        if self.history.is_empty() {
+            return Vec::new();
+        }
+
+        let limit = self.config.max_bytes;
+        let total_bytes: usize = self.history.iter().map(|m| m.byte_size).sum();
+
+        // If under limit, return all
+        if total_bytes <= limit {
+            return self.history.clone();
+        }
+
+        // Extract system prompt if present
+        let system_msg = if !self.history.is_empty() && self.history[0].role == "system" {
+            Some(self.history[0].clone())
+        } else {
+            None
+        };
+
+        let start_idx = if system_msg.is_some() { 1 } else { 0 };
+        
+        // Reserve space for system message
+        let system_bytes = system_msg.as_ref().map(|m| m.byte_size).unwrap_or(0);
+        let available_for_messages = limit.saturating_sub(system_bytes);
+        
+        // Work backwards to keep recent messages that fit
+        let mut to_keep: Vec<Message> = Vec::new();
+        let mut current_bytes: usize = 0;
+        
+        for msg in self.history.iter().skip(start_idx).rev() {
+            if current_bytes + msg.byte_size <= available_for_messages {
+                to_keep.push(msg.clone());
+                current_bytes += msg.byte_size;
+            } else {
+                // Message doesn't fit, skip it
+                crate::info_log!(
+                    "Pruning message ({} bytes, {} tokens) to fit byte limit",
+                    msg.byte_size,
+                    msg.token_count
+                );
+            }
+        }
+
+        // Reverse to maintain chronological order
+        to_keep.reverse();
+
+        // Ensure we start with a user message after system
+        while !to_keep.is_empty() && to_keep[0].role != "user" {
+            let removed = to_keep.remove(0);
+            crate::info_log!(
+                "Removing non-user start message ({} bytes) to maintain conversation flow",
+                removed.byte_size
+            );
+        }
+
+        // Build final pruned list
+        let mut pruned: Vec<Message> = Vec::new();
+        if let Some(ref sys) = system_msg {
+            pruned.push(sys.clone());
+        }
+        pruned.extend(to_keep);
+
+        // Update internal history
+        self.history = pruned.clone();
+        
+        let final_bytes: usize = self.history.iter().map(|m| m.byte_size).sum();
+        crate::info_log!(
+            "Byte pruning complete: {} -> {} bytes ({:.1}MB -> {:.1}MB)",
+            total_bytes,
+            final_bytes,
+            total_bytes as f64 / (1024.0 * 1024.0),
+            final_bytes as f64 / (1024.0 * 1024.0)
+        );
+        
+        pruned
+    }
+
     /// Condense history by summarizing middle messages
     /// - Preserves system prompt
     /// - Keeps 3 most recent messages intact
     /// - Uses LLM to summarize everything in between
-    /// Returns: [System] + [Summary] + [Latest 3]
+    ///   Returns: [System] + [Summary] + [Latest 3]
     pub async fn condense_history(
         &self,
         llm_client: &Arc<LlmClient>,
@@ -395,7 +694,7 @@ impl ContextManager {
     /// Format context for UI display
     /// Example output:
     /// ```
-    /// Context: 45,000 / 128,000 tokens (35%)
+    /// Context: 45,000 / 128,000 tokens (35%), 1.2MB / 3MB bytes (40%)
     /// [System] You are a helpful assistant...
     /// [User] Hello
     /// [Assistant] Hi there!
@@ -405,12 +704,19 @@ impl ContextManager {
         let (current, max) = self.get_token_usage();
         let ratio = self.get_context_ratio();
         let percentage = (ratio * 100.0) as usize;
+        
+        let (byte_size, max_bytes) = self.get_byte_usage();
+        let byte_ratio = byte_size as f64 / max_bytes as f64;
+        let byte_percentage = (byte_ratio * 100.0) as usize;
 
         let mut output = format!(
-            "Context: {} / {} tokens ({}%)\n",
+            "Context: {} / {} tokens ({}%), {:.1}MB / {:.1}MB bytes ({}%)\n",
             format_number(current),
             format_number(max),
-            percentage
+            percentage,
+            byte_size as f64 / (1024.0 * 1024.0),
+            max_bytes as f64 / (1024.0 * 1024.0),
+            byte_percentage
         );
 
         // Show up to 5 most recent messages
@@ -600,5 +906,79 @@ mod tests {
         assert_eq!(format_number(1000), "1,000");
         assert_eq!(format_number(1000000), "1,000,000");
         assert_eq!(format_number(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn test_byte_size_tracking() {
+        let mut manager = ContextManager::new(ContextConfig::new(1000));
+        
+        // Add a message with known content
+        let content = "Hello world"; // 11 bytes
+        manager.add_message("user", content);
+        
+        // Check byte size is tracked correctly
+        let byte_size = manager.total_byte_size();
+        assert_eq!(byte_size, content.len());
+        
+        // Check message has byte_size field set
+        assert_eq!(manager.history[0].byte_size, content.len());
+    }
+
+    #[test]
+    fn test_prune_to_byte_limit() {
+        // Create config with very small byte limit
+        let mut config = ContextConfig::new(1000);
+        config.max_bytes = 50; // Only 50 bytes allowed
+        
+        let mut manager = ContextManager::new(config);
+        
+        // Add system message
+        manager.add_message("system", "System prompt here"); // 18 bytes
+        
+        // Add multiple user messages with larger content
+        for i in 0..5 {
+            manager.add_message("user", &format!("Message number {}", i)); // ~16 bytes each
+        }
+        
+        // Should exceed byte limit (18 + 5*16 = 98 bytes > 50)
+        assert!(manager.exceeds_byte_limit());
+        
+        // Prune to fit
+        let pruned = manager.prune_to_byte_limit();
+        
+        // Should have system + some recent messages
+        assert!(!pruned.is_empty());
+        assert_eq!(pruned[0].role, "system");
+        
+        // Should be under byte limit now
+        let final_bytes = manager.total_byte_size();
+        assert!(final_bytes <= manager.config().max_bytes);
+    }
+
+    #[test]
+    fn test_byte_limit_prevents_api_overflow() {
+        // Simulate the bug scenario: 34MB of content
+        let mut config = ContextConfig::new(128_000);
+        config.max_bytes = 1000; // Small limit for testing
+        
+        let mut manager = ContextManager::new(config);
+        
+        // Add system prompt
+        manager.add_message("system", "You are helpful");
+        
+        // Add a huge message (simulating the bug)
+        let huge_content = "x".repeat(2000); // 2000 bytes
+        manager.add_message("tool", &huge_content);
+        
+        // Should detect byte limit exceeded
+        assert!(manager.exceeds_byte_limit());
+        
+        // Prune should fix it
+        manager.prune_to_byte_limit();
+        
+        // Should be under limit
+        assert!(!manager.exceeds_byte_limit());
+        let final_bytes = manager.total_byte_size();
+        assert!(final_bytes <= 1000);
     }
 }

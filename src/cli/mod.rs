@@ -129,6 +129,12 @@ pub enum Commands {
         cmd: SessionCommand,
     },
 
+    /// Manage system prompts
+    Prompts {
+        #[command(subcommand)]
+        cmd: PromptsCommand,
+    },
+
     /// Start the WebSocket server
     Server {
         /// Port to listen on
@@ -196,6 +202,34 @@ pub enum SessionCommand {
     },
 }
 
+#[derive(clap::ValueEnum, Debug, Clone)]
+pub enum PromptType {
+    /// System prompt (main identity)
+    System,
+    /// Worker prompt (task execution)
+    Worker,
+    /// Memory prompt (memory operations)
+    Memory,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PromptsCommand {
+    /// Edit a prompt configuration
+    Edit {
+        #[arg(value_enum)]
+        prompt_type: PromptType,
+    },
+    /// Reset a prompt to default
+    Reset {
+        #[arg(value_enum)]
+        prompt_type: PromptType,
+    },
+    /// Validate all prompt configurations
+    Validate,
+    /// List available prompts and their sources
+    List,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum ConfigCommand {
     /// Edit configuration files
@@ -232,4 +266,6 @@ pub enum MemoryCommand {
         #[arg(short, long, default_value = "5")]
         limit: usize,
     },
+    /// Repair memory database (cleans up orphaned tables)
+    Repair,
 }
