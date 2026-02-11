@@ -1,25 +1,21 @@
-# My Little Minion | My Language Model | My Learning Machine | My Local Model (MyLM) 
+# My Language Model
 
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Terminal AI](https://img.shields.io/badge/Terminal-AI-blue.svg)](.)
 
-## Demo
-
-<p align="center">
-  <img src="assets/1.gif" width="360" alt="Basic Usage"><br>
-  <b>Basic Usage</b>
-</p>
-
-<p align="center">
-  <img src="assets/2.gif" width="360" alt="Chat Interface"><br>
-  <b>Chat Interface</b>
-</p>
-
-<p align="center">
-  <img src="assets/3.gif" width="360" alt="Terminal Integration"><br>
-  <b>Terminal Integration</b>
-</p>
+<table>
+  <tr>
+    <td align="center"><b>Basic Usage</b></td>
+    <td align="center"><b>Chat Interface</b></td>
+    <td align="center"><b>Terminal Integration</b></td>
+  </tr>
+  <tr>
+    <td><img src="assets/1.gif" width="260"></td>
+    <td><img src="assets/2.gif" width="260"></td>
+    <td><img src="assets/3.gif" width="260"></td>
+  </tr>
+</table>
 
 
 ## Safe Personal AI assistance into your terminal
