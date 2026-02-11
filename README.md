@@ -7,13 +7,13 @@
 ## Demo
 
 ### Basic Usage
-![Demo 1](assets/1.mp4)
+![Demo 1](assets/1.gif)
 
 ### Chat Interface  
-![Demo 2](assets/2.mp4)
+![Demo 2](assets/2.gif)
 
 ### Terminal Integration
-![Demo 3](assets/3.mp4)
+![Demo 3](assets/3.gif)
 
 
 ## Safe Personal AI assistance into your terminal
