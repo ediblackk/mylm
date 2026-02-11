@@ -6,14 +6,20 @@
 
 ## Demo
 
-### Basic Usage
-![Demo 1](assets/1.gif)
+<p align="center">
+  <img src="assets/1.gif" width="360" alt="Basic Usage"><br>
+  <b>Basic Usage</b>
+</p>
 
-### Chat Interface  
-![Demo 2](assets/2.gif)
+<p align="center">
+  <img src="assets/2.gif" width="360" alt="Chat Interface"><br>
+  <b>Chat Interface</b>
+</p>
 
-### Terminal Integration
-![Demo 3](assets/3.gif)
+<p align="center">
+  <img src="assets/3.gif" width="360" alt="Terminal Integration"><br>
+  <b>Terminal Integration</b>
+</p>
 
 
 ## Safe Personal AI assistance into your terminal
