@@ -6,11 +6,14 @@
 
 ## Demo
 
-https://github.com/user-attachments/assets/placeholder1
+### Basic Usage
+<video src="https://raw.githubusercontent.com/ediblackk/mylm/main/assets/1.mp4" width="800" controls></video>
 
-https://github.com/user-attachments/assets/placeholder2
+### Chat Interface  
+<video src="https://raw.githubusercontent.com/ediblackk/mylm/main/assets/2.mp4" width="800" controls></video>
 
-https://github.com/user-attachments/assets/placeholder3
+### Terminal Integration
+<video src="https://raw.githubusercontent.com/ediblackk/mylm/main/assets/3.mp4" width="800" controls></video>
 
 
 ## Safe Personal AI assistance into your terminal
