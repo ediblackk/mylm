@@ -7,13 +7,13 @@
 ## Demo
 
 ### Basic Usage
-<video src="https://raw.githubusercontent.com/ediblackk/mylm/main/assets/1.mp4" width="800" controls></video>
+![Demo 1](assets/1.mp4)
 
 ### Chat Interface  
-<video src="https://raw.githubusercontent.com/ediblackk/mylm/main/assets/2.mp4" width="800" controls></video>
+![Demo 2](assets/2.mp4)
 
 ### Terminal Integration
-<video src="https://raw.githubusercontent.com/ediblackk/mylm/main/assets/3.mp4" width="800" controls></video>
+![Demo 3](assets/3.mp4)
 
 
 ## Safe Personal AI assistance into your terminal
