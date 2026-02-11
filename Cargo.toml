@@ -1,6 +1,6 @@
 [package]
 name = "mylm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A globally available, high-performance terminal AI assistant"
 authors = ["Edward <ediblackk@users.noreply.github.com>"]

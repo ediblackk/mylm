@@ -412,6 +412,7 @@ impl AppStateContainer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn add_system_message(&mut self, content: &str) {
         use mylm_core::llm::chat::ChatMessage;
         self.chat_history.push(ChatMessage::system(content.to_string()));

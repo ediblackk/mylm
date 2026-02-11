@@ -62,22 +62,11 @@ impl HelpSystem {
         }
         output.push_str("╠══════════════════════════════════════════════════════════════════════════════╣\n");
 
-        // CONTEXT MANAGEMENT SECTION
-        output.push_str("║ CONTEXT MANAGEMENT                                                           ║\n");
-        output.push_str("║   • Automatic condensation triggers at threshold (80% by default)            ║\n");
-        output.push_str("║   • Manual condensation: Press Ctrl+L while in Chat focus                    ║\n");
-        output.push_str("║   • Workers isolate context - each job has its own environment               ║\n");
-        output.push_str("║   • Job results persist and can be viewed in the jobs panel (F4)             ║\n");
-        output.push_str("╠══════════════════════════════════════════════════════════════════════════════╣\n");
-
-        // TIPS SECTION
-        output.push_str("║ TIPS                                                                         ║\n");
+        // NOTES SECTION
+        output.push_str("║ NOTES                                                                        ║\n");
         output.push_str("║   • Hold Shift when clicking to use your terminal's native mouse features    ║\n");
-        output.push_str("║   • Use /pacore for parallel context retrieval reasoning                     ║\n");
         output.push_str("║   • Background jobs appear in jobs panel (F4)                                ║\n");
-        output.push_str("║   • Workers can process large documents in parallel                          ║\n");
         output.push_str("║   • Configuration hot-reloads when you edit config.toml                      ║\n");
-        output.push_str("║   • Use Ctrl+Shift+←/→ to adjust chat/terminal split (20%-100%)              ║\n");
         output.push_str("╚══════════════════════════════════════════════════════════════════════════════╝\n");
 
         output
@@ -87,6 +76,10 @@ impl HelpSystem {
     fn get_keybindings() -> Vec<Keybinding> {
         vec![
             Keybinding {
+                keys: "Ctrl+Shift+←/→",
+                description: "Adjust chat/terminal split (20%-100%)",
+            },
+            Keybinding {
                 keys: "F1",
                 description: "Toggle this help screen",
             },
@@ -95,20 +88,8 @@ impl HelpSystem {
                 description: "Cycle focus (Terminal → Chat → Jobs)",
             },
             Keybinding {
-                keys: "F3",
-                description: "Toggle memory graph view",
-            },
-            Keybinding {
                 keys: "F4",
                 description: "Toggle jobs panel",
-            },
-            Keybinding {
-                keys: "Ctrl+C",
-                description: "Abort current AI task (while running)",
-            },
-            Keybinding {
-                keys: "Ctrl+L",
-                description: "Manual context condensation",
             },
             Keybinding {
                 keys: "Enter",
@@ -119,12 +100,12 @@ impl HelpSystem {
                 description: "Cancel / Back / Exit prompt",
             },
             Keybinding {
-                keys: "Up/Down",
-                description: "Navigate history / Scroll",
+                keys: "Ctrl+C",
+                description: "Abort current AI task (while running)",
             },
             Keybinding {
-                keys: "PgUp/PgDn",
-                description: "Scroll terminal/chat history",
+                keys: "Ctrl+A",
+                description: "Toggle Auto-Approve",
             },
             Keybinding {
                 keys: "Ctrl+Y",
@@ -139,12 +120,12 @@ impl HelpSystem {
                 description: "Toggle Verbose Mode",
             },
             Keybinding {
-                keys: "Ctrl+T",
-                description: "Toggle showing AI Thoughts",
+                keys: "Up/Down",
+                description: "Navigate history / Scroll",
             },
             Keybinding {
-                keys: "Ctrl+A",
-                description: "Toggle Auto-Approve / Go to start",
+                keys: "PgUp/PgDn",
+                description: "Scroll terminal/chat history",
             },
             Keybinding {
                 keys: "Ctrl+E",
@@ -158,10 +139,6 @@ impl HelpSystem {
                 keys: "Ctrl+U",
                 description: "Kill (delete) to start of line",
             },
-            Keybinding {
-                keys: "Ctrl+Shift+←/→",
-                description: "Adjust chat width",
-            },
         ]
     }
 
@@ -173,40 +150,12 @@ impl HelpSystem {
                 description: "Show this help",
             },
             SlashCommand {
-                command: "/pacore",
-                description: "Toggle parallel context retrieval mode",
-            },
-            SlashCommand {
-                command: "/pacore on|off",
-                description: "Enable/disable PaCoRe",
-            },
-            SlashCommand {
-                command: "/pacore rounds <n,n>",
-                description: "Set PaCoRe rounds (e.g., 4,1)",
-            },
-            SlashCommand {
-                command: "/pacore status",
-                description: "Show PaCoRe status",
-            },
-            SlashCommand {
-                command: "/pacore save",
-                description: "Save PaCoRe config to disk",
-            },
-            SlashCommand {
                 command: "/profile <name>",
                 description: "Switch to named profile",
             },
             SlashCommand {
                 command: "/model <name>",
                 description: "Set model for active profile",
-            },
-            SlashCommand {
-                command: "/model clear",
-                description: "Clear model override",
-            },
-            SlashCommand {
-                command: "/config <key> <val>",
-                description: "Update config (model, max_iterations)",
             },
             SlashCommand {
                 command: "/exec <command>",
@@ -217,8 +166,8 @@ impl HelpSystem {
                 description: "Toggle verbose mode",
             },
             SlashCommand {
-                command: "/logs [n]",
-                description: "Show recent logs (default: 20)",
+                command: "/jobs",
+                description: "List active jobs",
             },
         ]
     }

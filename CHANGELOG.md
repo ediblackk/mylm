@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-02-11
+
+### Added
+- **Approval Workflow**: Interactive approval system for all tool executions (web_search, shell, file ops, delegate)
+- **Action History**: Tool executions and approval requests now appear as AI messages in chat
+- **Timestamps**: Compact timestamps shown for messages with hidden context
+- **UI Improvements**: Better status bar messages and chat formatting
+
+### Changed
+- Auto-approval toggle (Ctrl+A) now properly syncs with orchestrator
+- Tool action messages are now more descriptive and user-friendly
+
 ## [0.1.0-alpha] - 2026-01-16
 
 ### Added

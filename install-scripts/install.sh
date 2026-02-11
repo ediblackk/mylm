@@ -253,12 +253,26 @@ build_binary() {
 
     # 2. If still no profile and it's a fresh install or forced, ask the user
     if [ -z "$initial_profile" ]; then
-        read -p "Use optimized release build (20 min) or fast dev build (7 min)? [r/D]: " build_type
-        if [[ "$build_type" =~ ^[Rr]$ ]]; then
-            BUILD_PROFILE="release"
-        else
-            BUILD_PROFILE="debug"
-        fi
+        echo "Select build profile:"
+        echo "  [1] release-fast - Fast build + good optimization (~10 min, recommended)"
+        echo "  [2] release      - Maximum optimization (~20 min, best performance)"
+        echo "  [3] dev-opt      - Fast build + some optimization (~7 min, good for dev)"
+        echo "  [4] debug        - Fastest build, no optimization (~5 min, development only)"
+        read -p "Choose [1/2/3/4] (default: 1): " build_choice
+        case "$build_choice" in
+            2)
+                BUILD_PROFILE="release"
+                ;;
+            3)
+                BUILD_PROFILE="dev-opt"
+                ;;
+            4)
+                BUILD_PROFILE="debug"
+                ;;
+            *)
+                BUILD_PROFILE="release-fast"
+                ;;
+        esac
     else
         BUILD_PROFILE="$initial_profile"
     fi
@@ -274,19 +288,36 @@ build_binary() {
 
     echo "🚀 Building mylm in $BUILD_PROFILE mode..."
     
-    if [ "$BUILD_PROFILE" == "release" ]; then
-        if command -v sccache &> /dev/null; then
-            RUSTC_WRAPPER=sccache cargo build --release
-        else
-            cargo build --release
-        fi
-    else
-        if command -v sccache &> /dev/null; then
-            RUSTC_WRAPPER=sccache cargo build
-        else
-            cargo build
-        fi
-    fi
+    case "$BUILD_PROFILE" in
+        release)
+            if command -v sccache &> /dev/null; then
+                RUSTC_WRAPPER=sccache cargo build --release
+            else
+                cargo build --release
+            fi
+            ;;
+        release-fast)
+            if command -v sccache &> /dev/null; then
+                RUSTC_WRAPPER=sccache cargo build --profile release-fast
+            else
+                cargo build --profile release-fast
+            fi
+            ;;
+        dev-opt)
+            if command -v sccache &> /dev/null; then
+                RUSTC_WRAPPER=sccache cargo build --profile dev-opt
+            else
+                cargo build --profile dev-opt
+            fi
+            ;;
+        *)
+            if command -v sccache &> /dev/null; then
+                RUSTC_WRAPPER=sccache cargo build
+            else
+                cargo build
+            fi
+            ;;
+    esac
 }
 
 install_binary() {

@@ -1,16 +1,24 @@
-# My Little Minion (mylm)
+# My Little Minion | My Language Model | My Learning Machine | My Local Model (MyLM) 
 
 [![Rust](https://img.shields.io/badge/rust-stable-brightgreen.svg)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Terminal AI](https://img.shields.io/badge/Terminal-AI-blue.svg)](.)
 
+## Demo
+
+<video src="assets/1.mp4" width="800" controls></video>
+
+<video src="assets/2.mp4" width="800" controls></video>
+
+<video src="assets/3.mp4" width="800" controls></video>
+
 <p align="center">
   <img src="assets/logo.png" alt="mylm Logo" width="180">
 </p>
 
-## The AI assistant that actually understands your terminal
+## Safe Personal AI assistance into your terminal
 
-**mylm** is a privacy-focused, multi-agent terminal AI assistant built in Rust. It sees your terminal, remembers your projects, delegates tasks to specialized sub-agents, and safely executes commands—all while keeping you in control.
+**MyLM** is a privacy-focused, multi-agent terminal AI assistant built in Rust. It can see in your terminal, remember your projects, delegates tasks to specialized sub-agents, and safely executes commands—all while keeping you in control.
 
 ### Features
 
@@ -19,7 +27,13 @@
 - **Full terminal context** — tmux integration, zero manual context sharing
 - **Background job system** — Async delegation, non-blocking
 - **Safety-first execution** — Allowlists, approval workflow, PTY isolation
-- **Lightweight & fast** — Rust-native, sub-100ms cold start
+- **Lightweight & fast** — Fast cold starts and quick execution
+
+### KNOWN ISSUES / SOON TO BE SOLVER
+- **Context grows uncontrollably** - when simply conversating with some history, context can grow way more than required; most likely some repeated data/content not caching; 
+- **On stall, workers are not approved to contine** - in order to prevent unending loops, wasted resources and precise actions, sub-agent workers require approval for more actions after a number of actions (15); as they reach it, main agent does not react and does not allow further actions;
+- **Memory needs refining** - scribe function is currently disabled; it is suppossed to continuously memorise actions and information, and inject information relevant to context to make the main model aware; this adds complexity and for basic functions is a bit overkill; totally refining this later though;
+- **Code organisation and cleanup** - I am aware there is still mess around in  codebase; my main concern was to finish it and have something fast, stable and usable in day to day tasks; so far I am glad with how it runs, it's my first Rust project and I love it.
 
 ---
 
@@ -36,10 +50,17 @@ Installs to `~/.local/bin` without sudo.
 
 ### First Use
 
-ai                    # Start the interactive hub
-ai "question"         # Ask a one-off question
-ai pop                # Pop terminal context (requires tmux)
-ai interactive        # Full TUI session
+Unless you changed the alias, simply type "ai" into your terminal. Proceed to Config your preferred providers, select main model, set your context limit and costs and then simply proceed to "Start TUI Session".
+
+I also highly recommend you set the web_search API too, as it enhances the model's capacity to provide relevant answers.
+
+I use it as chat, mainly tired of key aspects when using llm's from main providers:
+- On long contexts, chat apps crash
+- Even on not so long, they can still lag/crash
+- I don't like the fact that all my data is stored externally
+- I tried other personal AI assistants apps and simply did not match very well.
+
+This does not require docker or any other special configurations to work. It can be a little bit tricky to get everything required to build and it does take some time to finish (especially the optimized release version, on my local i7-7700HQ it took almost 40 minutes to finish). But the bianry itself is pretty small and quick.
 
 ---
 
