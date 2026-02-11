@@ -6,15 +6,12 @@
 
 ## Demo
 
-<video src="assets/1.mp4" width="800" controls></video>
+https://github.com/user-attachments/assets/placeholder1
 
-<video src="assets/2.mp4" width="800" controls></video>
+https://github.com/user-attachments/assets/placeholder2
 
-<video src="assets/3.mp4" width="800" controls></video>
+https://github.com/user-attachments/assets/placeholder3
 
-<p align="center">
-  <img src="assets/logo.png" alt="mylm Logo" width="180">
-</p>
 
 ## Safe Personal AI assistance into your terminal
 
@@ -29,11 +26,10 @@
 - **Safety-first execution** — Allowlists, approval workflow, PTY isolation
 - **Lightweight & fast** — Fast cold starts and quick execution
 
-### KNOWN ISSUES / SOON TO BE SOLVER
-- **Context grows uncontrollably** - when simply conversating with some history, context can grow way more than required; most likely some repeated data/content not caching; 
-- **On stall, workers are not approved to contine** - in order to prevent unending loops, wasted resources and precise actions, sub-agent workers require approval for more actions after a number of actions (15); as they reach it, main agent does not react and does not allow further actions;
-- **Memory needs refining** - scribe function is currently disabled; it is suppossed to continuously memorise actions and information, and inject information relevant to context to make the main model aware; this adds complexity and for basic functions is a bit overkill; totally refining this later though;
-- **Code organisation and cleanup** - I am aware there is still mess around in  codebase; my main concern was to finish it and have something fast, stable and usable in day to day tasks; so far I am glad with how it runs, it's my first Rust project and I love it.
+<p align="center">
+  <img src="assets/logo.png" alt="mylm Logo" width="180">
+</p>
+
 
 ---
 
@@ -83,7 +79,12 @@ Most AI assistants are a single brain trying to do everything. mylm uses an **or
 - **Delegate tool** spawns specialized agents with their own toolsets
 - **Job registry** tracks progress across all agents
 
-Research a library while refactoring code—all at once.
+### KNOWN ISSUES / SOLVING SOON
+- **Context grows uncontrollably** - when simply conversating with some history, context can grow way more than required; most likely some repeated data/content not caching; 
+- **On stall, workers are not approved to contine** - in order to prevent unending loops, wasted resources and precise actions, sub-agent workers require approval for more actions after a number of actions (15); as they reach it, main agent does not react and does not allow further actions;
+- **Memory needs refining** - scribe function is currently disabled; it is suppossed to continuously memorise actions and information, and inject information relevant to context to make the main model aware; this adds complexity and for basic functions is a bit overkill; totally refining this later though;
+- **Code organisation and cleanup** - I am aware there is still mess around in  codebase; my main concern was to finish it and have something fast, stable and usable in day to day tasks; so far I am glad with how it runs, it's my first Rust project and I love it.
+
 
 ### 🔄 PaCoRe: Parallel Consensus Reasoning
 (https://github.com/stepfun-ai/PaCoRe)
@@ -100,7 +101,6 @@ Every command goes through:
 2. **Allowlist checking** — Known safe commands
 3. **User approval** — You see it before it runs
 
-Run with `--execute` for trusted commands. Use `--force` only when you know what you're doing.
 
 ### 🌐 10+ Built-in Tools
 - **shell** — Execute with safety checks
