@@ -31,11 +31,6 @@
 - **Safety-first execution** — Allowlists, approval workflow, PTY isolation
 - **Lightweight & fast** — Fast cold starts and quick execution
 
-<p align="center">
-  <img src="assets/logo.png" alt="mylm Logo" width="180">
-</p>
-
-
 ---
 
 ## Quick Start
