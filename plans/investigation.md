@@ -1,305 +1,274 @@
-# Codebase Investigation Report
-
-## Project Overview
-- **Project**: mylm (My Local Model)
-- **Language**: Rust
-- **Architecture**: TUI-based AI agent with V1 (simple) and V2 (complex) execution paths
-
-## Investigation Methodology
-1. Read and analyze code structure
-2. Document findings incrementally
-3. Identify issues and improvement opportunities
-
----
-
-## Section 1: V1 vs V2 Agent Architecture
-
-### 1.1 V1 Agent (core/src/agent/core.rs)
-**Purpose**: Simple agentic loop for lightweight usage
-
-**Key Components**:
-- `Agent` struct: Main V1 agent implementation
-- Sequential execution loop
-- Simple tool execution (no background jobs)
-- JSON-based short-term memory
-
-**Execution Flow**:
-```
-User Request -> Agent::step() -> Tool Execution -> Response
-```
-
-### 1.2 V2 Agent (core/src/agent/v2/core.rs)
-**Purpose**: Complex event-driven agent with parallel execution
-
-**Key Components**:
-- `AgentV2` struct: Main V2 agent implementation
-- `AgentV2Config`: Configuration struct
-- Event-driven execution loop (`event_driven.rs`)
-- Background job support via `delegate` tool
-- LanceDB + FastEmbed vector memory
-
-**Execution Flow**:
-```
-User Request -> AgentV2::run_event_driven() -> Event Loop -> 
-  -> Tool Execution (parallel possible) -> Background Jobs -> Response
-```
-
-### 1.3 Key Differences
-
-| Feature | V1 | V2 |
-|---------|----|----|
-| Execution | Sequential | Event-driven |
-| Background Jobs | No | Yes |
-| Memory | JSON short-term | LanceDB vector |
-| Parallel Tools | No | Yes |
-| Worker Model | N/A | Main + Workers |
-
----
-
-## Section 2: Tool System
-
-### 2.1 Tool Trait (core/src/agent/tool.rs)
-```rust
-pub trait Tool: Send + Sync {
-    fn name(&self) -> &str;
-    fn description(&self) -> &str;
-    fn usage(&self) -> &str;
-    async fn call(&self, args: &str) -> Result<ToolOutput, ...>;
-    fn kind(&self) -> ToolKind;
-}
-```
-
-### 2.2 Tool Categories
-- **Internal**: Memory, web_search, delegate (silent execution)
-- **Terminal**: execute_command, shell tools (visible in terminal)
-- **Web**: crawl (web-based)
-
-### 2.3 Available Tools
-| Tool | Category | Purpose |
-|------|----------|---------|
-| delegate | Internal | Spawn background workers |
-| execute_command | Terminal | Run shell commands |
-| memory | Internal | Store/retrieve memories |
-| web_search | Internal | Search the web |
-| grep/tail/wc | Terminal | Unix utilities |
-| read_file/write_file | Terminal | File operations |
-
----
-
-## Section 3: Background Jobs System
-
-### 3.1 Delegate Tool (core/src/agent/tools/delegate.rs)
-**Purpose**: Spawn worker agents for parallel execution
-
-**Key Issue Identified**: 
-- Main agent confused about how to use background jobs
-- Tries to use `/jobs` bash command (doesn't exist)
-- Should use `delegate` tool and continue with own work
-
-**Worker Spawn Flow**:
-1. DelegateTool::call() receives objective
-2. spawn_worker() creates AgentV2 for subtask
-3. Worker runs in background tokio task
-4. JobRegistry tracks job status
-
-### 3.2 Job Registry (core/src/agent/v2/jobs.rs)
-**Purpose**: Track active and completed background jobs
-
-**Key Methods**:
-- `create_job()` - Register new job
-- `complete_job()` - Mark job complete
-- `stall_job()` - Mark job stalled
-- `poll_updates()` - Check for completed jobs
-
----
-
-## Section 4: Configuration System
-
-### 4.1 Config Structure (core/src/config/v2/config.rs)
-```rust
-pub struct ConfigV2 {
-    pub endpoint: EndpointConfig,      // LLM connection
-    pub agent: AgentConfig,            // Agent behavior
-    pub features: FeaturesConfig,      // Feature toggles
-    pub profiles: HashMap<String, Profile>, // Profile overrides
-}
-```
-
-### 4.2 AgentConfig
-```rust
-pub struct AgentConfig {
-    pub max_iterations: usize,          // Default: 10
-    pub max_actions_before_stall: usize, // Default: 15 (NEW)
-    pub max_consecutive_messages: u32,   // Default: 3 (NEW)
-    pub max_recovery_attempts: u32,      // Default: 3 (NEW)
-    pub main_model: String,
-    pub worker_model: String,
-    pub worker_limit: usize,            // Default: 20
-}
-```
-
----
-
-## Section 5: Issues Identified
-
-### Issue 1: Missing Tool in Prompt
-**Location**: `core/src/config/v2/prompts.rs:90`
-**Problem**: Prompt mentions `codebase_search` tool which doesn't exist
-**Tools Available**: `grep`, `find` for code search
-**Fix**: Changed to `grep`
-
-### Issue 2: Main Agent Confusion About Background Jobs
-**Location**: Orchestrator chat session loop
-**Problem**: Main agent tries to use `/jobs` bash command instead of delegate tool
-**Root Cause**: Insufficient documentation in system prompt about delegate workflow
-
-### Issue 3: Terminal Delegate Not Set on Orchestrator
-**Location**: `src/terminal/app/state.rs`
-**Problem**: Orchestrator created without terminal delegate, causing "Terminal delegate not available" errors
-**Fix**: Added `set_terminal_delegate()` call in `new_with_orchestrator`
-
-### Issue 4: Workers Not Returning Final Answers
-**Location**: `core/src/agent/v2/driver/event_driven.rs`
-**Problem**: Workers execute tools but don't recognize task completion
-**Root Cause**: System prompt doesn't emphasize completion criteria
-**Fix**: Added "TASK COMPLETION RULE" to worker system prompt
-
-### Issue 5: Hardcoded Values
-**Location**: Multiple files
-**Problem**: Hardcoded defaults instead of config-driven values
-**Fix**: Added new config fields and propagated them through AgentV2Config
-
----
-
-## Section 6: Code Duplication
-
-### 6.1 Config Structs
-- `AgentConfig` (V1) vs `AgentV2Config` (V2)
-- Similar fields but separate structs
-- Both need updating when adding new config options
-
-### 6.2 Factory Patterns
-- `AgentBuilder` for V1
-- Direct `AgentV2::new_with_config()` for V2
-- `create_agent_for_session()` in `factory.rs`
-- `create_agent_v2_for_session()` in `factory.rs`
-
-### 6.3 Execution Loops
-- `run_agent_loop_v1()` - V1 sequential loop
-- `run_event_driven()` - V2 event-driven loop
-- `run_chat_session_loop_v2()` - V2 chat session loop
-
----
-
-## Section 7: Potential Improvements
-
-### Improvement 1: Unified Config
-**Idea**: Single `AgentConfig` that works for both V1 and V2
-**Benefit**: Less duplication, easier maintenance
-**Challenge**: V1 and V2 have different capabilities
-
-### Improvement 2: Better Tool Discovery
-**Idea**: Generate tool documentation from actual tool implementations
-**Benefit**: Prompts always match available tools
-**Current**: Tools listed in prompts.rs may not exist (e.g., codebase_search)
-
-### Improvement 3: Worker Lifecycle Visualization
-**Idea**: Better UI for tracking worker progress
-**Current**: Jobs panel shows basic status
-**Desired**: Real-time progress, action history, result preview
-
-### Improvement 4: Simplified Background Job UX
-**Idea**: Main agent should understand delegate workflow better
-**Current**: Tries to manage jobs via bash commands
-**Desired**: Natural language job management
-
----
-
-## Ongoing Investigation...
-
----
-
-## Section 8: Root Cause Analysis - Background Job Confusion
-
-### Problem
-Main agent tries to use `/jobs` bash command instead of `delegate` tool.
-
-### Evidence
-From screenshot:
-```
-bash: /jobs: No such file or directory
-```
-
-### Expected Behavior
-Agent should call `delegate` tool with objective to spawn workers.
-
-### Actual Behavior
-Agent calls `execute_command` with `/jobs cancel ...` which fails.
-
-### Code Analysis
-
-**Orchestrator has delegate handling** (loops.rs:742-745):
-```rust
-if tool == "delegate" {
-    event_bus.publish(CoreEvent::StatusUpdate {
-        message: "Workers spawned".to_string(),
-    });
-}
-```
-
-**Delegate tool is registered** (terminal/mod.rs:280):
-```rust
-agent_v2.tools.insert(delegate_tool.name().to_string(), Arc::new(delegate_tool));
-```
-
-### Root Cause
-The LLM doesn't understand the relationship between:
-1. `delegate` tool (spawns workers)
-2. Background jobs panel (shows status)
-3. How to interact with them
-
-It sees jobs mentioned in UI/context and tries to use bash commands.
-
-### Why Previous Fixes Didn't Work
-- Added "Background Jobs" section to system prompt
-- Added "TASK COMPLETION RULE" to worker prompt
-- But the main agent still doesn't connect "delegate" with "background jobs"
-
-### Missing Concept
-The agent doesn't understand that:
-- Background jobs are CREATED by calling `delegate` tool
-- Once created, they run automatically
-- No bash commands needed to manage them
-
-### Potential Solutions
-
-#### Solution 1: Better Prompt Engineering
-Add explicit examples to system prompt:
-```
-EXAMPLE - Spawning Background Workers:
-User: "Check 3 files in parallel"
-You: Call delegate tool with objective "Check file 1"
-      Call delegate tool with objective "Check file 2"  
-      Call delegate tool with objective "Check file 3"
-      Continue chatting while workers run
-      System will notify when workers complete
-```
-
-#### Solution 2: Remove Jobs References from Context
-Don't mention `/jobs` or job IDs to the agent.
-Let the system handle worker lifecycle transparently.
-
-#### Solution 3: Create `jobs` Tool
-Create an actual `jobs` tool that wraps job management:
-- `jobs list` - List active jobs
-- `jobs cancel <id>` - Cancel job
-- `jobs status <id>` - Get job status
-
-This would give the agent a proper tool instead of bash commands.
-
-### Recommendation
-Implement Solution 3 (Create `jobs` tool) as it provides:
-- Clear interface for job management
-- Consistent with tool-based architecture
-- LLM can understand and use properly
+# Infinite Retry Loop Investigation
+
+## Current Behavior
+When the LLM provider returns a 400 error (e.g., context too long, invalid request):
+1. The error propagates up from `LlmClient` to `ContractRuntime`.
+2. `ContractRuntime` catches it and returns an `Observation::RuntimeError`.
+3. The `Session` sees the `Observation` and publishes it as a `KernelEvent::RuntimeError`.
+4. The `LLMBasedEngine` (kernel) receives the `RuntimeError`.
+5. **CRITICAL ISSUE**: The engine treats the error as an input event and asks the LLM "What should I do?".
+6. The LLM call fails again with the same 400 error.
+7. Repeat infinite loop.
+
+## Root Causes
+
+1. **`LLMBasedEngine` Response to Errors**:
+   - In `core/src/agent/cognition/llm_engine.rs`, `InputEvent::RuntimeError` triggers an exit:
+     ```rust
+     Some(InputEvent::RuntimeError { error, .. }) => {
+         // ...
+         Ok(Transition::exit(
+             state.clone(),
+             AgentExitReason::Error(format!("Runtime error: {}", error))
+         ))
+     }
+     ```
+   - This returns `AgentDecision::Exit(AgentExitReason::Error(...))`.
+
+2. **`KernelAdapter` Conversion**:
+   - In `core/src/agent/cognition/kernel_adapter.rs`:
+     ```rust
+     AgentDecision::Exit(reason) => {
+         crate::info_log!("[KERNEL_ADAPTER] Exit decision: {:?}", reason);
+         Intent::Halt(match reason {
+             AgentExitReason::Error(msg) => ExitReason::Error(msg),
+             // ...
+         })
+     }
+     ```
+   - It returns `Intent::Halt(ExitReason::Error(...))`.
+
+3. **`Session` Loop Logic Flaw**:
+   - In `core/src/agent/contract/session.rs`, `run()` loop calls `process_events`.
+   - `process_events` -> `kernel.process` -> returns graph with `Intent::Halt`.
+   - `Session` merges this into `pending_graph`.
+   - `execute_ready_intents` executes `Intent::Halt`.
+   - `ContractRuntime` returns `Observation::Halted`.
+   
+   **BUT**: The `execute_ready_intents` function also has this logic:
+   ```rust
+   // Check for LLM/runtime errors
+   if let Observation::RuntimeError { error, .. } = obs {
+       has_error = true;
+       // ...
+       let _ = self.output_tx.send(OutputEvent::Error { ... });
+   }
+   ```
+   And `Session::run` loop:
+   ```rust
+   // Wait for either transport events or user input
+   tokio::select! {
+       batch = self.transport.next_batch() => {
+           // ...
+           let new_graph = self.process_events(events).await?;
+           // ...
+           let observations = self.execute_ready_intents().await?;
+           
+           // Check for halt observation
+           for (_, obs) in &observations {
+               if matches!(obs, Observation::Halted { .. }) {
+                   return Ok(SessionResult { ... });
+               }
+           }
+           
+           // Convert to events and publish back to transport
+           for (_, obs) in observations {
+               self.publish_event(obs.into_event()).await?;
+           }
+       }
+   }
+   ```
+
+   **The Loop**:
+   1. `LlmClient` fails -> `Observation::RuntimeError`.
+   2. `Session` publishes `KernelEvent::RuntimeError`.
+   3. Transport sends it back to `Session` (next batch).
+   4. `Session` calls `kernel.process(RuntimeError)`.
+   5. `Kernel` (via Adapter & Engine) returns `Intent::Halt`.
+   6. `Session` executes `Intent::Halt`.
+   7. `Runtime` returns `Observation::Halted`.
+   8. `Session` sees `Observation::Halted` and returns `Ok`.
+
+   **So why isn't it stopping?**
+
+   **Hypothesis E**: The `RuntimeError` is NOT being generated as `Observation::RuntimeError`.
+   - `LlmClientCapability` (core/src/agent/runtime/impls/llm_client.rs):
+     ```rust
+     Err(e) => Err(LLMError::new(e.to_string())),
+     ```
+   - `ContractRuntime` (core/src/agent/runtime/contract_runtime.rs):
+     ```rust
+     .map_err(|e| RuntimeError::LLMRequestFailed { ... })?;
+     ```
+   - `DagExecutor` (core/src/agent/runtime/impls/dag_executor.rs):
+     ```rust
+     Ok((id, Err(e))) => {
+         errors.push((id, e));
+     }
+     ```
+   - `ContractRuntime::execute_dag`:
+     ```rust
+     observations.push((
+         *intent_id,
+         Observation::RuntimeError { ... },
+     ));
+     ```
+   
+   It seems the path to `Observation::RuntimeError` is solid.
+
+   **Hypothesis F**: The `KernelAdapter` implementation of `process` is flawed.
+   ```rust
+   fn process(&mut self, events: &[KernelEvent]) -> Result<IntentGraph, KernelError> {
+       // ...
+       for event in events {
+           // ...
+           if let Some(input) = self.convert_event(event) {
+               let transition = self.engine.step(&self.state, Some(input))?;
+               // ...
+               if !matches!(transition.decision, AgentDecision::None) {
+                    // Adds intent to graph
+               }
+           }
+       }
+       // ...
+   }
+   ```
+   - If `convert_event` returns `Some(InputEvent::RuntimeError)`, `engine.step` should return `Exit`.
+   - `convert_decision` should return `Intent::Halt`.
+   
+   **Hypothesis G**: `InputEvent::RuntimeError` handler in `LLMBasedEngine` was added RECENTLY and might not be compiled/running in the version exhibiting the bug?
+   - The file content I read shows it exists.
+   
+   **Hypothesis H**: The `LlmClient` error is NOT a runtime error but a `ToolResult::Error`?
+   - No, LLM calls are `Intent::RequestLLM`, not `Intent::CallTool`.
+   
+   **Hypothesis I**: The infinite loop is happening inside `LlmClient`'s retry logic despite `is_retryable_error` logic?
+   - `RetryLLM` calls `is_retryable_error`.
+   - If `400` is returned, it returns `Err`.
+   
+   **Hypothesis J**: The error message does NOT contain "400 bad request" or other strings checked in `is_retryable_error`?
+   - `is_retryable_error` (core/src/agent/runtime/impls/retry.rs):
+     ```rust
+     if msg.contains("400 bad request") ...
+     ```
+   - If the error from `reqwest` is just "HTTP status client error (400 Bad Request)" maybe it matches.
+   - But if it's "context length exceeded" (often 400), does it match?
+     ```rust
+     || msg.contains("context length")
+     ```
+   - If it DOES NOT match, `RetryLLM` retries.
+   - `RetryConfig` defaults to 3 retries.
+   - It sleeps between retries.
+   - This would delay for a few seconds, but eventually fail.
+   - This fits the "UI Freezing" description if the UI is blocked during sleep (which uses `tokio::time::sleep`, so it shouldn't block unrelated tasks unless they are on the same thread/runtime without yield points).
+   
+   **Hypothesis K**: The `LlmClient` logic for 400 errors:
+   - `retry_with_backoff`:
+     ```rust
+     if status.is_client_error() ... { return Ok(response); }
+     ```
+   - It returns success to `chat_openai`.
+   - `chat_openai`:
+     ```rust
+     status => { bail!("API request failed ({}): {}", status, error_msg); }
+     ```
+   - Returns `Err`.
+   - `RetryLLM` sees `Err`.
+   - Checks `is_retryable_error`.
+   - If `true`, it retries.
+   - If `false`, it returns `Err` immediately.
+   
+   **CRITICAL**: If `is_retryable_error` returns `true` for a 400 error, `RetryLLM` will retry it 3 times.
+   - AND `LLMBasedEngine` might be receiving a generic error message that it tries to "fix" by asking the LLM again?
+   
+   **Wait**, if `RetryLLM` fails after retries, it returns `Err`.
+   - `ContractRuntime` returns `Observation::RuntimeError`.
+   - `Session` passes to Kernel.
+   - Kernel exits.
+   - Session halts.
+   
+   **So where is the loop?**
+   Maybe the `Session` loop logic regarding `pending_graph`?
+   ```rust
+   // Check if graph complete
+   if let Some(ref graph) = self.pending_graph {
+       if graph.is_complete(...) {
+           // ...
+           self.pending_graph = None;
+       }
+   }
+   ```
+   - If `Observation::RuntimeError` is returned, the intent is marked as completed (failed).
+   - Graph becomes complete.
+   - `pending_graph` = None.
+   - `Session` waits for events.
+   - `Observation::RuntimeError` event arrives.
+   - Kernel processes it -> returns `Halt`.
+   - `pending_graph` = Some(Halt).
+   - `execute_ready_intents` -> executes Halt -> `Observation::Halted`.
+   - `Session` loop checks `Observation::Halted` -> returns.
+   
+   **Unless...** `LLMBasedEngine` does NOT return `Exit` for `RuntimeError`.
+   - Let's re-read `core/src/agent/cognition/llm_engine.rs`.
+   
+   ```rust
+   // Runtime error - exit with error instead of retrying infinitely
+   Some(InputEvent::RuntimeError { error, .. }) => {
+       crate::info_log!("[LLM_ENGINE] RuntimeError received: {}. Exiting.", error);
+       Ok(Transition::exit(
+           state.clone(),
+           AgentExitReason::Error(format!("Runtime error: {}", error))
+       ))
+   }
+   
+   // Default - no action (was causing infinite loop by requesting LLM)
+   _ => {
+       Ok(Transition::new(state.clone(), AgentDecision::None))
+   }
+   ```
+   - If `InputEvent` is NOT `RuntimeError` (e.g. if `convert_event` fails), it hits `_`.
+   - `AgentDecision::None`.
+   - `KernelAdapter` converts `None` to `Intent::Halt(ExitReason::Completed)`.
+   - Session halts.
+   
+   **Is it possible that `InputEvent::RuntimeError` case is NOT causing an exit?**
+   - The code says `Transition::exit`.
+   
+   **Maybe the Error is not `RuntimeError`?**
+   - If `RetryLLM` swallows the error? No.
+   
+   **Maybe `LlmClient` is the one looping infinitely?**
+   - `retry_with_backoff` loop.
+   - `loop { ... }`.
+   - `max_retries = 5`.
+   - It breaks if `attempt >= max_retries`.
+   - It sleeps.
+   - This isn't infinite.
+   
+   **What if `LLMBasedEngine` asks the LLM again?**
+   - The user report says: "Investigate the cause of the infinite retry loop... when an LLM provider returns a 400 error."
+   - If the code I'm reading ALREADY HAS the fix (`RuntimeError -> Exit`), then the code I'm looking at might be newer than what the user thinks, OR the fix isn't working.
+   
+   **Let's assume the fix isn't working.**
+   - Why would `RuntimeError` be treated as something else?
+   - In `KernelAdapter::convert_event`:
+     ```rust
+     KernelEvent::RuntimeError { intent_id, error } => {
+         // ...
+         Some(InputEvent::RuntimeError { ... })
+     }
+     ```
+   
+   **Hypothesis L**: The `LlmClient` error message `e.to_string()` contains "400" but `is_retryable_error` logic is flawed or the message format is different.
+   
+   **Hypothesis M**: The `Session` receives `Observation::RuntimeError` but `publish_event` fails?
+   - `self.transport.publish(envelope).await`
+   - `InMemoryTransport` shouldn't fail.
+   
+   **Let's instrument `LLMBasedEngine` to see if it receives the error.**
+   
+## Action Items
+1.  Add logging to `LlmClient` to print the exact error message on failure.
+2.  Add logging to `KernelAdapter` to confirm `RuntimeError` conversion.
+3.  Add logging to `LLMBasedEngine::step` to confirm input receipt.
 

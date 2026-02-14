@@ -1,11 +1,18 @@
-profile = "fast"
+profile = "default"
+active_provider = "openai"
+tmux_autostart = true
 
 [endpoint]
 provider = "openai"
-model = "gpt-4o"
+model = "default-model"
 timeout_secs = 30
 
+[providers]
+
 [profiles]
+
+[features]
+agent_version = "V2"
 
 [features.web_search]
 enabled = false
@@ -17,3 +24,12 @@ enabled = true
 auto_record = true
 auto_context = true
 max_context_memories = 10
+
+[features.prompts]
+inject_capabilities = true
+inject_memory_docs = true
+hot_memory_entries = 5
+
+[features.pacore]
+enabled = false
+rounds = "4,1"

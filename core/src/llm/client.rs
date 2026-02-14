@@ -74,8 +74,7 @@ pub struct LlmClient {
     job_id: Mutex<Option<String>>,
     /// Cancellation token for aborting retries
     cancel_token: Mutex<Option<tokio_util::sync::CancellationToken>>,
-    /// Optional job registry for updating metrics
-    job_registry: Mutex<Option<crate::agent::v2::jobs::JobRegistry>>,
+    // TODO: restore job_registry with new architecture
 }
 
 impl LlmClient {
@@ -96,7 +95,6 @@ impl LlmClient {
             is_worker: false,
             job_id: Mutex::new(None),
             cancel_token: Mutex::new(None),
-            job_registry: Mutex::new(None),
         })
     }
 
@@ -139,9 +137,15 @@ impl LlmClient {
         self.job_id.lock().clone()
     }
 
-    /// Set the job registry for updating metrics
-    pub fn set_job_registry(&self, job_registry: crate::agent::v2::jobs::JobRegistry) {
-        *self.job_registry.lock() = Some(job_registry);
+    /// Set the job registry for tracking background jobs (stub)
+    pub fn set_job_registry(&self, _job_registry: ()) {
+        // TODO: restore with new architecture
+    }
+
+    /// Get the job registry if set (stub)
+    pub fn get_job_registry(&self) -> Option<()> {
+        // TODO: restore with new architecture
+        None
     }
 
     /// Set the cancellation token for this client
@@ -206,44 +210,6 @@ impl LlmClient {
                     job_id, prompt_tokens, completion_tokens);
             }
             
-            // Update the job registry if available
-            let registry_guard = self.job_registry.lock();
-            if let Some(ref registry) = *registry_guard {
-                // Calculate total context tokens (accumulated prompt + completion tokens)
-                // This gives us the actual context window usage
-                let (old_total, total_tokens) = registry.list_all_jobs()
-                    .iter()
-                    .find(|j| &j.id == job_id)
-                    .map(|j| {
-                        let old = j.metrics.total_tokens;
-                        let new = old + prompt_tokens + completion_tokens;
-                        (old, new)
-                    })
-                    .unwrap_or((0, prompt_tokens + completion_tokens));
-                
-                crate::info_log!("[METRICS CALC] job={}, old_total={}, new_prompt={}, new_completion={}, calculated_total={}",
-                    &job_id[..8.min(job_id.len())], old_total, prompt_tokens, completion_tokens, total_tokens);
-                
-                let max_context = self.config.max_context_tokens;
-                registry.update_metrics(job_id, prompt_tokens, completion_tokens, total_tokens as usize, max_context);
-                
-                // Publish metrics update event for real-time UI updates
-                if let Some(event_bus) = registry.get_event_bus() {
-                    let (current_prompt, current_completion, current_total) = registry.list_all_jobs()
-                        .iter()
-                        .find(|j| &j.id == job_id)
-                        .map(|j| (j.metrics.prompt_tokens, j.metrics.completion_tokens, j.metrics.total_tokens))
-                        .unwrap_or((prompt_tokens, completion_tokens, prompt_tokens + completion_tokens));
-                    
-                    event_bus.publish(crate::agent::event_bus::CoreEvent::WorkerMetricsUpdate {
-                        job_id: job_id.clone(),
-                        prompt_tokens: current_prompt,
-                        completion_tokens: current_completion,
-                        total_tokens: current_total,
-                        context_tokens: total_tokens as usize,
-                    });
-                }
-            }
         }
     }
 
@@ -326,10 +292,33 @@ impl LlmClient {
                 agent_type, job_info, rate_limit_duration);
         }
 
+        // COMMENTED OUT TO TEST ERROR HANDLING
+        // Adjust max_tokens if it exceeds remaining context window
+        let final_request = request.clone();
+        // let max_context = self.config.max_context_tokens;
+        // let available_for_completion = max_context.saturating_sub(estimated_input_tokens);
+        // 
+        // if let Some(req_max) = final_request.max_tokens {
+        //     if req_max as usize > available_for_completion {
+        //         let adjusted = available_for_completion.max(1) as u32;
+        //         crate::warn_log!("[{}] {} Request max_tokens ({}) exceeds available context ({}), adjusting to {}", 
+        //             agent_type, job_info, req_max, available_for_completion, adjusted);
+        //         final_request.max_tokens = Some(adjusted);
+        //     }
+        // } else if self.config.max_tokens.unwrap_or(0) as usize > available_for_completion {
+        //     // If request doesn't specify, check client config
+        //     let adjusted = available_for_completion.max(1) as u32;
+        //     let config_max = self.config.max_tokens.unwrap_or(0);
+        //     crate::warn_log!("[{}] {} Client config max_tokens ({}) exceeds available context ({}), using {}", 
+        //         agent_type, job_info, config_max, available_for_completion, adjusted);
+        //     // We'll pass this adjusted value to the request if it's missing
+        //     final_request.max_tokens = Some(adjusted);
+        // }
+
         let request_start = std::time::Instant::now();
         let result = match self.config.provider {
-            LlmProvider::OpenAiCompatible | LlmProvider::MoonshotKimi => self.chat_openai(request).await,
-            LlmProvider::GoogleGenerativeAi => self.chat_gemini(request).await,
+            LlmProvider::OpenAiCompatible | LlmProvider::MoonshotKimi => self.chat_openai(&final_request).await,
+            LlmProvider::GoogleGenerativeAi => self.chat_gemini(&final_request).await,
         };
         let request_duration = request_start.elapsed();
         
@@ -418,6 +407,13 @@ impl LlmClient {
                 Ok(response) => {
                     let status = response.status();
                     if status.is_success() {
+                        return Ok(response);
+                    }
+                    
+                    // Handle 4xx client errors - don't retry
+                    if status.is_client_error() && status != StatusCode::TOO_MANY_REQUESTS {
+                        // 400, 401, 403, 404, etc. - these are client errors, don't retry
+                        crate::error_log!("[LLM_CLIENT] 4xx error detected ({}), NOT retrying. Response body might contain details.", status);
                         return Ok(response);
                     }
                     
@@ -515,7 +511,7 @@ impl LlmClient {
         let body = OpenAiRequest {
             model: self.config.model.clone(),
             messages: &request.messages,
-            max_completion_tokens: self.config.max_tokens,
+            max_completion_tokens: request.max_tokens, // Use the request's max_tokens (may be adjusted by chat())
             stream: Some(false),
             tools: request.tools.as_ref().map(|t| t.iter().map(|tool| OpenAiTool {
                 type_: tool.type_.clone(),
@@ -597,6 +593,7 @@ impl LlmClient {
                     .and_then(|v| v.get("error").and_then(|e| e.get("message")))
                     .and_then(|v| v.as_str())
                     .unwrap_or("Unknown error");
+                crate::error_log!("API request failed ({}): {}. Body: {:?}", status, error_msg, error_body);
                 bail!("API request failed ({}): {}", status, error_msg);
             }
         }
@@ -792,7 +789,7 @@ impl LlmClient {
         let body = OpenAiRequest {
             model: self.config.model.clone(),
             messages: &request.messages,
-            max_completion_tokens: self.config.max_tokens,
+            max_completion_tokens: request.max_tokens, // Use the request's max_tokens (may be adjusted by chat())
             stream: Some(true),
             tools: request.tools.as_ref().map(|t| t.iter().map(|tool| OpenAiTool {
                 type_: tool.type_.clone(),
@@ -877,26 +874,57 @@ impl LlmClient {
     /// Build headers for API requests
     fn build_headers(&self) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
+        
+        // Get original provider type from extra_params (set by config bridge)
+        let provider_type = self.config.extra_params.get("provider_type")
+            .map(|s| s.as_str())
+            .unwrap_or("");
 
         match self.config.provider {
             LlmProvider::OpenAiCompatible | LlmProvider::MoonshotKimi => {
                 headers.insert(CONTENT_TYPE, "application/json".parse().context("Invalid content-type header")?);
                 
+                // Anthropic/Claude uses different auth header
+                if provider_type.contains("anthropic") || self.config.base_url.contains("anthropic") {
+                    if let Some(api_key) = &self.config.api_key {
+                        let validated_key = validate_api_key(api_key)?;
+                        headers.insert(
+                            "x-api-key",
+                            validated_key.parse().context("Invalid x-api-key header")?,
+                        );
+                        headers.insert(
+                            "anthropic-version",
+                            "2023-06-01".parse().context("Invalid anthropic-version header")?,
+                        );
+                    }
+                } 
                 // OpenRouter specific headers
-                if self.config.base_url.contains("openrouter.ai") {
+                else if provider_type.contains("openrouter") || self.config.base_url.contains("openrouter.ai") {
                     headers.insert("HTTP-Referer", "https://github.com/edward/mylm".parse().context("Invalid HTTP-Referer header")?);
                     headers.insert("X-Title", "mylm".parse().context("Invalid X-Title header")?);
+                    
+                    if let Some(api_key) = &self.config.api_key {
+                        let validated_key = validate_api_key(api_key)?;
+                        if !validated_key.is_empty() {
+                            let auth_value = format!("Bearer {}", validated_key);
+                            headers.insert(
+                                "Authorization",
+                                auth_value.parse().context("Invalid Authorization header")?,
+                            );
+                        }
+                    }
                 }
-
-                if let Some(api_key) = &self.config.api_key {
-                    // Use shared validation to ensure API key is safe for HTTP headers
-                    let validated_key = validate_api_key(api_key)?;
-                    if !validated_key.is_empty() {
-                        let auth_value = format!("Bearer {}", validated_key);
-                        headers.insert(
-                            "Authorization",
-                            auth_value.parse().context("Invalid Authorization header")?,
-                        );
+                // Standard OpenAI-compatible (OpenAI, Ollama, etc.)
+                else {
+                    if let Some(api_key) = &self.config.api_key {
+                        let validated_key = validate_api_key(api_key)?;
+                        if !validated_key.is_empty() {
+                            let auth_value = format!("Bearer {}", validated_key);
+                            headers.insert(
+                                "Authorization",
+                                auth_value.parse().context("Invalid Authorization header")?,
+                            );
+                        }
                     }
                 }
             }

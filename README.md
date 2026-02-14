@@ -49,28 +49,13 @@ Installs to `~/.local/bin` without sudo.
 
 ### First Use
 
-Unless you changed the alias, simply type "ai" into your terminal. Proceed to Config your preferred providers, select main model, set your context limit and costs and then simply proceed to "Start TUI Session".
-
-I also highly recommend you set the web_search API too, as it enhances the model's capacity to provide relevant answers.
-
-I use it also for chatting, mainly tired of key aspects when using llm's from main providers:
-- On long contexts, chat apps crash
-- Even on not so long, they can still lag/crash
-- I don't like the fact that all my data is stored externally
-- I tried other personal AI assistants apps and simply did not match very well.
-- More complex memory system
-
-This does not require docker or any other special configurations to work. It can be a little bit tricky to get everything required to build and it does take some time to finish (especially the optimized release version, on my local i7-7700HQ it took almost 40 minutes to finish). But the bianry itself is pretty small and quick.
+Unless you changed the alias, simply type "ai" into your terminal to open the central hub where you can change your settings, start new sessions or resume old ones.
 
 ---
 
 ## ✨ What Makes mylm Special
-
+Considering you have enabled tmux
 ### 🎯 `ai pop` — Context Magic
-Your command fails. Instead of copying error messages, just type:
-
-ai pop
-
 mylm captures your terminal history, working directory, git state, environment variables, and recent commands. The AI sees exactly what you see. **No setup. No copy-paste. Just context.**
 
 *Requires tmux (we'll help you set it up).*
@@ -78,9 +63,9 @@ mylm captures your terminal history, working directory, git state, environment v
 ### 🧠 Multi-Agent System
 Most AI assistants are a single brain trying to do everything. mylm uses an **orchestrator-worker pattern**:
 
-- **Orchestrator** plans and delegates
+- **Orchestrator** chats, plans and delegates
+- **Delegate tool** spawns worker agents with their own toolsets
 - **Worker agents** execute subtasks in parallel
-- **Delegate tool** spawns specialized agents with their own toolsets
 - **Job registry** tracks progress across all agents
 
 ### KNOWN ISSUES / SOLVING SOON
@@ -122,7 +107,6 @@ Every command goes through:
 - **Rust** — Zero-cost abstractions, memory safety
 - **Async tokio** — Non-blocking I/O throughout
 - **Optimized profiles** — Fast compile in dev, LTO in release
-- **Sub-100ms** cold start to interactive
 
 ---
 

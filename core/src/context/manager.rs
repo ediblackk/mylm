@@ -693,7 +693,7 @@ impl ContextManager {
 
     /// Format context for UI display
     /// Example output:
-    /// ```
+    /// ```text
     /// Context: 45,000 / 128,000 tokens (35%), 1.2MB / 3MB bytes (40%)
     /// [System] You are a helpful assistant...
     /// [User] Hello

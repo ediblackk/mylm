@@ -1,7 +1,7 @@
 use crate::llm::TokenUsage;
 use crate::llm::chat::ChatMessage;
 use crate::memory::graph::MemoryGraph;
-use crate::config::Config;
+use crate::config::ConfigV2 as Config;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppState {

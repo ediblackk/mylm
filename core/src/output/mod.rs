@@ -81,7 +81,7 @@ impl OutputFormatter {
     }
 
     /// Print available endpoints
-    pub fn print_endpoints(&self, config: &crate::config::Config) {
+    pub fn print_endpoints(&self, config: &crate::config::ConfigV2) {
         println!();
         println!("{}", self.bold.apply_to("Current Configuration:"));
         let resolved = config.resolve_profile();

@@ -1,50 +1,49 @@
-//! Configuration management - ConfigV2
+//! Configuration management
 //!
-//! TOML-based configuration with profile inheritance and environment overrides.
+//! Unified configuration system for MyLM.
+//! All configuration types are exported from this module.
 
-pub mod v2;
+pub mod agent;
+pub mod bridge;
+pub mod llm;
+pub mod prompt_schema;
+pub mod store;
+pub mod types;
 pub mod manager;
 
-// Re-export manager types with aliases to avoid conflicts
+// Re-export bridge functions
+pub use bridge::{
+    config_to_llm_config,
+    config_to_kernel_config,
+    config_to_runtime_config,
+    default_llm_config,
+    worker_llm_config,
+    BridgeError,
+};
+
+// Re-export manager types
 pub use manager::{ConfigManager, CostPerToken, RateLimitError};
 pub use manager::Config as ManagerConfig;
 pub use manager::ConfigError as ManagerConfigError;
 
-// Re-export v2 types
-pub use v2::{
-    AgentConfig, AgentOverride, ConfigError, ConfigV2, EndpointConfig,
-    EndpointOverride, FeaturesConfig, MemoryConfig, PacoreConfig, Profile,
-    PromptsConfig, Provider, ResolvedConfig, SearchProvider, WebSearchConfig,
-    build_system_prompt, build_system_prompt_with_capabilities, build_worker_prompt, build_memory_prompt,
-    generate_capabilities_prompt,
-    get_identity_prompt, get_memory_protocol, get_prompts_dir, get_react_protocol,
-    get_user_prompts_dir, install_default_prompts, load_prompt, load_prompt_from_path,
+// Re-export types
+pub use types::{Provider, SearchProvider, ConfigError, AgentPermissions, WorkerShellConfig, EscalationMode, AgentVersion};
+
+// Re-export agent config
+pub use agent::AgentConfig;
+
+// Re-export new store (primary config interface)
+pub use store::{
+    Config, ProfileConfig, ProviderConfig, ProviderType,
+    AppConfig, FeatureConfig, PaCoReConfig, Theme,
 };
 
-// Keep backward-compatible Config alias
-pub use v2::ConfigV2 as Config;
+// Re-export LLM config (legacy ConfigV2)
+pub use llm::{ConfigV2, AgentConfig as LlmAgentConfig, EndpointConfig, Profile, ResolvedConfig, WebSearchConfig};
+pub use llm::{EndpointOverride, FeaturesConfig, MemoryConfig, PacoreConfig, PromptsConfig, AgentOverride};
 
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-
-/// Agent version/loop implementation
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AgentVersion {
-    /// Classic ReAct loop (V1)
-    V1,
-    /// Multi-layered cognitive architecture (V2)
-    #[default]
-    V2,
-}
-
-impl std::fmt::Display for AgentVersion {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AgentVersion::V1 => write!(f, "V1 (Classic ReAct)"),
-            AgentVersion::V2 => write!(f, "V2 (Cognitive Submodule)"),
-        }
-    }
-}
+use serde::{Deserialize, Serialize};
 
 /// Context budgeting profile
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -76,104 +75,6 @@ pub struct CommandConfig {
     pub allowed_commands: Vec<String>,
     #[serde(default)]
     pub blocked_commands: Vec<String>,
-}
-
-/// Legacy WebSearchConfig for backward compatibility (for existing user configs)
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
-pub struct LegacyWebSearchConfig {
-    pub enabled: bool,
-    pub provider: String,
-    pub api_key: String,
-    pub model: String,
-}
-
-impl From<WebSearchConfig> for LegacyWebSearchConfig {
-    fn from(config: WebSearchConfig) -> Self {
-        Self {
-            enabled: config.enabled,
-            provider: match config.provider {
-                SearchProvider::Kimi => "kimi".to_string(),
-                SearchProvider::Serpapi => "serpapi".to_string(),
-                SearchProvider::Brave => "brave".to_string(),
-            },
-            api_key: config.api_key.unwrap_or_default(),
-            model: "kimi-k2-turbo-preview".to_string(),
-        }
-    }
-}
-
-impl From<LegacyWebSearchConfig> for WebSearchConfig {
-    fn from(config: LegacyWebSearchConfig) -> Self {
-        let provider = match config.provider.as_str() {
-            "kimi" => SearchProvider::Kimi,
-            "brave" => SearchProvider::Brave,
-            _ => SearchProvider::Serpapi,
-        };
-        Self {
-            enabled: config.enabled,
-            provider,
-            api_key: if config.api_key.is_empty() { None } else { Some(config.api_key) },
-            max_results: 5,
-        }
-    }
-}
-
-/// Legacy MemoryConfig adapter for compatibility
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct LegacyMemoryConfig {
-    pub auto_record: bool,
-    pub auto_context: bool,
-    pub auto_categorize: bool,
-}
-
-impl Default for LegacyMemoryConfig {
-    fn default() -> Self {
-        Self {
-            auto_record: true,
-            auto_context: true,
-            auto_categorize: true,
-        }
-    }
-}
-
-impl From<MemoryConfig> for LegacyMemoryConfig {
-    fn from(config: MemoryConfig) -> Self {
-        Self {
-            auto_record: config.auto_record,
-            auto_context: config.auto_context,
-            auto_categorize: true,
-        }
-    }
-}
-
-impl From<LegacyMemoryConfig> for MemoryConfig {
-    fn from(config: LegacyMemoryConfig) -> Self {
-        Self {
-            enabled: true,
-            auto_record: config.auto_record,
-            auto_context: config.auto_context,
-            max_context_memories: 10,
-        }
-    }
-}
-
-/// UI-facing profile info (for display purposes)
-#[derive(Debug, Clone)]
-pub struct ProfileInfo {
-    pub name: String,
-    pub model_override: Option<String>,
-    pub max_iterations: Option<usize>,
-    pub iteration_rate_limit: Option<u64>,
-}
-
-/// UI-facing endpoint info (for display purposes)
-#[derive(Debug, Clone)]
-pub struct EndpointInfo {
-    pub provider: String,
-    pub base_url: String,
-    pub model: String,
-    pub api_key_set: bool,
-    pub timeout_seconds: u64,
 }
 
 /// Find the configuration file in standard locations
@@ -216,336 +117,38 @@ pub fn create_default_config() -> ConfigV2 {
     ConfigV2::default()
 }
 
-/// Extension trait for UI-friendly methods
-pub trait ConfigUiExt {
-    /// Get list of profile names
-    fn profile_names(&self) -> Vec<String>;
-    
-    /// Get profile info for UI display
-    fn get_profile_info(&self, name: &str) -> Option<ProfileInfo>;
-    
-    /// Get the active profile info
-    fn get_active_profile_info(&self) -> Option<ProfileInfo>;
-    
-    /// Set active profile
-    fn set_active_profile(&mut self, name: &str) -> anyhow::Result<()>;
-    
-    /// Create a new profile
-    fn create_profile(&mut self, name: &str) -> anyhow::Result<()>;
-    
-    /// Delete a profile
-    fn delete_profile(&mut self, name: &str) -> anyhow::Result<()>;
-    
-    /// Get base endpoint info
-    fn get_endpoint_info(&self) -> EndpointInfo;
-    
-    /// Get effective endpoint info (with profile overrides applied)
-    fn get_effective_endpoint_info(&self) -> EndpointInfo;
-    
-    /// Update base endpoint
-    fn update_endpoint(&mut self, provider: Provider, model: String, base_url: Option<String>, api_key: Option<String>) -> anyhow::Result<()>;
-    
-    /// Set profile model override
-    fn set_profile_model_override(&mut self, profile_name: &str, model: Option<String>) -> anyhow::Result<()>;
-    
-    /// Set profile max_iterations override
-    fn set_profile_max_iterations(&mut self, profile_name: &str, iterations: Option<usize>) -> anyhow::Result<()>;
-    
-    /// Set profile iteration_rate_limit override
-    fn set_profile_iteration_rate_limit(&mut self, profile_name: &str, rate_limit: Option<u64>) -> anyhow::Result<()>;
-    
-    /// Set profile main_rpm override (requests per minute for main agent)
-    fn set_profile_main_rpm(&mut self, profile_name: &str, rpm: Option<u32>) -> anyhow::Result<()>;
-    
-    /// Set profile workers_rpm override (requests per minute for workers, shared pool)
-    fn set_profile_workers_rpm(&mut self, profile_name: &str, rpm: Option<u32>) -> anyhow::Result<()>;
-    
-    /// Set profile worker_limit override (max concurrent workers)
-    fn set_profile_worker_limit(&mut self, profile_name: &str, limit: Option<usize>) -> anyhow::Result<()>;
-    
-    /// Set profile rate_limit_tier override (conservative, standard, high, enterprise)
-    fn set_profile_rate_limit_tier(&mut self, profile_name: &str, tier: Option<String>) -> anyhow::Result<()>;
-    
-    /// Set profile max_tool_failures override (consecutive tool failures before worker stalls)
-    fn set_profile_max_tool_failures(&mut self, profile_name: &str, max_failures: Option<usize>) -> anyhow::Result<()>;
-    
-    /// Check if configuration is initialized (has valid endpoint)
-    fn is_initialized(&self) -> bool;
-    
-    /// Save to default location
-    fn save_to_default_location(&self) -> anyhow::Result<()>;
+/// Build system prompt for TUI sessions (stub)
+pub async fn build_system_prompt(
+    _context: &crate::context::TerminalContext,
+    _prompt_name: &str,
+    _mode: Option<&str>,
+    _prompts: Option<&PromptsConfig>,
+    _tools: Option<&[&str]>,
+    _agent_config: Option<&crate::config::llm::AgentConfig>,
+) -> anyhow::Result<String> {
+    Ok(r#"You are mylm, a helpful AI assistant for terminal tasks.
+
+You can use tools to:
+- Execute shell commands
+- Read and write files
+- Search code
+- Check git status
+- Delegate tasks to workers
+
+Be concise and helpful."#.to_string())
 }
 
-impl ConfigUiExt for ConfigV2 {
-    fn profile_names(&self) -> Vec<String> {
-        self.profiles.keys().cloned().collect()
-    }
-    
-    fn get_profile_info(&self, name: &str) -> Option<ProfileInfo> {
-        self.profiles.get(name).map(|p| ProfileInfo {
-            name: name.to_string(),
-            model_override: p.endpoint.as_ref().and_then(|e| e.model.clone()),
-            max_iterations: p.agent.as_ref().and_then(|a| a.max_iterations),
-            iteration_rate_limit: p.agent.as_ref().and_then(|a| a.iteration_rate_limit),
-        })
-    }
-    
-    fn get_active_profile_info(&self) -> Option<ProfileInfo> {
-        self.get_profile_info(&self.profile)
-    }
-    
-    fn set_active_profile(&mut self, name: &str) -> anyhow::Result<()> {
-        if !self.profiles.contains_key(name) {
-            anyhow::bail!("Profile '{}' does not exist", name);
-        }
-        self.profile = name.to_string();
-        Ok(())
-    }
-    
-    fn create_profile(&mut self, name: &str) -> anyhow::Result<()> {
-        if self.profiles.contains_key(name) {
-            anyhow::bail!("Profile '{}' already exists", name);
-        }
-        self.profiles.insert(name.to_string(), Profile::default());
-        Ok(())
-    }
-    
-    fn delete_profile(&mut self, name: &str) -> anyhow::Result<()> {
-        if name == self.profile {
-            anyhow::bail!("Cannot delete the active profile");
-        }
-        if self.profiles.remove(name).is_none() {
-            anyhow::bail!("Profile '{}' does not exist", name);
-        }
-        Ok(())
-    }
-    
-    fn get_endpoint_info(&self) -> EndpointInfo {
-        EndpointInfo {
-            provider: format!("{:?}", self.endpoint.provider).to_lowercase(),
-            base_url: self.endpoint.base_url.clone().unwrap_or_else(|| self.endpoint.provider.default_url()),
-            model: self.endpoint.model.clone(),
-            api_key_set: self.endpoint.api_key.as_ref().is_some_and(|k| !k.is_empty()),
-            timeout_seconds: self.endpoint.timeout_secs,
-        }
-    }
-    
-    fn get_effective_endpoint_info(&self) -> EndpointInfo {
-        let resolved = self.resolve_profile();
-        EndpointInfo {
-            provider: format!("{:?}", resolved.provider).to_lowercase(),
-            base_url: resolved.base_url.unwrap_or_else(|| resolved.provider.default_url()),
-            model: resolved.model,
-            api_key_set: resolved.api_key.as_ref().is_some_and(|k| !k.is_empty()),
-            timeout_seconds: resolved.timeout_secs,
-        }
-    }
-    
-    fn update_endpoint(&mut self, provider: Provider, model: String, base_url: Option<String>, api_key: Option<String>) -> anyhow::Result<()> {
-        self.endpoint.provider = provider;
-        self.endpoint.model = model;
-        self.endpoint.base_url = base_url;
-        self.endpoint.api_key = api_key;
-        Ok(())
-    }
-    
-    fn set_profile_model_override(&mut self, profile_name: &str, model: Option<String>) -> anyhow::Result<()> {
-        let profile = self.profiles.get_mut(profile_name)
-            .ok_or_else(|| anyhow::anyhow!("Profile '{}' does not exist", profile_name))?;
-        
-        if let Some(ref m) = model {
-            profile.endpoint = Some(EndpointOverride {
-                model: Some(m.clone()),
-                api_key: profile.endpoint.as_ref().and_then(|e| e.api_key.clone()),
-            });
-        } else {
-            // Remove model override but keep api_key if present
-            let api_key = profile.endpoint.as_ref().and_then(|e| e.api_key.clone());
-            if api_key.is_some() {
-                profile.endpoint = Some(EndpointOverride { model: None, api_key });
-            } else {
-                profile.endpoint = None;
-            }
-        }
-        Ok(())
-    }
-    
-    fn set_profile_max_iterations(&mut self, profile_name: &str, iterations: Option<usize>) -> anyhow::Result<()> {
-        let profile = self.profiles.get_mut(profile_name)
-            .ok_or_else(|| anyhow::anyhow!("Profile '{}' does not exist", profile_name))?;
-        
-        if let Some(iters) = iterations {
-            profile.agent = Some(AgentOverride {
-                max_iterations: Some(iters),
-                ..profile.agent.clone().unwrap_or_default()
-            });
-        } else {
-            // Remove max_iterations override but keep other agent settings
-            let iteration_rate_limit = profile.agent.as_ref().and_then(|a| a.iteration_rate_limit);
-            let main_model = profile.agent.as_ref().and_then(|a| a.main_model.clone());
-            let worker_model = profile.agent.as_ref().and_then(|a| a.worker_model.clone());
-            if iteration_rate_limit.is_some() || main_model.is_some() || worker_model.is_some() {
-                profile.agent = Some(AgentOverride {
-                    max_iterations: None,
-                    iteration_rate_limit,
-                    main_model,
-                    worker_model,
-                    ..Default::default()
-                });
-            } else {
-                profile.agent = None;
-            }
-        }
-        Ok(())
-    }
-    
-    fn set_profile_iteration_rate_limit(&mut self, profile_name: &str, rate_limit: Option<u64>) -> anyhow::Result<()> {
-        let profile = self.profiles.get_mut(profile_name)
-            .ok_or_else(|| anyhow::anyhow!("Profile '{}' does not exist", profile_name))?;
-        
-        if let Some(ms) = rate_limit {
-            let mut agent = profile.agent.clone().unwrap_or_default();
-            agent.iteration_rate_limit = Some(ms);
-            profile.agent = Some(agent);
-        } else {
-            // Remove rate limit override but keep other agent settings
-            if let Some(ref mut agent) = profile.agent {
-                agent.iteration_rate_limit = None;
-            }
-        }
-        Ok(())
-    }
-    
-    fn set_profile_main_rpm(&mut self, profile_name: &str, rpm: Option<u32>) -> anyhow::Result<()> {
-        let profile = self.profiles.get_mut(profile_name)
-            .ok_or_else(|| anyhow::anyhow!("Profile '{}' does not exist", profile_name))?;
-        
-        if let Some(r) = rpm {
-            let mut agent = profile.agent.clone().unwrap_or_default();
-            agent.main_rpm = Some(r);
-            profile.agent = Some(agent);
-        } else {
-            // Remove main_rpm override but keep other agent settings
-            if let Some(ref mut agent) = profile.agent {
-                agent.main_rpm = None;
-            }
-        }
-        Ok(())
-    }
-    
-    fn set_profile_workers_rpm(&mut self, profile_name: &str, rpm: Option<u32>) -> anyhow::Result<()> {
-        let profile = self.profiles.get_mut(profile_name)
-            .ok_or_else(|| anyhow::anyhow!("Profile '{}' does not exist", profile_name))?;
-        
-        if let Some(r) = rpm {
-            let mut agent = profile.agent.clone().unwrap_or_default();
-            agent.workers_rpm = Some(r);
-            profile.agent = Some(agent);
-        } else {
-            // Remove workers_rpm override but keep other agent settings
-            if let Some(ref mut agent) = profile.agent {
-                agent.workers_rpm = None;
-            }
-        }
-        Ok(())
-    }
-    
-    fn set_profile_worker_limit(&mut self, profile_name: &str, limit: Option<usize>) -> anyhow::Result<()> {
-        let profile = self.profiles.get_mut(profile_name)
-            .ok_or_else(|| anyhow::anyhow!("Profile '{}' does not exist", profile_name))?;
-        
-        if let Some(l) = limit {
-            let mut agent = profile.agent.clone().unwrap_or_default();
-            agent.worker_limit = Some(l);
-            profile.agent = Some(agent);
-        } else {
-            // Remove worker_limit override but keep other agent settings
-            if let Some(ref mut agent) = profile.agent {
-                agent.worker_limit = None;
-            }
-        }
-        Ok(())
-    }
-    
-    fn set_profile_rate_limit_tier(&mut self, profile_name: &str, tier: Option<String>) -> anyhow::Result<()> {
-        let profile = self.profiles.get_mut(profile_name)
-            .ok_or_else(|| anyhow::anyhow!("Profile '{}' does not exist", profile_name))?;
-        
-        if let Some(t) = tier {
-            // Validate tier
-            let valid_tiers = ["conservative", "standard", "high", "enterprise"];
-            if !valid_tiers.contains(&t.as_str()) {
-                return Err(anyhow::anyhow!(
-                    "Invalid tier '{}'. Valid tiers: conservative, standard, high, enterprise",
-                    t
-                ));
-            }
-            let mut agent = profile.agent.clone().unwrap_or_default();
-            agent.rate_limit_tier = Some(t);
-            profile.agent = Some(agent);
-        } else {
-            // Remove rate_limit_tier override but keep other agent settings
-            if let Some(ref mut agent) = profile.agent {
-                agent.rate_limit_tier = None;
-            }
-        }
-        Ok(())
-    }
-    
-    fn set_profile_max_tool_failures(&mut self, profile_name: &str, max_failures: Option<usize>) -> anyhow::Result<()> {
-        let profile = self.profiles.get_mut(profile_name)
-            .ok_or_else(|| anyhow::anyhow!("Profile '{}' does not exist", profile_name))?;
-        
-        if let Some(mf) = max_failures {
-            let mut agent = profile.agent.clone().unwrap_or_default();
-            agent.max_tool_failures = Some(mf);
-            profile.agent = Some(agent);
-        } else {
-            // Remove max_tool_failures override but keep other agent settings
-            if let Some(ref mut agent) = profile.agent {
-                agent.max_tool_failures = None;
-            }
-        }
-        Ok(())
-    }
-    
-    fn is_initialized(&self) -> bool {
-        // Consider initialized if we have a valid provider and model
-        !self.endpoint.model.is_empty()
-    }
-    
-    fn save_to_default_location(&self) -> anyhow::Result<()> {
-        self.save(None)?;
-        Ok(())
-    }
+/// Get prompts directory (stub)
+pub fn get_prompts_dir() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("mylm")
+        .join("prompts")
 }
 
-impl std::str::FromStr for Provider {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "openai" => Ok(Provider::Openai),
-            "google" => Ok(Provider::Google),
-            "ollama" => Ok(Provider::Ollama),
-            "openrouter" => Ok(Provider::Openrouter),
-            "kimi" => Ok(Provider::Kimi),
-            "custom" => Ok(Provider::Custom),
-            _ => Err(()),
-        }
-    }
-}
-
-impl Provider {
-    /// Get default URL for this provider
-    pub fn default_url(&self) -> String {
-        match self {
-            Provider::Openai => "https://api.openai.com/v1".to_string(),
-            Provider::Google => "https://generativelanguage.googleapis.com".to_string(),
-            Provider::Ollama => "http://localhost:11434/v1".to_string(),
-            Provider::Openrouter => "https://openrouter.ai/api/v1".to_string(),
-            Provider::Kimi => "https://api.moonshot.cn/v1".to_string(),
-            Provider::Custom => "".to_string(),
-        }
-    }
+/// Load prompt from file (stub)
+pub fn load_prompt(name: &str) -> anyhow::Result<String> {
+    let path = get_prompts_dir().join(format!("{}.md", name));
+    std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("Failed to load prompt {}: {}", name, e))
 }

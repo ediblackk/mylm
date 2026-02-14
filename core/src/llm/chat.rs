@@ -132,7 +132,7 @@ pub struct ToolCallFunction {
 }
 
 /// Request body for chat completion
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {
     /// ID of the model to use
     pub model: String,

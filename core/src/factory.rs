@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::config::Config;
-use crate::agent::{Agent, Tool};
+use crate::config::ConfigV2 as Config;
+use crate::agent_old::{Agent, Tool};
 use crate::config::AgentVersion;
-use crate::agent::v2::core::AgentV2;
+use crate::agent_old::v2::core::AgentV2;
 use crate::llm::{LlmClient, LlmConfig};
 use crate::memory::store::VectorStore;
 use crate::memory::categorizer::MemoryCategorizer;
@@ -11,17 +11,17 @@ use crate::state::StateStore;
 use crate::executor::{CommandExecutor, allowlist::CommandAllowlist, safety::SafetyChecker};
 use crate::context::TerminalContext;
 use crate::rate_limiter::{RateLimiter, RateLimitConfig};
-use crate::agent::tools::StructuredScratchpad;
-use crate::agent::traits::TerminalExecutor;
-use crate::agent::event_bus::EventBus;
-use crate::agent::tools::worker_shell::{EscalationRequest, EscalationResponse};
+use crate::agent_old::tools::StructuredScratchpad;
+use crate::agent_old::traits::TerminalExecutor;
+use crate::agent_old::event_bus::EventBus;
+use crate::agent_old::tools::worker_shell::{EscalationRequest, EscalationResponse};
 
 pub async fn create_agent_for_session(
     config: &Config,
     event_bus: Arc<EventBus>,
     terminal: Arc<dyn TerminalExecutor>,
     _escalation_tx: Option<tokio::sync::mpsc::Sender<(EscalationRequest, tokio::sync::oneshot::Sender<EscalationResponse>)>>,
-) -> anyhow::Result<crate::agent::v2::driver::factory::BuiltAgent> {
+) -> anyhow::Result<crate::agent_old::v2::driver::factory::BuiltAgent> {
     // Resolve configuration with profile overrides
     let resolved = config.resolve_profile();
     
@@ -70,7 +70,7 @@ pub async fn create_agent_for_session(
     let categorizer = Arc::new(MemoryCategorizer::new(client.clone(), store.clone()));
 
     // Tools - convert Box to Arc for the agent
-    let shell_config = crate::agent::tools::shell::ShellToolConfig {
+    let shell_config = crate::agent_old::tools::shell::ShellToolConfig {
         executor,
         context: ctx.clone(),
         terminal: terminal.clone(),
@@ -81,22 +81,22 @@ pub async fn create_agent_for_session(
         permissions: None, // permissions - V1 agents don't use permissions
     };
     let tools: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(crate::agent::tools::shell::ShellTool::new_with_config(shell_config)),
-        Arc::new(crate::agent::tools::web_search::WebSearchTool::new(
+        Arc::new(crate::agent_old::tools::shell::ShellTool::new_with_config(shell_config)),
+        Arc::new(crate::agent_old::tools::web_search::WebSearchTool::new(
             config.features.web_search.clone()
         )),
-        Arc::new(crate::agent::tools::memory::MemoryTool::new(store.clone())),
-        Arc::new(crate::agent::tools::crawl::CrawlTool::new(Arc::clone(&event_bus))),
-        Arc::new(crate::agent::tools::fs::FileReadTool),
-        Arc::new(crate::agent::tools::fs::FileWriteTool),
-        Arc::new(crate::agent::tools::list_files::ListFilesTool::with_cwd()),
-        Arc::new(crate::agent::tools::git::GitStatusTool),
-        Arc::new(crate::agent::tools::git::GitLogTool),
-        Arc::new(crate::agent::tools::git::GitDiffTool),
-        Arc::new(crate::agent::tools::state::StateTool::new(state_store.clone())),
-        Arc::new(crate::agent::tools::system::SystemMonitorTool::new()),
-        Arc::new(crate::agent::tools::terminal_sight::TerminalSightTool::new(terminal.clone())),
-        Arc::new(crate::agent::tools::wait::WaitTool),
+        Arc::new(crate::agent_old::tools::memory::MemoryTool::new(store.clone())),
+        Arc::new(crate::agent_old::tools::crawl::CrawlTool::new(Arc::clone(&event_bus))),
+        Arc::new(crate::agent_old::tools::fs::FileReadTool),
+        Arc::new(crate::agent_old::tools::fs::FileWriteTool),
+        Arc::new(crate::agent_old::tools::list_files::ListFilesTool::with_cwd()),
+        Arc::new(crate::agent_old::tools::git::GitStatusTool),
+        Arc::new(crate::agent_old::tools::git::GitLogTool),
+        Arc::new(crate::agent_old::tools::git::GitDiffTool),
+        Arc::new(crate::agent_old::tools::state::StateTool::new(state_store.clone())),
+        Arc::new(crate::agent_old::tools::system::SystemMonitorTool::new()),
+        Arc::new(crate::agent_old::tools::terminal_sight::TerminalSightTool::new(terminal.clone())),
+        Arc::new(crate::agent_old::tools::wait::WaitTool),
     ];
 
 
@@ -119,10 +119,10 @@ pub async fn create_agent_for_session(
     match agent_version {
         AgentVersion::V2 => {
             let agent = create_agent_v2_for_session(config, event_bus, terminal, None).await?;
-            Ok(crate::agent::v2::driver::factory::BuiltAgent::V2(agent))
+            Ok(crate::agent_old::v2::driver::factory::BuiltAgent::V2(agent))
         }
         AgentVersion::V1 => {
-            let config = crate::agent::AgentConfig {
+            let config = crate::agent_old::AgentConfig {
                 client,
                 tools,
                 system_prompt_prefix: system_prompt,
@@ -141,7 +141,7 @@ pub async fn create_agent_for_session(
                 max_tool_failures: resolved.agent.max_tool_failures,
             };
             let agent = Agent::new_with_config(config).await;
-            Ok(crate::agent::v2::driver::factory::BuiltAgent::V1(agent))
+            Ok(crate::agent_old::v2::driver::factory::BuiltAgent::V1(agent))
         }
     }
 }
@@ -206,14 +206,14 @@ pub async fn create_agent_v2_for_session(
     let scribe = Arc::new(crate::memory::scribe::Scribe::new(journal, store.clone(), client.clone()));
 
     // Job Registry (Shared between Agent and Tools)
-    let job_registry = crate::agent::v2::jobs::JobRegistry::new();
+    let job_registry = crate::agent_old::v2::jobs::JobRegistry::new();
     job_registry.set_event_bus(event_bus.clone());
     
     // Shared scratchpad for main agent and workers
     let shared_scratchpad = Arc::new(RwLock::new(StructuredScratchpad::new())); // Use tokio::sync::RwLock
 
     // Tools for AgentV2 - includes the new Delegate tool
-    let shell_config = crate::agent::tools::shell::ShellToolConfig {
+    let shell_config = crate::agent_old::tools::shell::ShellToolConfig {
         executor: executor.clone(),
         context: ctx.clone(),
         terminal: terminal.clone(),
@@ -224,22 +224,22 @@ pub async fn create_agent_v2_for_session(
         permissions: resolved.agent.permissions.clone(), // Pass permissions from config
     };
     let mut tools_vec: Vec<Arc<dyn Tool>> = vec![
-        Arc::new(crate::agent::tools::shell::ShellTool::new_with_config(shell_config)),
-        Arc::new(crate::agent::tools::web_search::WebSearchTool::new(
+        Arc::new(crate::agent_old::tools::shell::ShellTool::new_with_config(shell_config)),
+        Arc::new(crate::agent_old::tools::web_search::WebSearchTool::new(
             config.features.web_search.clone()
         )),
-        Arc::new(crate::agent::tools::memory::MemoryTool::new(store.clone())),
-        Arc::new(crate::agent::tools::crawl::CrawlTool::new(Arc::clone(&event_bus))),
-        Arc::new(crate::agent::tools::fs::FileReadTool),
-        Arc::new(crate::agent::tools::fs::FileWriteTool),
-        Arc::new(crate::agent::tools::list_files::ListFilesTool::with_cwd()),
-        Arc::new(crate::agent::tools::git::GitStatusTool),
-        Arc::new(crate::agent::tools::git::GitLogTool),
-        Arc::new(crate::agent::tools::git::GitDiffTool),
-        Arc::new(crate::agent::tools::state::StateTool::new(state_store.clone())),
-        Arc::new(crate::agent::tools::system::SystemMonitorTool::new()),
-        Arc::new(crate::agent::tools::terminal_sight::TerminalSightTool::new(terminal.clone())),
-        Arc::new(crate::agent::tools::wait::WaitTool),
+        Arc::new(crate::agent_old::tools::memory::MemoryTool::new(store.clone())),
+        Arc::new(crate::agent_old::tools::crawl::CrawlTool::new(Arc::clone(&event_bus))),
+        Arc::new(crate::agent_old::tools::fs::FileReadTool),
+        Arc::new(crate::agent_old::tools::fs::FileWriteTool),
+        Arc::new(crate::agent_old::tools::list_files::ListFilesTool::with_cwd()),
+        Arc::new(crate::agent_old::tools::git::GitStatusTool),
+        Arc::new(crate::agent_old::tools::git::GitLogTool),
+        Arc::new(crate::agent_old::tools::git::GitDiffTool),
+        Arc::new(crate::agent_old::tools::state::StateTool::new(state_store.clone())),
+        Arc::new(crate::agent_old::tools::system::SystemMonitorTool::new()),
+        Arc::new(crate::agent_old::tools::terminal_sight::TerminalSightTool::new(terminal.clone())),
+        Arc::new(crate::agent_old::tools::wait::WaitTool),
     ];
     
     // Build tools HashMap for DelegateTool (convert Vec to HashMap)
@@ -249,11 +249,11 @@ pub async fn create_agent_v2_for_session(
     }
     
     // Create shared workspace for worker awareness
-    let _shared_workspace = crate::agent::workspace::SharedWorkspace::new(job_registry.clone())
+    let _shared_workspace = crate::agent_old::workspace::SharedWorkspace::new(job_registry.clone())
         .with_vector_store(store.clone());
     
     // Add DelegateTool with access to parent tools and permissions
-    let delegate_config = crate::agent::tools::delegate::DelegateToolConfig {
+    let delegate_config = crate::agent_old::tools::delegate::DelegateToolConfig {
         llm_client: client.clone(),
         scribe: scribe.clone(),
         job_registry: job_registry.clone(),
@@ -268,7 +268,7 @@ pub async fn create_agent_v2_for_session(
         worker_model: Some(resolved.agent.worker_model.clone()), // Use configured worker_model
         providers: config.providers.clone(), // Pass providers for worker model lookup
     };
-    let delegate_tool = crate::agent::tools::delegate::DelegateTool::new(delegate_config)
+    let delegate_tool = crate::agent_old::tools::delegate::DelegateTool::new(delegate_config)
         .with_rate_limiter(rate_limiter);
     // Add escalation channel if provided
     let delegate_tool = if let Some(tx) = escalation_tx {
@@ -290,7 +290,7 @@ pub async fn create_agent_v2_for_session(
         None
     ).await?;
 
-    let config = crate::agent::v2::AgentV2Config {
+    let config = crate::agent_old::v2::AgentV2Config {
         client,
         scribe,
         tools,

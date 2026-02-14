@@ -1,90 +1,138 @@
-//! Agent system for LLM-based task execution.
+//! Agent V3 - Capability Graph Architecture
 //!
-//! ORGANIZATION STATUS:
-//! - V1: Legacy implementation in `v1/` folder - MARKED FOR DELETION
-//! - V2: Current active implementation in `v2/` folder
-//! - Root level files: Shared components used by both V1 and V2
-//! - `tools/`: Tool implementations
+//! Clean, layered agent architecture with strict separation of concerns.
 //!
-//! STRUCTURE:
+//! # Architecture Overview
+//!
 //! ```text
-//! agent/
-//! ├── mod.rs           # This file - module declarations
-//! ├── tool.rs          # Tool trait (SHARED)
-//! ├── protocol.rs      # Protocol types (SHARED)
-//! ├── event_bus.rs     # Event bus (SHARED)
-//! ├── tool_registry.rs # Tool registry (SHARED)
-//! ├── prompt.rs        # Prompt builder (SHARED)
-//! ├── execution.rs     # Execution helpers (SHARED)
-//! ├── context.rs       # Context management (SHARED)
-//! ├── permissions.rs   # Permissions (SHARED)
-//! ├── role.rs          # Role definitions (SHARED)
-//! ├── workspace.rs     # Workspace management (SHARED)
-//! ├── wait.rs          # Wait functionality (SHARED)
-//! ├── budget.rs        # Budget management (SHARED)
-//! ├── logger.rs        # Logging (SHARED)
-//! ├── wrapper.rs       # Agent wrapper (SHARED)
-//! ├── traits.rs        # Shared traits (SHARED)
-//! ├── toolcall_log.rs  # Tool call logging (SHARED)
-//! ├── v1/              # V1 LEGACY - MARKED FOR DELETION
-//! │   └── core.rs
-//! ├── v2/              # V2 ACTIVE
-//! │   ├── core.rs
-//! │   ├── orchestrator/
-//! │   └── ...
-//! └── tools/           # Tool implementations
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │  SESSION          Orchestration layer (async)               │
+//! │  - Session: Main event loop                                 │
+//! │  - Input handlers: Chat, Task, Worker                       │
+//! ├─────────────────────────────────────────────────────────────┤
+//! │  RUNTIME          Async capability execution (side effects) │
+//! │  - AgentRuntime: Decision interpreter                       │
+//! │  - CapabilityGraph: Trait-based capability container        │
+//! │  - Capability traits: LLM, Tools, Approval, Workers, Telemetry│
+//! ├─────────────────────────────────────────────────────────────┤
+//! │  COGNITION        Pure state machine (no async/IO)          │
+//! │  - CognitiveEngine: (state, input) -> Transition            │
+//! │  - AgentState: Immutable snapshot                           │
+//! │  - AgentDecision: Intent only (no execution)                │
+//! ├─────────────────────────────────────────────────────────────┤
+//! │  TYPES            Primitive types (no dependencies)         │
+//! │  - IDs: TaskId, WorkerId, SessionId, TraceId               │
+//! │  - Common: TokenUsage, ToolResult, Approval                │
+//! └─────────────────────────────────────────────────────────────┘
 //! ```
+//!
+//! # Module Documentation
+//!
+//! - See `README.md` for architecture overview
+//! - See `types/MOD.md` for types module
+//! - See `cognition/MOD.md` for cognition module
+//! - See `runtime/MOD.md` for runtime module
+//! - See `runtime/impls/MOD.md` for capability implementations
+//! - See `session/MOD.md` for session module
+//!
+//! # Quick Start
+//!
+//! ```rust,ignore
+//! use mylm_core::agent::{
+//!     AgentBuilder, SessionInput, presets::testing_agent,
+//! };
+//! use tokio::sync::mpsc;
+//!
+//! // Quick testing agent (all stubs)
+//! let mut agent = testing_agent();
+//!
+//! // Or build custom
+//! let mut agent = AgentBuilder::new()
+//!     .with_llm_client(llm_client)
+//!     .with_tools(ToolRegistry::new())
+//!     .with_terminal_approval()
+//!     .build_with_llm_engine();
+//!
+//! // Run session
+//! let (tx, rx) = mpsc::channel(10);
+//! tx.send(SessionInput::Chat("Hello".to_string())).await?;
+//! drop(tx);
+//!
+//! let result = agent.run(rx).await?;
+//! ```
+//!
+//! # Rules
+//!
+//! 1. **Cognition is pure**: No async, no IO, no external deps
+//! 2. **Runtime handles side effects**: All IO, network, files
+//! 3. **Session orchestrates**: Connects layers in a loop
+//! 4. **Capabilities are swappable**: Implement traits to replace components
+//! 5. **State is immutable**: Each step produces new state
 
-// =============================================================================
-// SHARED COMPONENTS (at root level)
-// =============================================================================
-pub mod tool;
-pub mod protocol;
-pub mod event_bus;
-pub mod tool_registry;
-pub mod toolcall_log;
-pub mod execution;
-pub mod context;
-pub mod permissions;
-pub mod role;
-pub mod workspace;
-pub mod wait;
-pub mod budget;
-pub mod logger;
-pub mod wrapper;
-pub mod traits;
-pub mod prompt;
-// =============================================================================
-// ACTIVE MODULES
-// =============================================================================
-pub mod v2;
-pub mod tools;
+#![forbid(unsafe_code)]
 
-// =============================================================================
-// LEGACY V1 - MARKED FOR DELETION
-// =============================================================================
-pub mod v1;  // TODO: DELETE after V2 migration complete
+pub mod types;
+pub mod cognition;
+pub mod runtime;
+pub mod session;
+pub mod builder;
+pub mod worker;
+pub mod factory;
 
-// =============================================================================
-// RE-EXPORTS (Shared)
-// =============================================================================
-pub use tool::{Tool, ToolKind, ToolOutput};
-pub use protocol::{AgentRequest, AgentResponse, AgentError, ShortKeyAction, parse_short_key_action_from_content};
-pub use event_bus::{CoreEvent, EventBus};
-pub use tool_registry::{ToolRegistry, ToolRegistryStats};
-pub use traits::TerminalExecutor;
-pub use workspace::SharedWorkspace;
-pub use prompt::PromptBuilder;
-pub use wrapper::AgentWrapper;
+/// Contract module - Core type definitions and traits
+///
+/// This module defines the stable contracts between:
+/// - AgencyKernel (pure, sync, deterministic)
+/// - AgencyRuntime (async, side effects)
+/// - EventTransport (pluggable event queue)
+/// - Session (orchestration with dynamic DAG expansion)
+pub mod contract;
 
-// =============================================================================
-// V2 EXPORTS (Active implementation)
-// =============================================================================
-pub use v2::{AgentV2, AgentV2Config};
-pub use v2::orchestrator::{AgentOrchestrator, OrchestratorConfig, ChatSessionHandle, ChatSessionMessage, TaskHandle};
-pub use v2::jobs::{JobRegistry, JobStatus};
+// Selective re-exports to avoid ambiguity
+pub use types::{
+    TaskId, JobId, SessionId,
+    TokenUsage, ToolResult, Approval,
+};
 
-// =============================================================================
-// LEGACY V1 EXPORTS - MARKED FOR DELETION
-// =============================================================================
-pub use v1::{Agent, AgentConfig, AgentDecision};  // TODO: DELETE
+pub use cognition::{
+    AgentState, Message, WorkerId,
+    InputEvent, ApprovalOutcome, LLMResponse,
+    AgentDecision, Transition, CognitiveEngine,
+    CognitiveError,
+    LLMBasedEngine, ResponseParser,
+};
+
+pub use runtime::{
+    AgentRuntime, RuntimeContext, RuntimeError, TraceId,
+    CapabilityGraph,
+    LLMCapability, ToolCapability, ApprovalCapability, WorkerCapability, TelemetryCapability,
+};
+
+pub use builder::{AgentBuilder, presets};
+
+pub use worker::{
+    WorkerManager, WorkerHandle, WorkerResult, WorkerSpawnParams,
+};
+
+pub use factory::{
+    AgentSessionFactory, FactoryError,
+};
+
+pub use crate::config::agent::{
+    AgentConfig, ToolConfig, LlmConfig,
+    RetryConfig, MemoryConfig, WorkerConfig, TelemetryConfig, EnvConfig,
+};
+
+pub use session::{
+    Session, SessionConfig, SessionError,
+    SessionInput, WorkerEvent,
+};
+
+#[cfg(test)]
+mod test_architecture;
+
+#[cfg(test)]
+mod example_integration;
+
+#[cfg(test)]
+mod integration_tests;
