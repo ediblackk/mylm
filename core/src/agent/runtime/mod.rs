@@ -8,6 +8,8 @@ pub mod graph;
 pub mod runtime;
 pub mod error;
 pub mod impls;
+pub mod tools;
+pub mod terminal;
 
 /// Contract runtime implementation
 /// 

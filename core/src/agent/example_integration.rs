@@ -127,7 +127,7 @@ mod example {
                 }
                 
                 // Tool result - emit response
-                Some(InputEvent::ToolResult(result)) => {
+                Some(InputEvent::ToolResult { result, .. }) => {
                     let output = match result {
                         crate::agent::types::events::ToolResult::Success { output, .. } => output.clone(),
                         crate::agent::types::events::ToolResult::Error { message, .. } => message.clone(),

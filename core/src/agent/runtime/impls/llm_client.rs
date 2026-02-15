@@ -54,6 +54,7 @@ impl LLMCapability for LlmClientCapability {
             stream: req.stream,
             stop: None,
             tools: None,
+            response_format: None,
         };
 
         match self.client.chat(&chat_request).await {
@@ -95,6 +96,7 @@ impl LLMCapability for LlmClientCapability {
             stream: true,
             stop: None,
             tools: None,
+            response_format: None,
         };
         
         Box::pin(async_stream::try_stream! {

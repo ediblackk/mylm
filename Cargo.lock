@@ -3592,6 +3592,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "html-escape"
+version = "0.2.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d1ad449764d627e22bfd7cd5e8868264fc9236e07c752972b4080cd351cb476"
+dependencies = [
+ "utf8-width",
+]
+
+[[package]]
 name = "htmlescape"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5397,6 +5406,7 @@ dependencies = [
  "hex",
  "home",
  "inquire",
+ "log",
  "mylm-core",
  "portable-pty",
  "ratatui",
@@ -5441,10 +5451,12 @@ dependencies = [
  "glob",
  "home",
  "hostname",
+ "html-escape",
  "ignore",
  "lance-arrow",
  "lancedb",
  "lazy_static",
+ "log",
  "parking_lot",
  "portable-pty",
  "rand 0.8.5",
@@ -8969,6 +8981,12 @@ name = "utf8-ranges"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7fcfc827f90e53a02eaef5e535ee14266c1d569214c6aa70133a624d8a3164ba"
+
+[[package]]
+name = "utf8-width"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1292c0d970b54115d14f2492fe0170adf21d68a1de108eebc51c1df4f346a091"
 
 [[package]]
 name = "utf8_iter"

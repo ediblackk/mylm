@@ -27,9 +27,9 @@ impl AppStateContainer {
             .chat_history
             .iter()
             .rev()
-            .find(|m| m.role == MessageRole::Assistant)
+            .find(|m| m.message.role == MessageRole::Assistant)
         {
-            self.copy_text_to_clipboard(msg.content.clone());
+            self.copy_text_to_clipboard(msg.message.content.clone());
         } else {
             self.status_message = Some("⚠️ No AI response to copy".to_string());
         }
@@ -47,20 +47,20 @@ impl AppStateContainer {
     pub fn copy_visible_conversation_to_clipboard(&mut self) {
         let mut transcript = String::new();
         for msg in &self.chat_history {
-            match msg.role {
+            match msg.message.role {
                 MessageRole::User => {
                     if !transcript.is_empty() {
                         transcript.push_str("\n\n");
                     }
                     transcript.push_str("User: ");
-                    transcript.push_str(&msg.content);
+                    transcript.push_str(&msg.message.content);
                 }
                 MessageRole::Assistant => {
                     if !transcript.is_empty() {
                         transcript.push_str("\n\n");
                     }
                     transcript.push_str("AI: ");
-                    transcript.push_str(&msg.content);
+                    transcript.push_str(&msg.message.content);
                 }
                 _ => {}
             }

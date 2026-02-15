@@ -8,10 +8,11 @@
 //! - `app/session.rs` - Session persistence
 
 use crate::tui::app::state::AppStateContainer;
-use crate::tui::types::{AppState, TuiEvent};
+use crate::tui::types::{AppState, TuiEvent, TimestampedChatMessage};
 
 use mylm_core::agent::contract::session::UserInput;
 use mylm_core::context::pack::ContextBuilder;
+use mylm_core::context::SmartPruning;
 use mylm_core::llm::chat::ChatMessage;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -32,7 +33,58 @@ impl AppStateContainer {
         self.abort_current_task();
         self.status_message = None;
         let input = self.chat_input.clone();
-        mylm_core::info_log!("[APP] Processing message (len={}): preview='{}...'", 
+        
+        // Check for auto-restore: does user message reference pruned content?
+        let auto_restore_result = self.context_manager.check_auto_restore(&input);
+        if auto_restore_result.found {
+            let segment_count = auto_restore_result.segments.len();
+            let keywords = auto_restore_result.keywords.join(", ");
+            
+            mylm_core::info_log!(
+                "[APP] Auto-restore triggered: {} segments matched keywords: {}",
+                segment_count, keywords
+            );
+            
+            // Show "Remembering..." message
+            self.chat_history.push(TimestampedChatMessage::assistant(
+                format!("Remembering... (restoring {} context segment{})", 
+                    segment_count, 
+                    if segment_count > 1 { "s" } else { "" }
+                )
+            ));
+            
+            // Restore the segments to both context_manager and chat_history
+            for segment in auto_restore_result.segments {
+                for msg in segment.messages {
+                    let chat_msg = match msg.role {
+                        mylm_core::agent::cognition::history::MessageRole::User => {
+                            TimestampedChatMessage::user(&msg.content)
+                        }
+                        mylm_core::agent::cognition::history::MessageRole::Assistant => {
+                            TimestampedChatMessage::assistant(&msg.content)
+                        }
+                        mylm_core::agent::cognition::history::MessageRole::System => {
+                            TimestampedChatMessage::system(&msg.content)
+                        }
+                        mylm_core::agent::cognition::history::MessageRole::Tool => {
+                            TimestampedChatMessage::assistant(format!("🔧 Tool: {}", &msg.content))
+                        }
+                    };
+                    self.chat_history.push(chat_msg);
+                }
+            }
+            
+            // Update context_manager with restored history
+            let chat_msgs: Vec<ChatMessage> = self.chat_history.iter().map(|m| m.message.clone()).collect();
+            self.context_manager.set_history(&chat_msgs);
+            
+            // Remove the pruned segments from the archive since they're now restored
+            // (The segments are consumed from the iterator above, but we should clear them from archive)
+            // Note: In a full implementation, we'd track which segments were restored
+            // and remove only those. For now, this is handled by the restore() method.
+        }
+        mylm_core::info_log!(
+            "[APP] Processing message (len={}): preview='{}...'", 
             input.len(), 
             &input[..input.len().min(30)]
         );
@@ -74,11 +126,15 @@ impl AppStateContainer {
         }
 
         mylm_core::debug_log!("[APP] Final message length: {}", final_message.len());
-        self.chat_history.push(ChatMessage::user(&final_message));
-        mylm_core::info_log!("[APP] Added message to chat history, now have {} messages", self.chat_history.len());
+        self.chat_history.push(TimestampedChatMessage::user(&final_message));
+        mylm_core::info_log!(
+            "[APP] Added message to chat history, now have {} messages", 
+            self.chat_history.len()
+        );
         
         // Update context manager with new message for token tracking
-        self.context_manager.set_history(&self.chat_history);
+        let chat_msgs: Vec<ChatMessage> = self.chat_history.iter().map(|m| m.message.clone()).collect();
+        self.context_manager.set_history(&chat_msgs);
         
         // Set conversation topic from first user message to prevent context jumping
         if self.chat_history.len() <= 2 {
@@ -134,12 +190,15 @@ impl AppStateContainer {
         
         if let Some(input_tx) = &self.input_tx {
             let last_message = self.chat_history.last()
-                .map(|m| m.content.clone())
+                .map(|m| m.message.content.clone())
                 .unwrap_or_default();
             
             let msg_preview = &last_message[..last_message.len().min(50)];
-            mylm_core::info_log!("[APP] Sending user message via input channel (len={}, preview='{}...')", 
-                last_message.len(), msg_preview);
+            mylm_core::info_log!(
+                "[APP] Sending user message via input channel (len={}, preview='{}...')", 
+                last_message.len(), 
+                msg_preview
+            );
             
             match input_tx.send(UserInput::Message(last_message)).await {
                 Ok(_) => {

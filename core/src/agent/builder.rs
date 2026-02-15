@@ -31,7 +31,9 @@ use crate::agent::runtime::impls::{
     LlmClientCapability, ToolRegistry, TerminalApprovalCapability,
     AutoApproveCapability, LocalWorkerCapability, ConsoleTelemetry,
     WebSearchCapability, StubWebSearch, MemoryCapability,
+    AgentMemoryManager,
 };
+use crate::memory::store::VectorStore;
 use crate::llm::LlmClient;
 use std::sync::Arc;
 
@@ -44,6 +46,7 @@ pub struct AgentBuilder {
     telemetry: Option<Arc<dyn TelemetryCapability>>,
     config: SessionConfig,
     engine: Option<Box<dyn CognitiveEngine + Send>>,
+    memory_manager: Option<Arc<AgentMemoryManager>>,
 }
 
 impl AgentBuilder {
@@ -56,6 +59,7 @@ impl AgentBuilder {
             telemetry: None,
             config: SessionConfig::default(),
             engine: None,
+            memory_manager: None,
         }
     }
     
@@ -139,7 +143,42 @@ impl AgentBuilder {
         self
     }
     
-    /// Add memory capability
+    /// Add memory capability using a pre-initialized memory manager
+    /// 
+    /// # Example
+    /// ```rust,ignore
+    /// let memory_manager = AgentMemoryManager::new(MemoryConfig::default()).await?;
+    /// let agent = AgentBuilder::new()
+    ///     .with_memory_manager(memory_manager)
+    ///     .build_with_llm_engine();
+    /// ```
+    pub fn with_memory_manager(mut self, manager: Arc<AgentMemoryManager>) -> Self {
+        self.memory_manager = Some(manager.clone());
+        
+        // Memory doubles as telemetry to record events
+        let memory_capability = MemoryCapability::with_manager(manager);
+        self.telemetry = Some(Arc::new(memory_capability) as Arc<dyn TelemetryCapability>);
+        self
+    }
+    
+    /// Add memory capability with a pre-initialized VectorStore
+    /// 
+    /// This is useful when you want to share the same VectorStore across multiple agents
+    /// or when you've already initialized it elsewhere.
+    pub fn with_memory_store(mut self, store: Arc<VectorStore>) -> Self {
+        // Create memory capability with the store
+        let memory_capability = Arc::new(MemoryCapability::with_manager(
+            Arc::new(AgentMemoryManager::from_store(store))
+        ));
+        
+        self.telemetry = Some(memory_capability.clone() as Arc<dyn TelemetryCapability>);
+        self
+    }
+    
+    /// Add basic memory capability (in-memory only, no persistence)
+    /// 
+    /// For production use, prefer `with_memory_manager()` with a properly
+    /// initialized AgentMemoryManager that includes VectorStore persistence.
     pub fn with_memory(mut self) -> Self {
         let memory = Arc::new(MemoryCapability::new());
         // Memory doubles as telemetry to record events
@@ -161,9 +200,20 @@ impl AgentBuilder {
     
     /// Build the runtime (without session)
     pub fn build_runtime(&mut self) -> AgentRuntime {
+        // Build tools, injecting memory tool if memory manager is available
+        let tools: Arc<dyn ToolCapability> = if let Some(ref memory_manager) = self.memory_manager {
+            // If we have a memory manager, create a ToolRegistry with memory enabled
+            let store = memory_manager.vector_store().clone();
+            let registry = ToolRegistry::new().with_memory(store);
+            Arc::new(registry)
+        } else {
+            // Use existing tools or create default
+            self.tools.clone().unwrap_or_else(|| Arc::new(ToolRegistry::new()))
+        };
+        
         let graph = CapabilityGraph::new(
             self.llm.clone().unwrap_or_else(|| Arc::new(crate::agent::runtime::graph::StubLLM)),
-            self.tools.clone().unwrap_or_else(|| Arc::new(ToolRegistry::new())),
+            tools,
             self.approval.clone().unwrap_or_else(|| Arc::new(AutoApproveCapability::new())),
             self.workers.clone().unwrap_or_else(|| Arc::new(crate::agent::runtime::graph::StubWorkers)),
             self.telemetry.clone().unwrap_or_else(|| Arc::new(crate::agent::runtime::graph::StubTelemetry)),

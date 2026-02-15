@@ -221,8 +221,21 @@ pub struct MemoryConfig {
     pub semantic_search: bool,
     /// Embedding model
     pub embedding_model: String,
-    /// Memories to include in prompt
+    /// Memories to include in prompt (hot memory limit)
     pub context_window: usize,
+    /// Custom storage path (None = use default)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_path: Option<std::path::PathBuf>,
+    /// Enable autosave for TUI sessions
+    #[serde(default = "default_true")]
+    pub autosave: bool,
+    /// Incognito mode - don't persist to disk
+    #[serde(default)]
+    pub incognito: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for MemoryConfig {
@@ -233,6 +246,9 @@ impl Default for MemoryConfig {
             semantic_search: true,
             embedding_model: "default".to_string(),
             context_window: 5,
+            storage_path: None,
+            autosave: true,
+            incognito: false,
         }
     }
 }
@@ -244,6 +260,26 @@ impl MemoryConfig {
         self.semantic_search = other.semantic_search;
         self.embedding_model = other.embedding_model;
         self.context_window = other.context_window;
+        if other.storage_path.is_some() {
+            self.storage_path = other.storage_path;
+        }
+        self.autosave = other.autosave;
+        self.incognito = other.incognito;
+    }
+    
+    /// Get the effective storage path
+    pub fn effective_storage_path(&self) -> std::path::PathBuf {
+        self.storage_path.clone().unwrap_or_else(|| {
+            dirs::data_dir()
+                .expect("Could not find data directory")
+                .join("mylm")
+                .join("memory")
+        })
+    }
+    
+    /// Check if memory should be persisted to disk
+    pub fn should_persist(&self) -> bool {
+        self.enabled && !self.incognito
     }
 }
 

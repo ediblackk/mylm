@@ -73,6 +73,9 @@ which = "6.0"
 # WebSocket Server
 tokio-tungstenite = "0.21"
 
+# Logging
+log = "0.4"
+
 # Clipboard
 arboard = "3.4"
 

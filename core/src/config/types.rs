@@ -49,17 +49,17 @@ pub enum Provider {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchProvider {
-    /// Kimi (Moonshot AI) search
+    /// DuckDuckGo HTML search
     ///
-    /// Uses Kimi's built-in web search capability.
-    /// Requires Kimi API key.
-    Kimi,
+    /// Free, no API key required.
+    /// Uses DuckDuckGo's HTML interface.
+    #[default]
+    DuckDuckGo,
 
     /// SerpApi (Google/Bing search results)
     ///
     /// Uses SerpApi to get search results.
     /// Requires SerpApi subscription.
-    #[default]
     Serpapi,
 
     /// Brave Search API
@@ -67,6 +67,41 @@ pub enum SearchProvider {
     /// Uses Brave's privacy-focused search.
     /// Requires Brave API key.
     Brave,
+    
+    /// OpenAI Web Search
+    ///
+    /// Uses OpenAI's built-in web search in GPT-4o.
+    /// Requires OpenAI API key.
+    Openai,
+    
+    /// Exa Search API
+    ///
+    /// Neural search for AI applications.
+    /// Requires Exa API key.
+    Exa,
+    
+    /// Google Custom Search API
+    ///
+    /// Uses Google's Programmable Search Engine.
+    /// Requires Google API key and Search Engine ID.
+    Google,
+    
+    /// Tavily Search API
+    ///
+    /// AI-native search API optimized for LLMs.
+    /// Requires Tavily API key.
+    Tavily,
+    
+    /// Kimi (Moonshot AI) search
+    ///
+    /// Uses Kimi's built-in web search capability.
+    /// Requires Kimi API key.
+    Kimi,
+    
+    /// Custom/Generic provider
+    ///
+    /// User-defined search provider configuration.
+    Custom,
 }
 
 /// Configuration errors

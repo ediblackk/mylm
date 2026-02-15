@@ -118,7 +118,7 @@ mod tests {
                             timeout_secs: None,
                         })
                     }
-                    Some(InputEvent::ToolResult(result)) => {
+                    Some(InputEvent::ToolResult { result, .. }) => {
                         let output = match result {
                             crate::agent::types::events::ToolResult::Success { output, .. } => output,
                             crate::agent::types::events::ToolResult::Error { message, .. } => message,
@@ -231,6 +231,7 @@ mod tests {
             condense_threshold: 0.8,
             memory: Default::default(),
             extra_params: Default::default(),
+            web_search_enabled: false,
         };
         
         let client = Arc::new(LlmClient::new(config).expect("Failed to create LLM client"));

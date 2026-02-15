@@ -91,6 +91,9 @@ pub fn config_to_llm_config(
         format!("{:?}", provider_cfg.provider_type).to_lowercase(),
     );
     
+    // Enable web search if configured for this profile
+    llm_config.web_search_enabled = profile.web_search.enabled;
+    
     Ok(llm_config)
 }
 
@@ -203,6 +206,7 @@ mod tests {
                 output_price: Some(1.5),
                 tested_at: None,
                 test_error: None,
+                web_search: crate::config::WebSearchConfig::default(),
             },
         );
         

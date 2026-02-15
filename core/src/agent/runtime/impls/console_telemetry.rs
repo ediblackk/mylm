@@ -118,13 +118,13 @@ fn format_decision(decision: &AgentDecision) -> String {
 fn format_event(event: &InputEvent) -> String {
     match event {
         InputEvent::UserMessage(msg) => format!("UserMessage({})", truncate(msg, 50)),
-        InputEvent::ToolResult(result) => {
-            let (success, tool_name) = match result {
-                crate::agent::types::events::ToolResult::Success { .. } => (true, "unknown"),
-                crate::agent::types::events::ToolResult::Error { .. } => (false, "unknown"),
-                crate::agent::types::events::ToolResult::Cancelled => (false, "unknown"),
+        InputEvent::ToolResult { tool, result } => {
+            let success = match result {
+                crate::agent::types::events::ToolResult::Success { .. } => true,
+                crate::agent::types::events::ToolResult::Error { .. } => false,
+                crate::agent::types::events::ToolResult::Cancelled => false,
             };
-            format!("ToolResult(tool={}, success={})", tool_name, success)
+            format!("ToolResult(tool={}, success={})", tool, success)
         }
         InputEvent::LLMResponse(resp) => format!(
             "LLMResponse(tokens={})", 

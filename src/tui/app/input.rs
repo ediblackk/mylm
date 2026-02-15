@@ -1,5 +1,6 @@
 //! Input handling - cursor movement, text editing, and selection
 use crate::tui::app::state::{AppStateContainer, Focus};
+use crate::tui::types::TimestampedChatMessage;
 use mylm_core::llm::TokenUsage;
 
 impl AppStateContainer {
@@ -376,7 +377,7 @@ impl AppStateContainer {
     #[allow(dead_code)]
     pub async fn start_streaming_final_answer(&mut self, _content: String, _usage: TokenUsage) {
         self.chat_history
-            .push(mylm_core::llm::chat::ChatMessage::assistant(String::new()));
+            .push(TimestampedChatMessage::assistant(String::new()));
 
         if !self.incognito {
             let session = self.build_current_session().await;
@@ -390,13 +391,12 @@ impl AppStateContainer {
     // History management
     #[allow(dead_code)]
     pub fn set_history(&mut self, history: Vec<mylm_core::llm::chat::ChatMessage>) {
-        self.chat_history = history;
+        self.chat_history = history.into_iter().map(TimestampedChatMessage::from).collect();
     }
 
     #[allow(dead_code)]
     pub fn add_assistant_message(&mut self, content: String, usage: TokenUsage) {
-        use mylm_core::llm::chat::ChatMessage;
-        self.chat_history.push(ChatMessage::assistant(content.clone()));
+        self.chat_history.push(TimestampedChatMessage::assistant(content.clone()));
 
         let input_price = self.input_price;
         let output_price = self.output_price;
@@ -404,7 +404,8 @@ impl AppStateContainer {
         self.session_monitor.add_usage(&usage, input_price, output_price);
         
         // Update context manager with new message for token tracking
-        self.context_manager.set_history(&self.chat_history);
+        let chat_msgs: Vec<mylm_core::llm::chat::ChatMessage> = self.chat_history.iter().map(|m| m.message.clone()).collect();
+        self.context_manager.set_history(&chat_msgs);
 
         if self.chat_auto_scroll {
             self.chat_scroll = 0;
@@ -413,11 +414,11 @@ impl AppStateContainer {
 
     #[allow(dead_code)]
     pub fn add_system_message(&mut self, content: &str) {
-        use mylm_core::llm::chat::ChatMessage;
-        self.chat_history.push(ChatMessage::system(content.to_string()));
+        self.chat_history.push(TimestampedChatMessage::system(content.to_string()));
         
         // Update context manager with new message for token tracking
-        self.context_manager.set_history(&self.chat_history);
+        let chat_msgs: Vec<mylm_core::llm::chat::ChatMessage> = self.chat_history.iter().map(|m| m.message.clone()).collect();
+        self.context_manager.set_history(&chat_msgs);
 
         if self.chat_auto_scroll {
             self.chat_scroll = 0;
@@ -427,11 +428,11 @@ impl AppStateContainer {
     /// Add assistant message without token usage (for simple UI messages)
     #[allow(dead_code)]
     pub fn add_assistant_message_simple(&mut self, content: &str) {
-        use mylm_core::llm::chat::ChatMessage;
-        self.chat_history.push(ChatMessage::assistant(content.to_string()));
+        self.chat_history.push(TimestampedChatMessage::assistant(content.to_string()));
         
         // Update context manager with new message for token tracking
-        self.context_manager.set_history(&self.chat_history);
+        let chat_msgs: Vec<mylm_core::llm::chat::ChatMessage> = self.chat_history.iter().map(|m| m.message.clone()).collect();
+        self.context_manager.set_history(&chat_msgs);
 
         if self.chat_auto_scroll {
             self.chat_scroll = 0;
@@ -444,6 +445,36 @@ impl AppStateContainer {
         self.terminal_auto_scroll = true;
     }
 
+    /// Process PTY data - parse and store terminal output
+    pub fn process_pty_data(&mut self, data: &[u8]) {
+        self.terminal_parser.process(data);
+        self.raw_buffer.extend_from_slice(data);
+        
+        // Update terminal history for scrollback
+        let screen = self.terminal_parser.screen();
+        let (rows, _cols) = screen.size();
+        let (cursor_row, _) = screen.cursor_position();
+        
+        // If cursor is at bottom and we have newlines, save scrolled lines to history
+        if cursor_row >= rows.saturating_sub(1) {
+            let newlines = data.iter().filter(|&&b| b == b'\n').count();
+            if newlines > 0 {
+                let screen_contents = screen.contents();
+                let lines: Vec<&str> = screen_contents.split('\n').collect();
+                for line in lines.iter().take(newlines.min(lines.len())) {
+                    if !line.trim().is_empty() {
+                        self.terminal_history.push(line.to_string());
+                    }
+                }
+                // Limit history size
+                if self.terminal_history.len() > 1000 {
+                    let to_remove = self.terminal_history.len() - 1000;
+                    self.terminal_history.drain(0..to_remove);
+                }
+            }
+        }
+    }
+
     /// Build a Session object from current state
     pub async fn build_current_session(&self) -> crate::tui::session::Session {
         use mylm_core::llm::chat::MessageRole;
@@ -452,14 +483,14 @@ impl AppStateContainer {
             .chat_history
             .iter()
             .rev()
-            .find(|m| m.role == MessageRole::Assistant)
-            .map(|m| m.content.chars().take(100).collect::<String>())
+            .find(|m| m.message.role == MessageRole::Assistant)
+            .map(|m| m.message.content.chars().take(100).collect::<String>())
             .unwrap_or_else(|| "New Session".to_string());
 
         crate::tui::session::Session {
             id: self.session_id.clone(),
             timestamp: chrono::Utc::now(),
-            history: self.chat_history.clone(),
+            history: self.chat_history.iter().map(|m| m.message.clone()).collect(),
             metadata: crate::tui::session::SessionMetadata {
                 last_message_preview: preview,
                 message_count: self.chat_history.len(),

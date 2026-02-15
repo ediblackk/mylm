@@ -1,6 +1,10 @@
 //! Memory Capability
 //!
 //! Provides long-term memory storage and retrieval with semantic search.
+//!
+//! This module provides two implementations:
+//! - `MemoryCapability`: Simple in-memory implementation for testing
+//! - `AgentMemoryManager`: Full-featured implementation with VectorStore backend
 
 use crate::agent::runtime::{
     capability::{Capability, TelemetryCapability},
@@ -8,11 +12,12 @@ use crate::agent::runtime::{
     impls::vector_store::{InMemoryVectorStore, SimpleEmbedder},
 };
 use crate::agent::cognition::{AgentDecision, InputEvent};
+use crate::agent::memory::AgentMemoryManager;
 use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 
-/// Memory entry
+/// Memory entry (legacy format)
 #[derive(Debug, Clone)]
 pub struct MemoryEntry {
     pub id: String,
@@ -32,23 +37,47 @@ pub enum MemoryCategory {
 }
 
 /// Memory capability - stores and retrieves memories
+/// 
+/// Note: For production use, prefer `AgentMemoryManager` from `crate::agent::memory`
+/// which provides full VectorStore integration.
 pub struct MemoryCapability {
     memories: Arc<RwLock<Vec<MemoryEntry>>>,
     vector_store: Arc<InMemoryVectorStore>,
+    /// Optional reference to the full memory manager
+    memory_manager: Option<Arc<AgentMemoryManager>>,
 }
 
-/// Vector store trait for semantic search
+/// Vector store trait for semantic search (legacy)
 #[async_trait::async_trait]
 pub trait VectorStore: Send + Sync {
     async fn store(&self, id: &str, embedding: Vec<f32>, content: &str);
-    async fn search(&self, query_embedding: Vec<f32>, top_k: usize) -> Vec<String>;
+    async fn search(&self, query_embedding: Vec<f32>, top_k: usize) -> Vec<SearchResult>;
+}
+
+/// Search result from vector store
+#[derive(Debug, Clone)]
+pub struct SearchResult {
+    pub id: String,
+    pub content: String,
+    pub score: f32,
 }
 
 impl MemoryCapability {
+    /// Create a new memory capability (in-memory only)
     pub fn new() -> Self {
         Self {
             memories: Arc::new(RwLock::new(Vec::new())),
             vector_store: Arc::new(InMemoryVectorStore::new()),
+            memory_manager: None,
+        }
+    }
+    
+    /// Create with a full AgentMemoryManager backend
+    pub fn with_manager(manager: Arc<AgentMemoryManager>) -> Self {
+        Self {
+            memories: Arc::new(RwLock::new(Vec::new())),
+            vector_store: Arc::new(InMemoryVectorStore::new()),
+            memory_manager: Some(manager),
         }
     }
     
@@ -56,6 +85,18 @@ impl MemoryCapability {
     pub async fn store(&self, content: impl Into<String>, category: MemoryCategory) -> String {
         let id = uuid::Uuid::new_v4().to_string();
         let content = content.into();
+        
+        // Also store in memory manager if available
+        if let Some(ref manager) = self.memory_manager {
+            let memory_type = match category {
+                MemoryCategory::Fact => crate::memory::store::MemoryType::Discovery,
+                MemoryCategory::UserPreference => crate::memory::store::MemoryType::UserNote,
+                MemoryCategory::TaskResult => crate::memory::store::MemoryType::Decision,
+                MemoryCategory::Conversation => crate::memory::store::MemoryType::UserNote,
+                MemoryCategory::Code => crate::memory::store::MemoryType::Discovery,
+            };
+            let _ = manager.add_memory(&content, memory_type).await;
+        }
         
         let entry = MemoryEntry {
             id: id.clone(),
@@ -115,6 +156,23 @@ impl MemoryCapability {
     
     /// Get recent memories
     pub async fn recent(&self, limit: usize) -> Vec<MemoryEntry> {
+        // If we have a memory manager, try to get from there first
+        if let Some(ref manager) = self.memory_manager {
+            if let Ok(memories) = manager.get_hot_memories(limit).await {
+                if !memories.is_empty() {
+                    return memories.into_iter().map(|m| MemoryEntry {
+                        id: m.id.to_string(),
+                        content: m.content,
+                        category: MemoryCategory::Fact, // Default
+                        timestamp: chrono::DateTime::from_timestamp(m.created_at, 0)
+                            .unwrap_or_else(|| chrono::Utc::now()),
+                        importance: 0.5,
+                    }).collect();
+                }
+            }
+        }
+        
+        // Fallback to local memories
         let memories = self.memories.read().await;
         memories.iter()
             .rev()
@@ -125,6 +183,12 @@ impl MemoryCapability {
     
     /// Format memories for inclusion in prompt
     pub async fn format_for_prompt(&self, limit: usize) -> String {
+        // Try memory manager first
+        if let Some(ref manager) = self.memory_manager {
+            return manager.format_hot_memory_for_prompt(limit).await;
+        }
+        
+        // Fallback to local
         let memories = self.recent(limit).await;
         if memories.is_empty() {
             return "No relevant memories.".to_string();
@@ -138,6 +202,12 @@ impl MemoryCapability {
     
     /// Format semantic search results for prompt
     pub async fn format_semantic_for_prompt(&self, query: &str, limit: usize) -> String {
+        // Try memory manager first
+        if let Some(ref manager) = self.memory_manager {
+            return manager.search_and_format(query, limit).await;
+        }
+        
+        // Fallback to local
         let memories = self.search_semantic(query, limit).await;
         if memories.is_empty() {
             return "No relevant memories found.".to_string();
@@ -152,6 +222,11 @@ impl MemoryCapability {
     /// Get memory count
     pub async fn count(&self) -> usize {
         self.memories.read().await.len()
+    }
+    
+    /// Get the underlying memory manager if available
+    pub fn memory_manager(&self) -> Option<&Arc<AgentMemoryManager>> {
+        self.memory_manager.as_ref()
     }
 }
 
@@ -203,7 +278,7 @@ impl VectorStore for StubVectorStore {
         // No-op
     }
     
-    async fn search(&self, _query_embedding: Vec<f32>, _top_k: usize) -> Vec<String> {
+    async fn search(&self, _query_embedding: Vec<f32>, _top_k: usize) -> Vec<SearchResult> {
         vec![]
     }
 }

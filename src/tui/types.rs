@@ -35,7 +35,73 @@ pub use mylm_core::llm::chat::ChatMessage;
 // TUI-Specific Types
 // ============================================================================
 
+// ---------------------------------------------------------------------------
+// Chat Message with Metadata (timestamp, generation time)
+// ---------------------------------------------------------------------------
 
+/// Enhanced chat message with timestamp and generation time metadata
+#[derive(Debug, Clone)]
+pub struct TimestampedChatMessage {
+    /// The underlying chat message
+    pub message: ChatMessage,
+    /// Unix timestamp when the message was created (seconds since epoch)
+    pub timestamp: i64,
+    /// Generation time in milliseconds (for AI responses)
+    pub generation_time_ms: Option<u64>,
+}
+
+impl TimestampedChatMessage {
+    /// Create a new timestamped message with current time
+    pub fn new(message: ChatMessage) -> Self {
+        Self {
+            message,
+            timestamp: chrono::Utc::now().timestamp(),
+            generation_time_ms: None,
+        }
+    }
+    
+    /// Create a new user message with timestamp
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::new(ChatMessage::user(content))
+    }
+    
+    /// Create a new assistant message with timestamp
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self::new(ChatMessage::assistant(content))
+    }
+    
+    /// Create a new system message with timestamp
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::new(ChatMessage::system(content))
+    }
+    
+    /// Set the generation time
+    pub fn with_generation_time(mut self, ms: u64) -> Self {
+        self.generation_time_ms = Some(ms);
+        self
+    }
+    
+    /// Get formatted timestamp for display
+    pub fn formatted_time(&self) -> String {
+        use chrono::{DateTime, Local, Utc};
+        let dt = DateTime::<Utc>::from_timestamp(self.timestamp, 0)
+            .map(|dt| dt.with_timezone(&Local))
+            .unwrap_or_else(|| Local::now());
+        dt.format("%H:%M").to_string()
+    }
+}
+
+impl From<ChatMessage> for TimestampedChatMessage {
+    fn from(message: ChatMessage) -> Self {
+        Self::new(message)
+    }
+}
+
+impl From<TimestampedChatMessage> for ChatMessage {
+    fn from(msg: TimestampedChatMessage) -> Self {
+        msg.message
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Application State (TUI State Machine)

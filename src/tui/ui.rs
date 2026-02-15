@@ -81,7 +81,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         render_jobs_panel(frame, app, main_layout[3]);
     }
 
-    if app.state == AppState::ConfirmExit || app.state == AppState::NamingSession {
+    if app.state == AppState::ConfirmExit {
         render_confirm_exit(frame, app);
     }
 }
@@ -98,9 +98,27 @@ fn render_memory_view(frame: &mut Frame, app: &mut App, area: Rect) {
         .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
         .split(chunks[1]);
 
+    // Build title - show filter if active
+    let title = if !app.memory_search_query.is_empty() {
+        // Showing filtered results
+        format!(
+            " Memories (filter: '{}' - {}/{}) ↑↓:Scroll Esc:Clear r:Reload ",
+            app.memory_search_query,
+            app.memory_graph_scroll + 1,
+            app.memory_graph.nodes.len()
+        )
+    } else {
+        // Normal view
+        format!(
+            " Memories ({}/{}) ↑↓:Scroll Type:Filter r:Reload ",
+            app.memory_graph_scroll + 1,
+            app.memory_graph.nodes.len()
+        )
+    };
+    
     let list_block = Block::default()
         .borders(Borders::ALL)
-        .title(" Memory Nodes (Scroll: Up/Down) ")
+        .title(title)
         .border_style(Style::default().fg(Color::Yellow));
 
     let mut items = Vec::new();
@@ -112,15 +130,25 @@ fn render_memory_view(frame: &mut Frame, app: &mut App, area: Rect) {
             title.to_string()
         };
         
+        // Format timestamp
+        let timestamp_str = format_timestamp(node.memory.created_at);
+        
         let type_tag = format!("[{}] ", node.memory.r#type);
         items.push(ListItem::new(Line::from(vec![
+            Span::styled(timestamp_str, Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
             Span::styled(type_tag, Style::default().fg(Color::Cyan)),
             Span::raw(truncated_title),
         ])));
     }
 
     if items.is_empty() {
-        items.push(ListItem::new(Line::from("No related memories found.")));
+        let empty_msg = if !app.memory_search_query.is_empty() {
+            format!("No memories match filter: '{}' (press Esc to clear)", app.memory_search_query)
+        } else {
+            "No memories found.".to_string()
+        };
+        items.push(ListItem::new(Line::from(empty_msg)));
     }
 
     let list = List::new(items)
@@ -152,6 +180,10 @@ fn render_memory_view(frame: &mut Frame, app: &mut App, area: Rect) {
         detail_lines.push(Line::from(vec![
             Span::styled("ID: ", Style::default().fg(Color::Gray)),
             Span::raw(node.memory.id.to_string()),
+        ]));
+        detail_lines.push(Line::from(vec![
+            Span::styled("Time: ", Style::default().fg(Color::Gray)),
+            Span::raw(format_timestamp_full(node.memory.created_at)),
         ]));
         detail_lines.push(Line::from(vec![
             Span::styled("Type: ", Style::default().fg(Color::Gray)),
@@ -202,19 +234,13 @@ fn render_memory_view(frame: &mut Frame, app: &mut App, area: Rect) {
         frame.render_widget(p, right_chunks[0]);
     }
 
-    // Render Scratchpad
-    let scratchpad_content = app.scratchpad.try_read().map(|g| format!("{:?}", &*g)).unwrap_or_default();
-    let scratchpad_display = if scratchpad_content.trim().is_empty() {
-        "(Empty - use scratchpad tool to add notes)".to_string()
-    } else {
-        scratchpad_content
-    };
+    // Render Scratchpad (disabled in new architecture)
     let scratchpad_block = Block::default()
         .borders(Borders::ALL)
-        .title(" Scratchpad (Shared State) ")
-        .border_style(Style::default().fg(Color::Magenta));
+        .title(" Scratchpad (Disabled) ")
+        .border_style(Style::default().fg(Color::DarkGray));
     
-    let scratchpad_p = Paragraph::new(scratchpad_display)
+    let scratchpad_p = Paragraph::new("Scratchpad not available in new architecture")
         .block(scratchpad_block)
         .wrap(Wrap { trim: true });
     
@@ -265,31 +291,63 @@ pub fn render_help_panel(frame: &mut Frame, app: &mut App) {
 fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
     let stats = app.session_monitor.get_stats();
     let auto_approve = app.auto_approve.load(Ordering::SeqCst);
-
-    // Agent state indicator
-    let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let frame_char = spinner[(app.tick_count % spinner.len() as u64) as usize];
-
-    let elapsed = app.state_started_at.elapsed();
-    let elapsed_ms = elapsed.as_millis();
-    let elapsed_text = if elapsed_ms >= 1000 {
-        format!("{:.1}s", elapsed.as_secs_f64())
-    } else {
-        format!("{}ms", elapsed_ms)
+    
+    // Get status info from tracker
+    let status_info = app.status_tracker.current();
+    
+    // Get elapsed time - use tool elapsed if executing, otherwise state elapsed
+    let elapsed = match status_info {
+        crate::tui::status_tracker::StatusInfo::Executing { .. } => {
+            app.status_tracker.tool_elapsed().unwrap_or_else(|| app.state_started_at.elapsed())
+        }
+        _ => app.state_started_at.elapsed(),
     };
+    
+    let elapsed_text = format_elapsed(elapsed);
 
-    let (state_label, state_color) = match &app.state {
-        AppState::Idle => ("Ready".to_string(), Color::Green),
-        AppState::Thinking(info) => (format!("Thinking ({})", info), Color::Yellow),
-        AppState::Streaming(info) => (format!("Streaming ({})", info), Color::Green),
-        AppState::ExecutingTool(tool) => (format!("Executing ({})", tool), Color::Cyan),
-        AppState::WaitingForUser => ("Waiting".to_string(), Color::Magenta),
-        AppState::AwaitingApproval { tool, .. } => (format!("Approve? ({})", tool), Color::Yellow),
-        AppState::Error(err) => (format!("Error ({})", err), Color::Red),
-        AppState::ConfirmExit => ("Exit?".to_string(), Color::Yellow),
-        AppState::NamingSession => ("Naming".to_string(), Color::Cyan),
+    // Build status label and color based on status tracker state (static, no animation)
+    let (state_label, state_color, is_active) = match status_info {
+        crate::tui::status_tracker::StatusInfo::Error { message } => {
+            let msg = if message.len() > 35 {
+                format!("{}...", &message[..35])
+            } else {
+                message.clone()
+            };
+            (format!("⚠ Error: {}", msg), Color::Red, false)
+        }
+        crate::tui::status_tracker::StatusInfo::Executing { tool, args } => {
+            let args_preview = if args.len() > 25 {
+                format!("{}...", &args[..25])
+            } else if args.is_empty() {
+                "".to_string()
+            } else {
+                format!(" {}", args)
+            };
+            (format!("⚡ {}{}", tool, args_preview), Color::Cyan, true)
+        }
+        crate::tui::status_tracker::StatusInfo::Thinking => {
+            ("💭 Thinking...".to_string(), Color::Yellow, true)
+        }
+        crate::tui::status_tracker::StatusInfo::AwaitingApproval { tool, .. } => {
+            (format!("⏸ Approve {}? (y/n)", tool), Color::Magenta, true)
+        }
+        crate::tui::status_tracker::StatusInfo::Idle => {
+            match &app.state {
+                AppState::Idle => ("✓ Ready".to_string(), Color::Green, false),
+                AppState::Thinking(info) => (format!("💭 {}", info), Color::Yellow, true),
+                AppState::Streaming(info) => (format!("📡 {}", info), Color::Cyan, true),
+                AppState::ExecutingTool(tool) => (format!("⚡ {}", tool), Color::Cyan, true),
+                AppState::WaitingForUser => ("⏸ Waiting".to_string(), Color::Magenta, false),
+                AppState::AwaitingApproval { tool, .. } => (format!("⏸ Approve {}? (y/n)", tool), Color::Magenta, true),
+                AppState::Error(err) => (format!("⚠ {}", err), Color::Red, false),
+                AppState::ConfirmExit => ("❓ Exit? (y/n)".to_string(), Color::Yellow, false),
+                AppState::NamingSession => ("✎ Naming...".to_string(), Color::Cyan, true),
+            }
+        }
     };
-    let state_prefix = if app.state == AppState::Idle { "●" } else { frame_char };
+    
+    // Static indicator (no animation in top bar)
+    let state_prefix = if is_active { "◐" } else { "●" };
 
     // Top row: version | toggles | F-keys | state
     let left_spans = vec![
@@ -301,56 +359,52 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
     let center_spans = vec![
         // Auto-Approve toggle
         Span::styled(
-            if auto_approve { "[AUTO✓]" } else { "[AUTO✗]" },
+            if auto_approve { "[A✓]" } else { "[A✗]" },
             Style::default().fg(if auto_approve { Color::Green } else { Color::DarkGray }),
         ),
         Span::raw(" "),
         // PaCoRe toggle
         Span::styled(
-            if app.pacore_enabled { format!("[PACORE:{}]", app.pacore_rounds) } else { "[PACORE✗]".to_string() },
+            if app.pacore_enabled { format!("[P:{}]", app.pacore_rounds) } else { "[P:off]".to_string() },
             Style::default().fg(if app.pacore_enabled { Color::Green } else { Color::DarkGray }),
         ),
         Span::raw(" "),
-        // F-keys
-        Span::styled(
-            "[F1:Help]",
-            Style::default().fg(if app.show_help_view { Color::Green } else { Color::Yellow }),
-        ),
-        Span::styled("[F2:Focus]", Style::default().fg(Color::Yellow)),
-        Span::styled(
-            "[F3:Mem]",
-            Style::default().fg(if app.show_memory_view { Color::Green } else { Color::Yellow }),
-        ),
-        Span::styled(
-            "[F4:Jobs]",
-            Style::default().fg(if app.show_jobs_panel { Color::Green } else { Color::Yellow }),
-        ),
-        Span::styled("[Esc:Hub]", Style::default().fg(Color::Red)),
+        // F-keys (compact)
+        Span::styled("[F1:?]", Style::default().fg(if app.show_help_view { Color::Green } else { Color::Yellow })),
+        Span::styled("[F2:⇄]", Style::default().fg(Color::Yellow)),
+        Span::styled("[F3:M]", Style::default().fg(if app.show_memory_view { Color::Green } else { Color::Yellow })),
+        Span::styled("[F4:J]", Style::default().fg(if app.show_jobs_panel { Color::Green } else { Color::Yellow })),
+        Span::styled("[Esc:◀]", Style::default().fg(Color::Red)),
     ];
 
-    // Right side: state + elapsed
+    // Right side: animated spinner + state + elapsed
     let right_spans = vec![
         Span::styled(
-            format!("{} {}", state_prefix, state_label),
+            format!("{} ", state_prefix),
+            Style::default().fg(state_color),
+        ),
+        Span::styled(
+            state_label,
             Style::default().fg(state_color).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(format!(" ({})", elapsed_text), Style::default().fg(Color::DarkGray)),
+        Span::styled(format!(" {}", elapsed_text), Style::default().fg(Color::DarkGray)),
     ];
 
+    // Context usage gauge with color based on usage
     let ratio = app.session_monitor.get_context_ratio();
-    let gauge_color = if ratio >= 0.8 {
+    let gauge_color = if ratio >= 0.9 {
         Color::Red
-    } else if ratio >= 0.5 {
+    } else if ratio >= 0.7 {
         Color::Yellow
     } else {
         Color::Green
     };
 
-    // Gauge label includes cost + context
-    let label = format!("💰${:.2} | Ctx: {} / {} ({:.0}%)",
+    // Gauge label with cost and context
+    let label = format!("${:.2} │ CTX:{}/{} {:.0}%",
         stats.cost,
-        stats.active_context_tokens,
-        stats.max_context_tokens,
+        format_tokens(stats.active_context_tokens),
+        format_tokens(stats.max_context_tokens),
         (ratio * 100.0).clamp(0.0, 100.0)
     );
 
@@ -365,7 +419,7 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
     // Split top row into left/center/right
     let top_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(12), Constraint::Min(60), Constraint::Min(20)])
+        .constraints([Constraint::Min(12), Constraint::Min(50), Constraint::Min(40)])
         .split(rows[0]);
 
     let left_text = Line::from(left_spans);
@@ -382,6 +436,31 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
     frame.render_widget(Paragraph::new(center_text), top_chunks[1]);
     frame.render_widget(Paragraph::new(right_text), top_chunks[2]);
     frame.render_widget(gauge, rows[1]);
+}
+
+/// Format elapsed time in human-readable form
+fn format_elapsed(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    let millis = duration.subsec_millis();
+    
+    if secs >= 60 {
+        format!("{:02}:{:02}", secs / 60, secs % 60)
+    } else if secs > 0 {
+        format!("{}.{:01}s", secs, millis / 100)
+    } else {
+        format!("{}ms", millis)
+    }
+}
+
+/// Format token count with K/M suffix
+fn format_tokens(tokens: u32) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}K", tokens as f64 / 1_000.0)
+    } else {
+        format!("{}", tokens)
+    }
 }
 
 /// Render bottom bar - now empty since everything moved to top
@@ -581,7 +660,8 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut all_visual_lines: Vec<VisualLineInfo> = Vec::new();
     let mut abs_line_idx: usize = 0;
     
-    for m in &app.chat_history {
+    for msg_meta in &app.chat_history {
+        let m = &msg_meta.message;
         // Aggressively hide command outputs in non-verbose mode
         if !app.verbose_mode && m.content.contains("CMD_OUTPUT:") {
             if m.role == MessageRole::Tool || (m.role == MessageRole::User && m.content.contains("Observation:")) {
@@ -607,15 +687,27 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
             continue;
         }
 
-        // Compact prefix without timestamp (timestamp shown as bullet point when needed)
-        let (prefix, color) = match m.role {
+        // Build prefix (just role, no timestamp - timestamp shown at bottom)
+        let timestamp_str = msg_meta.formatted_time();
+        // Format generation time with minimum 0.1s (never show 0.0)
+        let gen_time_str = msg_meta.generation_time_ms.map(|ms| {
+            let seconds = (ms as f64 / 1000.0).max(0.1);
+            format!("{:.1}s", seconds)
+        });
+        
+        let (role_prefix, color) = match m.role {
             MessageRole::User => ("You: ", Color::Cyan),
             MessageRole::Assistant => ("AI: ", Color::Green),
             MessageRole::System => ("Sys: ", Color::Gray),
             _ => ("AI: ", Color::Green),
         };
+        
+        // Prefix is just the role (timestamp shown at bottom of message)
+        let prefix = "";
+        
+        // Role prefix gets colored styling (You: cyan, AI: green)
         let prefix_style = Style::default().fg(color).add_modifier(Modifier::BOLD);
-        let prefix_len = prefix.len();
+        let prefix_len = prefix.len() + role_prefix.len();
 
         let mut lines_to_render = Vec::new();
         
@@ -665,10 +757,12 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
                 continue;
             }
 
-            let is_thought = trimmed.starts_with("Thought:") || trimmed.starts_with("**Thought:**");
+            let is_thought = trimmed.starts_with("Thought:") || trimmed.starts_with("**Thought:**") || trimmed.starts_with("💭");
             if is_thought {
-                if app.show_thoughts && app.verbose_mode {
-                    lines_to_render.push((line, Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)));
+                // Always show thoughts (streaming), but style softly
+                let thought_style = Style::default().fg(Color::Rgb(128, 128, 128)).add_modifier(Modifier::ITALIC);
+                if app.show_thoughts {
+                    lines_to_render.push((line, thought_style));
                 }
                 continue;
             }
@@ -728,11 +822,20 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
             lines_to_render.push((line, Style::default()));
         }
 
-        if has_hidden_context {
-            // Show compact timestamp instead of "[Context Attached]"
-            let short_time = chrono::Local::now().format("%H:%M").to_string();
-            lines_to_render.push((format!("• {}", short_time), Style::default().fg(Color::DarkGray)));
-        }
+        // Add timestamp at bottom for all messages, with generation time for AI
+        let bottom_text = if m.role == MessageRole::Assistant {
+            if let Some(ref gen_time) = gen_time_str {
+                format!("[{}] took {}", timestamp_str, gen_time)
+            } else {
+                format!("[{}]", timestamp_str)
+            }
+        } else {
+            format!("[{}]", timestamp_str)
+        };
+        // Right-align the timestamp
+        let padding = available_width.saturating_sub(prefix_len).saturating_sub(bottom_text.len());
+        let padded_bottom = format!("{}{}", " ".repeat(padding), bottom_text);
+        lines_to_render.push((padded_bottom, Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)));
 
         if m.role == MessageRole::Assistant && lines_to_render.iter().all(|(l, _)| l.trim().is_empty()) {
             continue;
@@ -753,10 +856,20 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
             let wrapped = wrap_text(&text, content_width);
             for (wrapped_idx, line_str) in wrapped.iter().enumerate() {
                 let is_first = first_line_flag && wrapped_idx == 0;
-                let prefix_str = if is_first { prefix.to_string() } else { " ".repeat(prefix_len) };
-                let full_text = format!("{}{}", prefix_str, line_str);
-                let prefix_style = if is_first { prefix_style } else { Style::default() };
-                all_visual_lines.push(VisualLineInfo { full_text: full_text.clone(), prefix_len, prefix_style, content_style: style });
+                let full_text = if is_first {
+                    // First line: [timestamp] [role]: content
+                    format!("{}{}{}", prefix, role_prefix, line_str)
+                } else {
+                    // Continuation: indent to align with content
+                    format!("{}{}", " ".repeat(prefix_len), line_str)
+                };
+                let current_prefix_style = if is_first { prefix_style } else { Style::default() };
+                all_visual_lines.push(VisualLineInfo { 
+                    full_text: full_text.clone(), 
+                    prefix_len: if is_first { prefix.len() } else { prefix_len }, 
+                    prefix_style: current_prefix_style, 
+                    content_style: style 
+                });
                 app.chat_visual_lines.push((full_text, abs_line_idx));
                 abs_line_idx += 1;
             }
@@ -896,20 +1009,34 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
             Style::default()
         });
 
+    // Check status tracker first for errors and tool execution status
+    let status_info = app.status_tracker.current();
+    
     if let Some(status) = &app.status_message {
         chat_block = chat_block.title_bottom(Line::from(vec![
             Span::styled(format!(" {} ", status), Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC))
         ]));
+    } else if let crate::tui::status_tracker::StatusInfo::Error { message } = status_info {
+        // Show error from status tracker (e.g., tool execution errors)
+        let err_preview = if message.len() > 50 {
+            format!("{}...", &message[..50])
+        } else {
+            message.clone()
+        };
+        chat_block = chat_block.title_bottom(Line::from(vec![
+            Span::styled(format!(" ❌ Error: {} ", err_preview), 
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+        ]));
     } else if app.state != AppState::Idle {
         let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let frame = spinner[(app.tick_count % spinner.len() as u64) as usize];
+        let frame = spinner[(app.status_animation_frame % spinner.len() as u64) as usize];
         
         let (status_text, color) = match &app.state {
             AppState::Thinking(info) => (format!(" {} Thinking ({}) ", frame, info), Color::Yellow),
             AppState::Streaming(info) => (format!(" {} Streaming: {} ", frame, info), Color::Green),
             AppState::ExecutingTool(tool) => (format!(" {} Executing: {} ", frame, tool), Color::Cyan),
             AppState::WaitingForUser => (" ⏳ Waiting for Approval ".to_string(), Color::Magenta),
-            AppState::AwaitingApproval { tool, .. } => (format!(" ⚠️  Approve: {}? (Y/N) ", tool), Color::Yellow),
+            AppState::AwaitingApproval { .. } => (" ⏳ Awaiting your response ".to_string(), Color::Yellow),
             AppState::Error(err) => (format!(" ❌ Error: {} ", err), Color::Red),
             AppState::ConfirmExit => (" ⚠️  Confirm Exit? ".to_string(), Color::Yellow),
             AppState::NamingSession => (" 💾 Name Session ".to_string(), Color::Cyan),
@@ -1078,86 +1205,46 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
     lines
 }
 
-fn render_confirm_exit(frame: &mut Frame, app: &mut App) {
+fn render_confirm_exit(frame: &mut Frame, _app: &mut App) {
     let area = frame.area();
+    
+    // Simple centered dialog for y/n confirmation
+    let dialog_area = centered_rect(50, 20, area);
+    
+    // Clear background
+    frame.render_widget(ratatui::widgets::Clear, dialog_area);
+    
     let block = Block::default()
         .title(" ⚠️  Exit Confirmation ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
         .style(Style::default().bg(Color::Black));
-
-    // Center the dialog
-    let dialog_area = centered_rect(60, 40, area);
-    frame.render_widget(ratatui::widgets::Clear, dialog_area); // Clear the area behind the dialog
+    
     frame.render_widget(block, dialog_area);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .margin(2)
         .constraints([
-            Constraint::Length(1), // Question
-            Constraint::Length(1), // Empty
-            Constraint::Length(3), // Input field for name
+            Constraint::Length(2), // Question
             Constraint::Min(0),    // Instructions
         ])
         .split(dialog_area);
 
     let question = Paragraph::new(Line::from(vec![
-        Span::raw("Are you sure you want to exit the current session?"),
+        Span::raw("Are you sure you want to exit?"),
     ])).alignment(ratatui::layout::Alignment::Center);
     frame.render_widget(question, chunks[0]);
 
-    let input_block = Block::default()
-        .title(" Session Name (Optional) ")
-        .borders(Borders::ALL)
-        .border_style(if app.state == AppState::NamingSession {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Cyan)
-        });
+    let instructions = Paragraph::new(Line::from(vec![
+        Span::styled(" [Y] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::raw("Yes, exit"),
+        Span::raw("  "),
+        Span::styled(" [N] ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Span::raw("No, cancel"),
+    ])).alignment(ratatui::layout::Alignment::Center);
     
-    let name_text = if app.exit_name_input.is_empty() {
-        Span::styled(" (session_YYYYMMDD_HHMMSS) ", Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC))
-    } else {
-        Span::raw(&app.exit_name_input)
-    };
-    
-    let name_p = Paragraph::new(name_text).block(input_block);
-    frame.render_widget(name_p, chunks[2]);
-
-    let mut instructions_lines = vec![Line::from("")];
-
-    if app.state == AppState::ConfirmExit {
-        instructions_lines.push(Line::from(vec![
-            Span::styled(" [S] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::raw("Save & Exit"),
-            Span::raw("  "),
-            Span::styled(" [E] ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            Span::raw("Exit (Discard)"),
-            Span::raw("  "),
-            Span::styled(" [C] ", Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)),
-            Span::raw("Cancel"),
-        ]));
-    } else {
-        instructions_lines.push(Line::from(vec![
-            Span::styled(" Enter ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::raw("Confirm Name & Save"),
-            Span::raw("  "),
-            Span::styled(" Esc ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw("Back"),
-        ]));
-    }
-
-    let instructions = Paragraph::new(instructions_lines).alignment(ratatui::layout::Alignment::Center);
-    frame.render_widget(instructions, chunks[3]);
-
-    if app.state == AppState::NamingSession {
-        // Set cursor in the name input field
-        frame.set_cursor_position((
-            chunks[2].x + 1 + app.exit_name_input.chars().count() as u16,
-            chunks[2].y + 1,
-        ));
-    }
+    frame.render_widget(instructions, chunks[1]);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
@@ -1587,4 +1674,36 @@ fn render_job_detail(frame: &mut Frame, app: &mut App, area: Rect) {
         .wrap(Wrap { trim: false });
 
     frame.render_widget(paragraph, inner_area);
+}
+
+// Timestamp formatting helpers for memory view
+
+/// Format a unix timestamp as a compact string for the list view
+/// Shows date if not today, otherwise shows time
+fn format_timestamp(ts: i64) -> String {
+    use chrono::{DateTime, Local, NaiveDateTime, Utc};
+    
+    let dt = DateTime::<Utc>::from_timestamp(ts, 0)
+        .map(|dt| dt.with_timezone(&Local))
+        .unwrap_or_else(|| Local::now());
+    
+    let now = Local::now();
+    let is_today = dt.date_naive() == now.date_naive();
+    
+    if is_today {
+        // Today: show time only
+        dt.format("%H:%M").to_string()
+    } else {
+        // Not today: show month/day
+        dt.format("%m/%d").to_string()
+    }
+}
+
+/// Format a unix timestamp as a full string for the detail view
+fn format_timestamp_full(ts: i64) -> String {
+    use chrono::{DateTime, Local, Utc};
+    
+    DateTime::<Utc>::from_timestamp(ts, 0)
+        .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_else(|| "Unknown".to_string())
 }

@@ -46,8 +46,9 @@ pub struct LlmConfig {
     /// Memory configuration (auto-record, auto-context)
     pub memory: crate::config::MemoryConfig,
     /// Additional provider-specific parameters
-    
     pub extra_params: HashMap<String, String>,
+    /// Enable web search for providers that support it (e.g., Kimi)
+    pub web_search_enabled: bool,
 }
 
 impl LlmConfig {
@@ -73,6 +74,7 @@ impl LlmConfig {
             condense_threshold: 0.8,
             memory: crate::config::MemoryConfig::default(),
             extra_params: HashMap::new(),
+            web_search_enabled: false,
         }
     }
 
@@ -111,9 +113,14 @@ impl LlmConfig {
     }
 
     /// Set system prompt
-    
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         self.system_prompt = Some(prompt);
+        self
+    }
+
+    /// Enable web search for providers that support it
+    pub fn with_web_search(mut self, enabled: bool) -> Self {
+        self.web_search_enabled = enabled;
         self
     }
 }

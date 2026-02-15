@@ -78,6 +78,7 @@ pub mod session;
 pub mod builder;
 pub mod worker;
 pub mod factory;
+pub mod memory;
 
 /// Contract module - Core type definitions and traits
 ///
@@ -126,7 +127,18 @@ pub use crate::config::agent::{
 pub use session::{
     Session, SessionConfig, SessionError,
     SessionInput, WorkerEvent,
+    SessionPersistence, PersistedSession, SessionMetadata,
+    AgentStateCheckpoint, SessionBuilder,
 };
+
+pub use memory::{
+    AgentMemoryManager, MemoryMode, MemoryStats,
+    MemoryContextBuilder, InjectionStrategy,
+    MemoryExtractor, ExtractedMemory, extract_memories,
+};
+
+// MemoryProvider temporarily removed - TODO: restore with new architecture
+// pub use cognition::llm_engine::MemoryProvider;
 
 #[cfg(test)]
 mod test_architecture;

@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::sync::Arc;
 
 use mylm_core::config::Config;
 
@@ -377,25 +378,16 @@ async fn run_provider_menu(config: &mut Config) -> Result<()> {
 /// ============================================================================
 
 async fn run_web_search_menu(config: &mut Config) -> Result<()> {
-    use hub::WebSearchMenuChoice;
-    
-    loop {
-        match hub::show_web_search_menu(config)? {
-            WebSearchMenuChoice::ToggleEnabled => {
-                config.features.web_search = !config.features.web_search;
-                config.save_default()?;
-                println!("\n✅ Web search {}", 
-                    if config.features.web_search { "enabled" } else { "disabled" });
-            }
-            WebSearchMenuChoice::SetProvider => {
-                hub::handle_web_search_settings(config).await?;
-            }
-            WebSearchMenuChoice::SetApiKey => {
-                hub::handle_web_search_settings(config).await?;
-            }
-            WebSearchMenuChoice::Back => break,
-        }
+    // Sync features.web_search with profile.web_search.enabled on entry
+    let profile_enabled = config.active_profile().web_search.enabled;
+    if config.features.web_search != profile_enabled {
+        log::debug!("[CONFIG] Syncing web_search: features={} profile={}", 
+            config.features.web_search, profile_enabled);
+        config.features.web_search = profile_enabled;
     }
+    
+    // Use the unified web search settings handler
+    hub::handle_web_search_settings(config).await?;
     Ok(())
 }
 
@@ -530,10 +522,52 @@ async fn setup_wizard(config: &mut Config) -> Result<()> {
 async fn run_tui_with_session(config: &Config) -> Result<tui::TuiResult> {
     use mylm_core::agent::AgentSessionFactory;
     use mylm_core::agent::contract::Session;
-    use std::sync::Arc;
-    use tokio::sync::{RwLock, mpsc};
+    use tokio::sync::mpsc;
     
     mylm_core::info_log!("[MAIN] Starting TUI session (profile: {})", config.active_profile);
+    
+    // Create PTY manager FIRST (needed for terminal executor)
+    let cwd = std::env::current_dir().ok();
+    let (pty_manager, pty_rx) = match cwd {
+        Some(path) => match tui::spawn_pty(Some(path)) {
+            Ok((pm, rx)) => (pm, rx),
+            Err(e) => {
+                mylm_core::error_log!("[MAIN] Failed to spawn PTY: {}", e);
+                eprintln!("❌ Failed to spawn PTY: {}", e);
+                return Ok(tui::TuiResult::ReturnToHub);
+            }
+        },
+        None => {
+            mylm_core::error_log!("[MAIN] Could not determine current directory");
+            eprintln!("❌ Could not determine current directory");
+            return Ok(tui::TuiResult::ReturnToHub);
+        }
+    };
+    
+    // Create job registry
+    let job_registry = tui::types::JobRegistry::new();
+    
+    // Create App with PTY (but no session yet)
+    let mut app = tui::app::App::new(
+        pty_manager,
+        config.clone(),
+        job_registry,
+        false, // not incognito
+    );
+    app.pty_rx = Some(pty_rx);
+    
+    // Create terminal executor that uses the App's parser
+    // We use a shared reference so the executor can access the App's screen
+    let app_ref = std::sync::Arc::new(std::sync::Mutex::new(()));
+    let _ = app_ref; // Placeholder - we'll use a different approach
+    
+    // For now, use default terminal executor
+    // In the future, we'd create a TuiTerminalExecutor here
+    // let terminal_executor = Arc::new(tui::terminal_executor::TuiTerminalExecutor::from_app(app_ref));
+    
+    // Create approval capability for interactive tool approval
+    let (approval_capability, _approval_rx) = tui::approval::TuiApprovalCapability::new();
+    let approval_arc = Arc::new(approval_capability);
     
     // Create agent session factory
     let factory = AgentSessionFactory::new(config.clone());
@@ -585,40 +619,7 @@ async fn run_tui_with_session(config: &Config) -> Result<tui::TuiResult> {
         mylm_core::debug_log!("[BRIDGE] Bridge task ended, forwarded {} events", event_count);
     });
     
-    // Create PTY manager
-    let cwd = std::env::current_dir().ok();
-    let pty_manager = match cwd {
-        Some(path) => match tui::spawn_pty(path) {
-            Ok((pm, _)) => pm,
-            Err(e) => {
-                mylm_core::error_log!("[MAIN] Failed to spawn PTY: {}", e);
-                eprintln!("❌ Failed to spawn PTY: {}", e);
-                return Ok(tui::TuiResult::ReturnToHub);
-            }
-        },
-        None => {
-            mylm_core::error_log!("[MAIN] Could not determine current directory");
-            eprintln!("❌ Could not determine current directory");
-            return Ok(tui::TuiResult::ReturnToHub);
-        }
-    };
-    
-    // Create scratchpad
-    let scratchpad = Arc::new(RwLock::new(tui::types::StructuredScratchpad::new()));
-    
-    // Create job registry
-    let job_registry = tui::types::JobRegistry::new();
-    
-    // Create App with input_tx
-    let mut app = tui::app::App::new(
-        pty_manager,
-        config.clone(),
-        scratchpad,
-        job_registry,
-        false, // not incognito
-    );
-    
-    // Set the input channel and spawn session
+    // Set the input channel
     app.input_tx = Some(input_tx);
     
     let session_handle = tokio::spawn(async move {

@@ -150,6 +150,7 @@ impl Config {
             output_price: legacy.endpoint.output_price,
             tested_at: None,
             test_error: None,
+            web_search: crate::config::WebSearchConfig::default(),
         };
         config.profiles.insert(legacy.profile.clone(), profile_config);
         
@@ -260,6 +261,17 @@ impl Config {
             (tested, error.is_some(), error)
         })
     }
+    
+    /// Get approval policy from configuration
+    /// 
+    /// Returns the approval policy that determines which tools require
+    /// user approval before execution. Currently returns a default policy,
+    /// but can be extended to read from profile configuration.
+    pub fn approval_policy(&self) -> crate::agent::contract::config::ApprovalPolicy {
+        // For now, return the default approval policy
+        // In the future, this can be loaded from profile configuration
+        crate::agent::contract::config::ApprovalPolicy::default()
+    }
 }
 
 fn default_version() -> String {
@@ -319,6 +331,10 @@ pub struct ProfileConfig {
     /// Error message from last test (None if test succeeded)
     #[serde(default)]
     pub test_error: Option<String>,
+    
+    /// Web search configuration for this profile
+    #[serde(default)]
+    pub web_search: crate::config::WebSearchConfig,
 }
 
 impl Default for ProfileConfig {
@@ -336,6 +352,7 @@ impl Default for ProfileConfig {
             output_price: None,
             tested_at: None,
             test_error: None,
+            web_search: crate::config::WebSearchConfig::default(),
         }
     }
 }

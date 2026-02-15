@@ -739,6 +739,230 @@ impl VectorStore {
         Ok(())
     }
 
+    /// Get recent memories ordered by created_at (newest first)
+    pub async fn get_recent_memories(&self, limit: usize) -> Result<Vec<Memory>> {
+        let table = self.get_or_create_table("memories", self.get_memory_schema()).await?;
+        
+        // Query all memories and sort by created_at descending
+        let results = table.query()
+            .execute()
+            .await?;
+        
+        let batches: Vec<RecordBatch> = results.try_collect::<Vec<_>>().await?;
+        let mut memories = Vec::new();
+        
+        for batch in batches {
+            let id_col = batch.column_by_name("id").context("id column missing")?.as_any().downcast_ref::<Int64Array>().context("Failed downcast id")?;
+            let content_col = batch.column_by_name("content").context("content column missing")?.as_any().downcast_ref::<StringArray>().context("Failed downcast content")?;
+            
+            let summary_col = batch.column_by_name("summary");
+            let summary_array = if let Some(col) = summary_col {
+                col.as_any().downcast_ref::<StringArray>()
+            } else {
+                None
+            };
+
+            let created_at_col = batch.column_by_name("created_at").context("created_at column missing")?.as_any().downcast_ref::<Int64Array>().context("Failed downcast created_at")?;
+            let type_col = batch.column_by_name("type").context("type column missing")?.as_any().downcast_ref::<StringArray>().context("Failed downcast type")?;
+            let session_col = batch.column_by_name("session_id").context("session_id column missing")?.as_any().downcast_ref::<StringArray>().context("Failed downcast session")?;
+            let metadata_col = batch.column_by_name("metadata").context("metadata column missing")?.as_any().downcast_ref::<StringArray>().context("Failed downcast metadata")?;
+            let category_col = batch.column_by_name("category_id").context("category_id column missing")?.as_any().downcast_ref::<StringArray>().context("Failed downcast category")?;
+
+            for i in 0..batch.num_rows() {
+                let metadata_str = metadata_col.value(i);
+                let metadata = if metadata_col.is_null(i) || metadata_str.is_empty() {
+                    None
+                } else {
+                    serde_json::from_str(metadata_str).ok()
+                };
+
+                let summary = if let Some(arr) = summary_array {
+                    if arr.is_null(i) { None } else { Some(arr.value(i).to_string()) }
+                } else {
+                    None
+                };
+
+                memories.push(Memory {
+                    id: id_col.value(i),
+                    content: content_col.value(i).to_string(),
+                    summary,
+                    created_at: created_at_col.value(i),
+                    r#type: MemoryType::from(type_col.value(i)),
+                    session_id: if session_col.is_null(i) { None } else { Some(session_col.value(i).to_string()) },
+                    metadata,
+                    category_id: if category_col.is_null(i) { None } else { Some(category_col.value(i).to_string()) },
+                    embedding: None,
+                });
+            }
+        }
+        
+        // Sort by created_at descending (newest first)
+        memories.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        
+        // Limit results
+        memories.truncate(limit);
+        Ok(memories)
+    }
+
+    /// Get a single memory by ID
+    pub async fn get_memory_by_id(&self, id: i64) -> Result<Option<Memory>> {
+        let table = self.get_or_create_table("memories", self.get_memory_schema()).await?;
+        
+        let results = table.query()
+            .only_if(format!("id = {}", id))
+            .execute()
+            .await?;
+        
+        let batches: Vec<RecordBatch> = results.try_collect::<Vec<_>>().await?;
+        
+        for batch in batches {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            
+            let id_col = batch.column_by_name("id").context("id column missing")?.as_any().downcast_ref::<Int64Array>().context("Failed downcast id")?;
+            let content_col = batch.column_by_name("content").context("content column missing")?.as_any().downcast_ref::<StringArray>().context("Failed downcast content")?;
+            
+            let summary_col = batch.column_by_name("summary");
+            let summary_array = if let Some(col) = summary_col {
+                col.as_any().downcast_ref::<StringArray>()
+            } else {
+                None
+            };
+
+            let created_at_col = batch.column_by_name("created_at").context("created_at column missing")?.as_any().downcast_ref::<Int64Array>().context("Failed downcast created_at")?;
+            let type_col = batch.column_by_name("type").context("type column missing")?.as_any().downcast_ref::<StringArray>().context("Failed downcast type")?;
+            let session_col = batch.column_by_name("session_id").context("session_id column missing")?.as_any().downcast_ref::<StringArray>().context("Failed downcast session")?;
+            let metadata_col = batch.column_by_name("metadata").context("metadata column missing")?.as_any().downcast_ref::<StringArray>().context("Failed downcast metadata")?;
+            let category_col = batch.column_by_name("category_id").context("category_id column missing")?.as_any().downcast_ref::<StringArray>().context("Failed downcast category")?;
+
+            let metadata_str = metadata_col.value(0);
+            let metadata = if metadata_col.is_null(0) || metadata_str.is_empty() {
+                None
+            } else {
+                serde_json::from_str(metadata_str).ok()
+            };
+
+            let summary = if let Some(arr) = summary_array {
+                if arr.is_null(0) { None } else { Some(arr.value(0).to_string()) }
+            } else {
+                None
+            };
+
+            return Ok(Some(Memory {
+                id: id_col.value(0),
+                content: content_col.value(0).to_string(),
+                summary,
+                created_at: created_at_col.value(0),
+                r#type: MemoryType::from(type_col.value(0)),
+                session_id: if session_col.is_null(0) { None } else { Some(session_col.value(0).to_string()) },
+                metadata,
+                category_id: if category_col.is_null(0) { None } else { Some(category_col.value(0).to_string()) },
+                embedding: None,
+            }));
+        }
+        
+        Ok(None)
+    }
+
+    /// Delete a memory by ID
+    pub async fn delete_memory(&self, id: i64) -> Result<()> {
+        let table = self.get_or_create_table("memories", self.get_memory_schema()).await?;
+        
+        table.delete(&format!("id = {}", id))
+            .await
+            .context("Failed to delete memory")?;
+        
+        info!("Deleted memory with id: {}", id);
+        Ok(())
+    }
+
+    /// Update memory content and regenerate embedding
+    pub async fn update_memory(&self, id: i64, content: &str) -> Result<()> {
+        // First get the existing memory to preserve other fields
+        let existing = self.get_memory_by_id(id).await?;
+        if existing.is_none() {
+            anyhow::bail!("Memory with id {} not found", id);
+        }
+        let existing = existing.unwrap();
+        
+        // Generate new embedding for updated content
+        let model = self.embedding_model.clone();
+        let text = content.to_string();
+        
+        let embeddings = task::spawn_blocking(move || {
+            let mut model = model.blocking_lock();
+            model.embed(vec![text], None)
+        }).await.context("Join error during embedding")?
+        .context("Embedding failed")?;
+
+        let embedding = embeddings.first().context("No embedding generated")?.clone();
+        let created_at = existing.created_at;
+
+        let schema = self.get_memory_schema();
+        
+        let id_array = Int64Array::from(vec![id]);
+        let content_array = StringArray::from(vec![content]);
+        let summary_array = StringArray::from(vec![existing.summary.clone()]);
+        let created_at_array = Int64Array::from(vec![created_at]);
+        
+        let flat_embeddings = Float32Array::from(embedding);
+        let embedding_array = FixedSizeListArray::try_new_from_values(flat_embeddings, 384)?;
+        
+        let type_array = StringArray::from(vec![existing.r#type.to_string()]);
+        let session_id_array = StringArray::from(vec![existing.session_id.clone()]);
+        let metadata_str = existing.metadata.map(|m| m.to_string());
+        let metadata_array = StringArray::from(vec![metadata_str]);
+        let category_id_array = StringArray::from(vec![existing.category_id.clone()]);
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(id_array),
+                Arc::new(content_array),
+                Arc::new(summary_array),
+                Arc::new(created_at_array),
+                Arc::new(embedding_array),
+                Arc::new(type_array),
+                Arc::new(session_id_array),
+                Arc::new(metadata_array),
+                Arc::new(category_id_array),
+            ],
+        )?;
+
+        // Delete old record and add updated one
+        // LanceDB 0.23 doesn't have a clean update, so we delete + add
+        let table = self.get_or_create_table("memories", schema.clone()).await?;
+        
+        // Delete old
+        table.delete(&format!("id = {}", id))
+            .await
+            .context("Failed to delete old memory during update")?;
+        
+        // Add updated
+        table.add(Box::new(RecordBatchIterator::new(vec![Ok(batch)], schema)))
+            .execute()
+            .await
+            .context("Failed to add updated memory")?;
+
+        info!("Updated memory with id: {}", id);
+        Ok(())
+    }
+
+    /// Count total memories in the store
+    pub async fn count_memories(&self) -> Result<usize> {
+        let table = self.get_or_create_table("memories", self.get_memory_schema()).await?;
+        
+        let results = table.query()
+            .execute()
+            .await?;
+        
+        let batches: Vec<RecordBatch> = results.try_collect::<Vec<_>>().await?;
+        let count = batches.iter().map(|b| b.num_rows()).sum();
+        
+        Ok(count)
+    }
+
     /// Warmup the embedding model
     pub async fn warmup() -> Result<()> {
         let data_dir = dirs::data_dir()

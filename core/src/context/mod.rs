@@ -17,9 +17,20 @@ pub mod terminal;
 pub mod pack;
 pub mod manager;
 pub mod action_stamp;
+pub mod pruning;
 
 // Re-export context manager types
 pub use manager::{ContextConfig, ContextManager, ContextError, Message, TokenCounter};
+
+// Re-export pruning types
+pub use pruning::{
+    PrunedSegment, 
+    PrunedHistory, 
+    SmartPruningConfig, 
+    SmartPruneResult,
+    SmartPruning,
+    smart_prune,
+};
 
 // Re-export action stamp types
 pub use action_stamp::{ActionStamp, ActionStampType, ActionStampRegistry, stamps};

@@ -153,6 +153,17 @@ pub struct ChatRequest {
     /// Optional tools for the model to use
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ChatTool>>,
+    /// Response format - set to JSON mode to force JSON output
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<ResponseFormat>,
+}
+
+/// Response format for forcing JSON output
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponseFormat {
+    /// Type of response format - "json_object" or "text"
+    #[serde(rename = "type")]
+    pub type_: String,
 }
 
 /// Tool definition for chat requests
@@ -189,6 +200,7 @@ impl ChatRequest {
             stream: false,
             stop: None,
             tools: None,
+            response_format: None,
         }
     }
 
@@ -213,6 +225,14 @@ impl ChatRequest {
     /// Set temperature
     pub fn with_temperature(mut self, temp: f32) -> Self {
         self.temperature = Some(temp.clamp(0.0, 2.0));
+        self
+    }
+
+    /// Enable JSON mode - forces the model to output valid JSON
+    pub fn with_json_mode(mut self) -> Self {
+        self.response_format = Some(ResponseFormat {
+            type_: "json_object".to_string(),
+        });
         self
     }
 

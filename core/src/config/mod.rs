@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod bridge;
 pub mod llm;
+pub mod prompt;
 pub mod prompt_schema;
 pub mod store;
 pub mod types;

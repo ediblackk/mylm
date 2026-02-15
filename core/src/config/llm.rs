@@ -431,6 +431,14 @@ pub struct WebSearchConfig {
     /// Maximum number of results to include in context
     #[serde(default = "default_search_results")]
     pub max_results: usize,
+
+    /// Extra provider-specific configuration options
+    ///
+    /// These are passed directly to the search provider. Examples:
+    /// - Exa: `{"type": "auto", "category": "news", "maxAgeHours": "24"}`
+    /// - See provider documentation for available options
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_params: Option<std::collections::HashMap<String, String>>,
 }
 
 impl Default for WebSearchConfig {
@@ -440,6 +448,7 @@ impl Default for WebSearchConfig {
             provider: SearchProvider::default(),
             api_key: None,
             max_results: default_search_results(),
+            extra_params: None,
         }
     }
 }

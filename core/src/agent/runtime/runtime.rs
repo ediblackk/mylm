@@ -41,8 +41,12 @@ impl AgentRuntime {
         // Dispatch decision to appropriate capability
         let result = match decision {
             AgentDecision::CallTool(call) => {
+                let tool_name = call.name.clone();
                 let tool_result = self.graph.tools.execute(ctx, call).await?;
-                let event = InputEvent::ToolResult(tool_result);
+                let event = InputEvent::ToolResult {
+                    tool: tool_name,
+                    result: tool_result,
+                };
                 self.graph.telemetry.record_result(ctx, &event).await;
                 Ok(Some(event))
             }

@@ -28,7 +28,7 @@ pub enum InputEvent {
     WorkerResult(WorkerId, Result<String, WorkerError>),
     
     /// Tool execution completed
-    ToolResult(ToolResult),
+    ToolResult { tool: String, result: ToolResult },
     
     /// User responded to approval request
     ApprovalResult(ApprovalOutcome),

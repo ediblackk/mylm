@@ -200,6 +200,8 @@ pub struct ContextManager {
     pub action_stamps: ActionStampRegistry,
     /// Current conversation topic/focus (to prevent context jumping)
     pub conversation_topic: Option<String>,
+    /// Archive of pruned segments for recovery
+    pruned_history: crate::context::pruning::PrunedHistory,
 }
 
 impl ContextManager {
@@ -210,6 +212,7 @@ impl ContextManager {
             history: Vec::new(),
             action_stamps: ActionStampRegistry::new(50),
             conversation_topic: None,
+            pruned_history: crate::context::pruning::PrunedHistory::new(10),
         }
     }
 
@@ -349,6 +352,74 @@ impl ContextManager {
             max_bytes: 3 * 1024 * 1024, // 3MB default - hard safety limit
         };
         Self::new(config)
+    }
+    
+    /// Get the pruned history archive
+    pub fn pruned_history(&self) -> &crate::context::pruning::PrunedHistory {
+        &self.pruned_history
+    }
+    
+    /// Get mutable pruned history
+    pub fn pruned_history_mut(&mut self) -> &mut crate::context::pruning::PrunedHistory {
+        &mut self.pruned_history
+    }
+    
+    /// Perform smart pruning and return a segment for UI indicator
+    /// 
+    /// This method:
+    /// 1. Identifies important messages (with remember markers, etc.)
+    /// 2. Extracts memories before pruning
+    /// 3. Archives pruned content
+    /// 4. Returns a segment for UI display
+    pub fn smart_prune_with_indicator(&mut self) -> Option<crate::context::pruning::PrunedSegment> {
+        use crate::context::pruning::{smart_prune, SmartPruningConfig};
+        
+        let config = SmartPruningConfig::default();
+        let limit = self.config.effective_limit();
+        
+        // Convert to cognition messages for pruning
+        let messages: Vec<crate::agent::cognition::history::Message> = self.history
+            .iter()
+            .map(|m| crate::agent::cognition::history::Message {
+                role: match m.role.as_str() {
+                    "system" => crate::agent::cognition::history::MessageRole::System,
+                    "user" => crate::agent::cognition::history::MessageRole::User,
+                    "assistant" => crate::agent::cognition::history::MessageRole::Assistant,
+                    "tool" => crate::agent::cognition::history::MessageRole::Tool,
+                    _ => crate::agent::cognition::history::MessageRole::User,
+                },
+                content: m.content.clone(),
+            })
+            .collect();
+        
+        let result = smart_prune(messages, limit, &config);
+        
+        if !result.was_pruned {
+            return None;
+        }
+        
+        // Convert back to context messages
+        self.history = result.kept.iter().map(|m| {
+            let role = match m.role {
+                crate::agent::cognition::history::MessageRole::System => "system",
+                crate::agent::cognition::history::MessageRole::User => "user",
+                crate::agent::cognition::history::MessageRole::Assistant => "assistant",
+                crate::agent::cognition::history::MessageRole::Tool => "tool",
+            };
+            Message::new(role, &m.content)
+        }).collect();
+        
+        // Archive the segment
+        self.pruned_history.push(result.segment.clone());
+        
+        crate::info_log!(
+            "[CONTEXT] Smart pruning: kept {} messages, pruned {} messages, saved ~{} tokens",
+            result.kept.len(),
+            result.pruned.len(),
+            result.segment.tokens_saved
+        );
+        
+        Some(result.segment)
     }
 
     /// Add a message to the history
@@ -774,6 +845,71 @@ impl ContextManager {
     /// Update configuration
     pub fn set_config(&mut self, config: ContextConfig) {
         self.config = config;
+    }
+}
+
+/// Implement SmartPruning trait for ContextManager
+impl crate::context::pruning::SmartPruning for ContextManager {
+    fn smart_prune_with_indicator(&mut self, config: &crate::context::pruning::SmartPruningConfig) -> Option<crate::context::pruning::PrunedSegment> {
+        use crate::context::pruning::smart_prune;
+        
+        let limit = self.config.effective_limit();
+        
+        // Convert to cognition messages for pruning
+        let messages: Vec<crate::agent::cognition::history::Message> = self.history
+            .iter()
+            .map(|m| crate::agent::cognition::history::Message {
+                role: match m.role.as_str() {
+                    "system" => crate::agent::cognition::history::MessageRole::System,
+                    "user" => crate::agent::cognition::history::MessageRole::User,
+                    "assistant" => crate::agent::cognition::history::MessageRole::Assistant,
+                    "tool" => crate::agent::cognition::history::MessageRole::Tool,
+                    _ => crate::agent::cognition::history::MessageRole::User,
+                },
+                content: m.content.clone(),
+            })
+            .collect();
+        
+        let result = smart_prune(messages, limit, config);
+        
+        if !result.was_pruned {
+            return None;
+        }
+        
+        // Convert back to context messages
+        self.history = result.kept.iter().map(|m| {
+            let role = match m.role {
+                crate::agent::cognition::history::MessageRole::System => "system",
+                crate::agent::cognition::history::MessageRole::User => "user",
+                crate::agent::cognition::history::MessageRole::Assistant => "assistant",
+                crate::agent::cognition::history::MessageRole::Tool => "tool",
+            };
+            Message::new(role, &m.content)
+        }).collect();
+        
+        // Archive the segment
+        self.pruned_history.push(result.segment.clone());
+        
+        crate::info_log!(
+            "[CONTEXT] Smart pruning: kept {} messages, pruned {} messages, saved ~{} tokens",
+            result.kept.len(),
+            result.pruned.len(),
+            result.segment.tokens_saved
+        );
+        
+        Some(result.segment)
+    }
+    
+    fn pruned_history(&self) -> &crate::context::pruning::PrunedHistory {
+        &self.pruned_history
+    }
+    
+    fn pruned_history_mut(&mut self) -> &mut crate::context::pruning::PrunedHistory {
+        &mut self.pruned_history
+    }
+    
+    fn check_auto_restore(&self, user_message: &str) -> crate::context::pruning::AutoRestoreResult {
+        crate::context::pruning::check_auto_restore(user_message, &self.pruned_history)
     }
 }
 

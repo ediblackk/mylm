@@ -1,7 +1,10 @@
 //! Message history types
 
+use serde::{Deserialize, Serialize};
+
 /// Role of message sender
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MessageRole {
     User,
     Assistant,
@@ -10,7 +13,7 @@ pub enum MessageRole {
 }
 
 /// Single message in history
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: MessageRole,
     pub content: String,

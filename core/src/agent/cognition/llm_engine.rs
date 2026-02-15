@@ -154,10 +154,10 @@ impl CognitiveEngine for LLMBasedEngine {
         match input {
             // User message - request LLM to decide (works for any step count)
             Some(InputEvent::UserMessage(msg)) => {
-                let scratchpad = format!(
-                    "User says: {}\n\nWhat should I do?",
-                    msg
-                );
+                // The user message is already in history (added above)
+                // Scratchpad is just the instruction for the LLM
+                // Implement here 
+                let scratchpad = "What should I do?".to_string();
                 
                 let context = crate::agent::types::intents::Context::new(scratchpad)
                     .with_system(self.system_prompt.clone());
@@ -209,21 +209,21 @@ impl CognitiveEngine for LLMBasedEngine {
             }
             
             // Tool result - request LLM to interpret
-            Some(InputEvent::ToolResult(result)) => {
-                let (tool_name, status, output) = match result {
+            Some(InputEvent::ToolResult { tool, result }) => {
+                let (status, output) = match result {
                     crate::agent::types::events::ToolResult::Success { output, .. } => {
-                        ("unknown", "succeeded", output.clone())
+                        ("succeeded", output.clone())
                     }
                     crate::agent::types::events::ToolResult::Error { message, .. } => {
-                        ("unknown", "failed", message.clone())
+                        ("failed", message.clone())
                     }
                     crate::agent::types::events::ToolResult::Cancelled => {
-                        ("unknown", "cancelled", "Cancelled".to_string())
+                        ("cancelled", "Cancelled".to_string())
                     }
                 };
                 let scratchpad = format!(
                     "Tool '{}' {} with output: {}\n\nWhat should I do next?",
-                    tool_name, status, output
+                    tool, status, output
                 );
                 
                 let context = crate::agent::types::intents::Context::new(scratchpad)

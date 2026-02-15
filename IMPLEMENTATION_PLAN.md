@@ -37,20 +37,30 @@
 
 ---
 
-### 1.3 Web Search Response Parsing
+### 1.3 Web Search Implementation
 **Priority**: Critical  
 **Estimated Time**: 1 hour  
-**Files**: `core/src/agent_v3/runtime/impls/web_search.rs`
+**Files**: `core/src/agent/runtime/tools/web_search.rs`, `core/src/llm/client.rs`
 
-- [x] Parse Kimi search API JSON response
-- [x] Parse SerpAPI JSON response
-- [x] Parse Brave search JSON response
-- [x] Format results nicely for LLM consumption
+- [x] DuckDuckGo search (free, no API key)
+- [x] SerpAPI search support
+- [x] Brave search support
+- [x] Kimi (Moonshot AI) builtin web search via `$web_search` function
+- [x] Circuit breaker to prevent endless retries
+- [x] API key testing in settings
+
+**Kimi Web Search Architecture**:
+Kimi doesn't expose a standalone search API. Instead, web search works as a builtin function:
+1. When `web_search_enabled=true` for MoonshotKimi provider, `$web_search` tool is registered
+2. Model returns `finish_reason: "tool_calls"` with `$web_search` when it wants to search
+3. Client echoes back the arguments via `role: "tool"` message
+4. Model performs the search internally and returns results in the same response
 
 **Acceptance Criteria**:
 - Web search returns actual results
 - Results are formatted as text for LLM
 - Graceful handling of API errors
+- Kimi web search works natively through LLM client
 
 ---
 

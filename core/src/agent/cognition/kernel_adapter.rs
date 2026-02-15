@@ -46,7 +46,7 @@ impl<E: CognitiveEngine> CognitiveEngineAdapter<E> {
             KernelEvent::UserMessage { content } => {
                 Some(InputEvent::UserMessage(content.clone()))
             }
-            KernelEvent::ToolCompleted { result, .. } => {
+            KernelEvent::ToolCompleted { tool, result, .. } => {
                 // Convert types::events::ToolResult to cognition InputEvent::ToolResult
                 let tool_result = match result {
                     ToolResult::Success { output, .. } => {
@@ -64,7 +64,10 @@ impl<E: CognitiveEngine> CognitiveEngineAdapter<E> {
                     }
                     ToolResult::Cancelled => crate::agent::types::events::ToolResult::Cancelled,
                 };
-                Some(InputEvent::ToolResult(tool_result))
+                Some(InputEvent::ToolResult {
+                    tool: tool.clone(),
+                    result: tool_result,
+                })
             }
             KernelEvent::LLMCompleted { response, .. } => {
                 Some(InputEvent::LLMResponse(crate::agent::types::events::LLMResponse {

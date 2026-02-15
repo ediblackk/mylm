@@ -167,6 +167,20 @@ pub enum OutputEvent {
     
     /// Session halted
     Halted { reason: String },
+    
+    /// Context was pruned (smart pruning indicator)
+    ContextPruned {
+        /// Summary of what was pruned
+        summary: String,
+        /// Number of messages pruned
+        message_count: usize,
+        /// Approximate tokens saved
+        tokens_saved: usize,
+        /// Memories extracted before pruning
+        extracted_memories: Vec<String>,
+        /// Segment ID for recovery
+        segment_id: String,
+    },
 }
 
 /// Session result
@@ -249,6 +263,11 @@ where
     // Error tracking for backoff
     consecutive_errors: u32,
     max_consecutive_errors: u32,
+    
+    // Memory manager ownership - held here so Weak references in engine remain valid
+    // The session owns this, engine's MemoryProvider holds Weak reference
+    #[allow(dead_code)]
+    memory_manager: Option<std::sync::Arc<crate::agent::memory::AgentMemoryManager>>,
 }
 
 impl<K, R, T> AgencySession<K, R, T>
@@ -265,6 +284,20 @@ where
     
     /// Create a new session with a pre-configured output channel
     pub fn new_with_output(kernel: K, runtime: R, transport: T, output_tx: broadcast::Sender<OutputEvent>) -> Self {
+        Self::new_with_memory(kernel, runtime, transport, output_tx, None)
+    }
+    
+    /// Create a new session with memory manager
+    /// 
+    /// The memory manager is owned by the session and kept alive for its lifetime.
+    /// The engine's MemoryProvider holds a Weak reference to it.
+    pub fn new_with_memory(
+        kernel: K, 
+        runtime: R, 
+        transport: T, 
+        output_tx: broadcast::Sender<OutputEvent>,
+        memory_manager: Option<std::sync::Arc<crate::agent::memory::AgentMemoryManager>>,
+    ) -> Self {
         let (input_tx, input_rx) = mpsc::channel(100);
         
         Self {
@@ -282,6 +315,7 @@ where
             interrupted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             consecutive_errors: 0,
             max_consecutive_errors: 3,
+            memory_manager,
         }
     }
 

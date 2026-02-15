@@ -149,6 +149,12 @@ impl Context {
         self.system_prompt = prompt.into();
         self
     }
+    
+    /// With conversation history
+    pub fn with_history(mut self, history: Vec<Message>) -> Self {
+        self.history = history;
+        self
+    }
 }
 
 /// Message in conversation history
