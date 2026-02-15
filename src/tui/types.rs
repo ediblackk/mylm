@@ -193,8 +193,10 @@ pub enum ActionType {
 
 /// Structured scratchpad for agent/TUI shared state
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct StructuredScratchpad;
 
+#[allow(dead_code)]
 impl StructuredScratchpad {
     pub fn new() -> Self {
         Self::default()
@@ -320,6 +322,7 @@ pub enum TuiEvent {
 /// - `{"t": "..."` for thought field
 /// - `: "..."` for final answer (after "f" key)
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[allow(dead_code)]
 pub enum StreamState {
     #[default]
     /// Looking for {"t": pattern

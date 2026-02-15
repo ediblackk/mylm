@@ -251,25 +251,6 @@ impl std::fmt::Display for ProviderMenuChoice {
 /// WEB SEARCH SETTINGS SUBMENU - EXACT replica of original
 /// ============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum WebSearchMenuChoice {
-    ToggleEnabled,
-    SetProvider,
-    SetApiKey,
-    Back,
-}
-
-impl std::fmt::Display for WebSearchMenuChoice {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WebSearchMenuChoice::ToggleEnabled => write!(f, "✅ Toggle Enabled"),
-            WebSearchMenuChoice::SetProvider => write!(f, "🧭 Set Provider"),
-            WebSearchMenuChoice::SetApiKey => write!(f, "🔑 Set API Key"),
-            WebSearchMenuChoice::Back => write!(f, "⬅️  Back"),
-        }
-    }
-}
-
 /// ============================================================================
 /// MAIN HUB - Show hub menu with EXACT original logic
 /// ============================================================================
@@ -516,42 +497,6 @@ pub fn show_provider_menu() -> Result<ProviderMenuChoice> {
     
     let selection = Select::new()
         .with_prompt("Provider Management")
-        .items(&choices)
-        .default(0)
-        .interact()?;
-    
-    Ok(choices[selection])
-}
-
-/// ============================================================================
-/// WEB SEARCH MENU - EXACT replica of original
-/// ============================================================================
-
-pub fn show_web_search_menu(config: &Config) -> Result<WebSearchMenuChoice> {
-    print!("\x1B[2J\x1B[1;1H");
-    
-    // Show status from profile.web_search.enabled (what the tool actually uses)
-    let profile_enabled = config.active_profile().web_search.enabled;
-    let provider = &config.active_profile().web_search.provider;
-    let has_api_key = config.active_profile().web_search.api_key.is_some();
-    
-    println!("\n{}", Style::new().bold().apply_to("Web Search Settings"));
-    println!("{}", Style::new().dim().apply_to("─".repeat(40)));
-    println!("Status: {}", 
-        if profile_enabled { "✅ Enabled" } else { "❌ Disabled" });
-    println!("Provider: {:?}", provider);
-    println!("API Key: {}\n", 
-        if has_api_key { "✅ Set" } else { "❌ Not set (using env var or N/A)" });
-    
-    let choices = vec![
-        WebSearchMenuChoice::ToggleEnabled,
-        WebSearchMenuChoice::SetProvider,
-        WebSearchMenuChoice::SetApiKey,
-        WebSearchMenuChoice::Back,
-    ];
-    
-    let selection = Select::new()
-        .with_prompt("Select option")
         .items(&choices)
         .default(0)
         .interact()?;
@@ -1328,7 +1273,7 @@ pub async fn handle_web_search_settings(config: &mut Config) -> Result<bool> {
 /// Handle web search extra parameters configuration
 async fn handle_web_search_extra_params(config: &mut Config) -> Result<()> {
     use mylm_core::config::SearchProvider;
-    use dialoguer::{Input, Select, Confirm};
+    use dialoguer::{Input, Select};
     
     let provider = config.active_profile().web_search.provider.clone();
     

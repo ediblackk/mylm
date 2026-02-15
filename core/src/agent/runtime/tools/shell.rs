@@ -8,7 +8,7 @@ use crate::agent::runtime::error::ToolError;
 use crate::agent::runtime::terminal::TerminalExecutor;
 use crate::agent::types::intents::ToolCall;
 use crate::agent::types::events::ToolResult;
-use serde::Deserialize;
+
 use tokio::time::{timeout, Duration};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -221,16 +221,6 @@ impl ToolCapability for ShellTool {
             self.execute_shell(&args_str, background).await
         }
     }
-}
-
-/// Arguments for shell command
-#[derive(Debug, Deserialize)]
-struct ShellArgs {
-    command: String,
-    #[serde(default)]
-    background: bool,
-    #[serde(default)]
-    timeout_secs: Option<u64>,
 }
 
 #[cfg(test)]

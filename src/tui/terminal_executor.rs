@@ -18,11 +18,13 @@ use crate::tui::app::state::AppStateContainer;
 /// 
 /// This executor gets screen content from the App's vt100 parser.
 /// Command execution falls back to std::process::Command for reliability.
+#[allow(dead_code)]
 pub struct TuiTerminalExecutor {
     /// Function to get current screen content from the App
     get_screen_fn: Arc<dyn Fn() -> Result<String, String> + Send + Sync>,
 }
 
+#[allow(dead_code)]
 impl TuiTerminalExecutor {
     /// Create a new TUI terminal executor with a screen getter function
     pub fn new<F>(get_screen_fn: F) -> Self
@@ -52,7 +54,7 @@ impl TuiTerminalExecutor {
 
 #[async_trait]
 impl TerminalExecutor for TuiTerminalExecutor {
-    async fn execute_command(&self, command: String, timeout: Option<Duration>) -> Result<String, String> {
+    async fn execute_command(&self, command: String, _timeout: Option<Duration>) -> Result<String, String> {
         // Get screen before command
         let screen_before = self.get_screen().await.unwrap_or_default();
         

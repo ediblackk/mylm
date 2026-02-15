@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 
 /// Pending approval request
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct PendingApproval {
     /// The approval request details
     pub request: ApprovalRequest,
@@ -30,6 +31,7 @@ pub struct PendingApproval {
 /// 
 /// This capability sends approval requests to the TUI via a channel
 /// and waits for the user's response via a oneshot channel.
+#[allow(dead_code)]
 pub struct TuiApprovalCapability {
     /// Sender for pending approvals to the UI
     pending_tx: mpsc::Sender<PendingApproval>,
@@ -38,6 +40,7 @@ pub struct TuiApprovalCapability {
     current: Arc<Mutex<Option<PendingApproval>>>,
 }
 
+#[allow(dead_code)]
 impl TuiApprovalCapability {
     /// Create a new TUI approval capability
     /// 
@@ -128,10 +131,12 @@ impl ApprovalCapability for TuiApprovalCapability {
 
 /// Shared handle for responding to approvals from the UI
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct ApprovalHandle {
     capability: Arc<TuiApprovalCapability>,
 }
 
+#[allow(dead_code)]
 impl ApprovalHandle {
     pub fn new(capability: Arc<TuiApprovalCapability>) -> Self {
         Self { capability }

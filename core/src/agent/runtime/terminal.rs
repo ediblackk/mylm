@@ -62,7 +62,7 @@ impl Default for DefaultTerminalExecutor {
 impl TerminalExecutor for DefaultTerminalExecutor {
     async fn execute_command(&self, command: String, timeout: Option<Duration>) -> Result<String, String> {
         use tokio::process::Command;
-        use tokio::time::{timeout as tokio_timeout, Duration as TokioDuration};
+        use tokio::time::timeout as tokio_timeout;
 
         let output_result = if let Some(timeout_duration) = timeout {
             tokio_timeout(

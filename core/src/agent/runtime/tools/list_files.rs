@@ -5,7 +5,7 @@ use crate::agent::runtime::context::RuntimeContext;
 use crate::agent::runtime::error::ToolError;
 use crate::agent::types::intents::ToolCall;
 use crate::agent::types::events::ToolResult;
-use serde::Deserialize;
+
 use std::path::Path;
 
 /// Tool for listing directory contents
@@ -137,12 +137,6 @@ fn format_size(size: u64) -> String {
     } else {
         format!("{:.1} {}", size, UNITS[unit_idx])
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct ListArgs {
-    #[serde(default)]
-    path: String,
 }
 
 #[cfg(test)]

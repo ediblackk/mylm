@@ -5,7 +5,6 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use std::sync::Arc;
 
 use mylm_core::config::Config;
 
@@ -555,19 +554,6 @@ async fn run_tui_with_session(config: &Config) -> Result<tui::TuiResult> {
         false, // not incognito
     );
     app.pty_rx = Some(pty_rx);
-    
-    // Create terminal executor that uses the App's parser
-    // We use a shared reference so the executor can access the App's screen
-    let app_ref = std::sync::Arc::new(std::sync::Mutex::new(()));
-    let _ = app_ref; // Placeholder - we'll use a different approach
-    
-    // For now, use default terminal executor
-    // In the future, we'd create a TuiTerminalExecutor here
-    // let terminal_executor = Arc::new(tui::terminal_executor::TuiTerminalExecutor::from_app(app_ref));
-    
-    // Create approval capability for interactive tool approval
-    let (approval_capability, _approval_rx) = tui::approval::TuiApprovalCapability::new();
-    let approval_arc = Arc::new(approval_capability);
     
     // Create agent session factory
     let factory = AgentSessionFactory::new(config.clone());

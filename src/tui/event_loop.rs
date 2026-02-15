@@ -11,7 +11,7 @@ use crate::tui::types::TimestampedChatMessage;
 pub async fn handle_key_event(app: &mut AppStateContainer, key: KeyEvent) -> LoopAction {
     // Handle special states first
     match &app.state {
-        AppState::AwaitingApproval { tool, .. } => {
+        AppState::AwaitingApproval { tool: _tool, .. } => {
             match key.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     if let Some((intent_id, tool_name, _)) = app.pending_approval.take() {
@@ -150,17 +150,6 @@ pub async fn handle_key_event(app: &mut AppStateContainer, key: KeyEvent) -> Loo
                 load_memory_graph(app).await;
             } else {
                 filter_memory_graph(app).await;
-            }
-            return LoopAction::Continue;
-        }
-        KeyCode::Esc if app.show_memory_view => {
-            // Clear filter and reload all memories
-            if !app.memory_search_query.is_empty() {
-                app.memory_search_query.clear();
-                load_memory_graph(app).await;
-            } else {
-                // If no filter, close memory view
-                app.show_memory_view = false;
             }
             return LoopAction::Continue;
         }

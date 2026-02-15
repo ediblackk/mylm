@@ -12,7 +12,6 @@ pub use crate::tui::types::{
 };
 use mylm_core::agent::contract::session::{OutputEvent, UserInput};
 use mylm_core::context::ContextManager;
-use mylm_core::llm::chat::ChatMessage;
 use mylm_core::memory::graph::MemoryGraph;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -165,6 +164,7 @@ pub struct AppStateContainer {
     #[allow(dead_code)]
     pub pending_command_tx: Option<tokio::sync::oneshot::Sender<String>>,
     /// Approval handle for responding to tool approval requests
+    #[allow(dead_code)]
     pub approval_handle: Option<ApprovalHandle>,
     #[allow(dead_code)]
     pub stream_state: Option<StreamState>,

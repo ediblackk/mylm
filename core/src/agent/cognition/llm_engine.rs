@@ -153,7 +153,7 @@ impl CognitiveEngine for LLMBasedEngine {
 
         match input {
             // User message - request LLM to decide (works for any step count)
-            Some(InputEvent::UserMessage(msg)) => {
+            Some(InputEvent::UserMessage(_msg)) => {
                 // The user message is already in history (added above)
                 // Scratchpad is just the instruction for the LLM
                 // Implement here 

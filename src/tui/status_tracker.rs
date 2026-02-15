@@ -41,9 +41,10 @@ pub enum StatusInfo {
     /// An error occurred
     Error { message: String },
     /// Waiting for user approval
-    AwaitingApproval { tool: String, args: String },
+    AwaitingApproval { tool: String, #[allow(dead_code)] args: String },
 }
 
+#[allow(dead_code)]
 impl StatusInfo {
     /// Get a human-readable status message
     pub fn message(&self) -> String {
@@ -99,6 +100,7 @@ pub struct StatusTracker {
     last_error: Option<String>,
 }
 
+#[allow(dead_code)]
 impl StatusTracker {
     /// Create a new status tracker
     pub fn new() -> Self {
@@ -226,7 +228,7 @@ impl StatusTracker {
                 self.last_activity = Instant::now();
             }
 
-            OutputEvent::Status { message } => {
+            OutputEvent::Status { message: _message } => {
                 // Generic status message - update activity timestamp
                 // but don't change current status
                 self.last_activity = Instant::now();

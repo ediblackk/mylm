@@ -713,10 +713,10 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
         
         // Hide Context Packs (Terminal Snapshot, etc.)
         let delimiter = "\n\n## Terminal Snapshot";
-        let (raw_display_content, has_hidden_context) = if let Some(idx) = m.content.find(delimiter) {
-            (&m.content[..idx], true)
+        let raw_display_content = if let Some(idx) = m.content.find(delimiter) {
+            &m.content[..idx]
         } else {
-            (m.content.as_str(), false)
+            m.content.as_str()
         };
 
         // Try to parse entire content as JSON first (handles multi-line JSON)
@@ -1681,7 +1681,7 @@ fn render_job_detail(frame: &mut Frame, app: &mut App, area: Rect) {
 /// Format a unix timestamp as a compact string for the list view
 /// Shows date if not today, otherwise shows time
 fn format_timestamp(ts: i64) -> String {
-    use chrono::{DateTime, Local, NaiveDateTime, Utc};
+    use chrono::{DateTime, Local, Utc};
     
     let dt = DateTime::<Utc>::from_timestamp(ts, 0)
         .map(|dt| dt.with_timezone(&Local))
