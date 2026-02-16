@@ -442,15 +442,20 @@ pub struct MemoryStats {
 
 // ===== MemoryProvider Implementation (TEMPORARILY DISABLED) =====
 // TODO: restore with new architecture
-/*
-use crate::agent::MemoryProvider;
+// ===== MemoryProvider Implementation =====
+
+use crate::agent::cognition::llm_engine::MemoryProvider;
 use std::sync::Weak;
 
+/// A MemoryProvider implementation that wraps AgentMemoryManager
+/// 
+/// This allows the LLM engine to proactively inject memory context into prompts.
 pub struct AgentMemoryProvider {
     manager: Weak<AgentMemoryManager>,
 }
 
 impl AgentMemoryProvider {
+    /// Create a new memory provider from an AgentMemoryManager
     pub fn new(manager: Arc<AgentMemoryManager>) -> Self {
         Self {
             manager: Arc::downgrade(&manager),
@@ -460,15 +465,109 @@ impl AgentMemoryProvider {
 
 impl MemoryProvider for AgentMemoryProvider {
     fn get_context(&self, user_message: &str) -> String {
-        // ... implementation ...
-        String::new()
+        crate::info_log!("[MEMORY_PROVIDER] get_context called");
+        
+        // Try to get the manager
+        let Some(manager) = self.manager.upgrade() else {
+            crate::warn_log!("[MEMORY_PROVIDER] Memory manager dropped, cannot get context");
+            return String::new();
+        };
+        
+        // Check if memory is enabled
+        if !manager.is_enabled() {
+            crate::warn_log!("[MEMORY_PROVIDER] Memory manager is disabled");
+            return String::new();
+        }
+        
+        crate::info_log!("[MEMORY_PROVIDER] Getting context for message: '{}'", 
+            &user_message[..user_message.len().min(50)]);
+        
+        // We need to run async code from a sync context.
+        // Since this is called from within an async runtime (the session loop),
+        // we use block_in_place to run the async code on a blocking thread.
+        crate::info_log!("[MEMORY_PROVIDER] Fetching hot memories and semantic search...");
+        
+        let manager_clone = manager.clone();
+        let query = user_message.to_string();
+        let (hot_memories, semantic_memories) = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                // 1. Hot memory: recent activity from this session
+                let hot = manager_clone.get_hot_memories_configured().await.unwrap_or_default();
+                crate::info_log!("[MEMORY_PROVIDER] Got {} hot memories", hot.len());
+                
+                // 2. Semantic memory: relevant memories based on user query
+                // Use a reasonable limit for semantic search (10 results)
+                let semantic = manager_clone.search_memories(&query, 10).await.unwrap_or_default();
+                crate::info_log!("[MEMORY_PROVIDER] Got {} semantic matches", semantic.len());
+                
+                (hot, semantic)
+            })
+        });
+        
+        crate::info_log!("[MEMORY_PROVIDER] Hot memories: {}, Semantic matches: {}", 
+            hot_memories.len(), semantic_memories.len());
+        
+        // Log what we found
+        for (i, mem) in hot_memories.iter().enumerate() {
+            crate::info_log!("[MEMORY_PROVIDER] Hot[{}]: [{}] {}...", 
+                i, mem.r#type, &mem.content[..mem.content.len().min(60)]);
+        }
+        for (i, mem) in semantic_memories.iter().enumerate() {
+            crate::info_log!("[MEMORY_PROVIDER] Semantic[{}]: [{}] {}...", 
+                i, mem.r#type, &mem.content[..mem.content.len().min(60)]);
+        }
+        
+        // Combine and deduplicate (by memory ID)
+        let mut combined: std::collections::HashMap<i64, Memory> = std::collections::HashMap::new();
+        
+        // Add hot memories first (they're more recent/relevant to current session)
+        for mem in hot_memories {
+            combined.insert(mem.id, mem);
+        }
+        
+        // Add semantic memories (may overlap with hot)
+        for mem in semantic_memories {
+            combined.insert(mem.id, mem);
+        }
+        
+        let memories: Vec<Memory> = combined.into_values().collect();
+        
+        if memories.is_empty() {
+            crate::warn_log!("[MEMORY_PROVIDER] No memories found to inject - VectorStore may be empty");
+            return String::new();
+        }
+        
+        crate::info_log!("[MEMORY_PROVIDER] Injecting {} unique memories into context", memories.len());
+        
+        let formatted = AgentMemoryManager::format_memories_for_prompt(&memories);
+        crate::info_log!("[MEMORY_PROVIDER] Formatted context ({} chars): {}", 
+            formatted.len(), &formatted[..formatted.len().min(200)]);
+        formatted
     }
     
-    fn remember(&self, _content: &str) {
-        // ... implementation ...
+    fn remember(&self, content: &str) {
+        let Some(manager) = self.manager.upgrade() else {
+            crate::warn_log!("[MEMORY_PROVIDER] Memory manager dropped, cannot remember");
+            return;
+        };
+        
+        if !manager.is_enabled() {
+            return;
+        }
+        
+        // Fire-and-forget: spawn a task to save the memory
+        let content = content.to_string();
+        tokio::spawn(async move {
+            use crate::memory::store::MemoryType;
+            if let Err(e) = manager.add_memory(&content, MemoryType::UserNote).await {
+                crate::warn_log!("[MEMORY_PROVIDER] Failed to save memory: {}", e);
+            } else {
+                crate::info_log!("[MEMORY_PROVIDER] Saved memory: '{}'", 
+                    &content[..content.len().min(50)]);
+            }
+        });
     }
 }
-*/
 
 
 #[cfg(test)]

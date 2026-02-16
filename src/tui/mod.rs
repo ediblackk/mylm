@@ -14,6 +14,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 // UI modules
+pub mod agent_setup;
 pub mod app;
 pub mod event_loop;
 pub mod help;

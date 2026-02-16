@@ -178,7 +178,7 @@ mod tests {
         };
         
         let line = format_context_line(&mem);
-        assert!(line.contains("UserNote"));
+        assert!(line.contains("user_note"));
         assert!(line.contains("Test memory content"));
     }
 }

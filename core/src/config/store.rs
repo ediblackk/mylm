@@ -272,6 +272,61 @@ impl Config {
         // In the future, this can be loaded from profile configuration
         crate::agent::contract::config::ApprovalPolicy::default()
     }
+    
+    /// Resolve the active profile to get effective configuration
+    /// 
+    /// This combines profile settings with provider settings to produce
+    /// the final configuration used at runtime.
+    pub fn resolve_profile(&self) -> ResolvedProfile {
+        let profile = self.active_profile();
+        let provider = self.active_provider();
+        
+        ResolvedProfile {
+            provider: provider.map(|p| p.provider_type.clone()),
+            model: profile.model.clone().or_else(|| provider.map(|p| p.default_model.clone())),
+            base_url: provider.map(|p| p.base_url.clone()),
+            api_key: provider.and_then(|p| p.api_key.clone()),
+            timeout_secs: provider.map(|p| p.timeout_secs).unwrap_or(120),
+            max_context_tokens: profile.context_window,
+            max_iterations: profile.max_iterations,
+            temperature: profile.temperature,
+        }
+    }
+}
+
+/// Resolved profile configuration (effective settings after combining profile + provider)
+#[derive(Debug, Clone)]
+pub struct ResolvedProfile {
+    /// Provider type (if available)
+    pub provider: Option<ProviderType>,
+    /// Model to use (profile override or provider default)
+    pub model: Option<String>,
+    /// API base URL
+    pub base_url: Option<String>,
+    /// API key
+    pub api_key: Option<String>,
+    /// Request timeout
+    pub timeout_secs: u64,
+    /// Maximum context tokens
+    pub max_context_tokens: usize,
+    /// Maximum iterations
+    pub max_iterations: usize,
+    /// Temperature
+    pub temperature: f32,
+}
+
+impl ResolvedProfile {
+    /// Get default URL for provider (used as fallback)
+    pub fn default_url(&self) -> String {
+        match self.provider {
+            Some(ProviderType::OpenAi) => "https://api.openai.com/v1".to_string(),
+            Some(ProviderType::Google) => "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            Some(ProviderType::Ollama) => "http://localhost:11434/v1".to_string(),
+            Some(ProviderType::OpenRouter) => "https://openrouter.ai/api/v1".to_string(),
+            Some(ProviderType::Kimi) => "https://api.moonshot.cn/v1".to_string(),
+            Some(ProviderType::Custom) | None => "https://api.openai.com/v1".to_string(),
+        }
+    }
 }
 
 fn default_version() -> String {

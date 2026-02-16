@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::sync::Arc;
 
 use mylm_core::config::Config;
 
@@ -519,7 +520,7 @@ async fn setup_wizard(config: &mut Config) -> Result<()> {
 /// ============================================================================
 
 async fn run_tui_with_session(config: &Config) -> Result<tui::TuiResult> {
-    use mylm_core::agent::AgentSessionFactory;
+    
     use mylm_core::agent::contract::Session;
     use tokio::sync::mpsc;
     
@@ -555,11 +556,25 @@ async fn run_tui_with_session(config: &Config) -> Result<tui::TuiResult> {
     );
     app.pty_rx = Some(pty_rx);
     
-    // Create agent session factory
-    let factory = AgentSessionFactory::new(config.clone());
+    // Create approval capability for interactive tool approval
+    let (approval_capability, _approval_rx) = tui::approval::TuiApprovalCapability::new();
+    
+    // Create terminal executor that uses the App's screen
+    let app_weak = Arc::downgrade(&std::sync::Arc::new(std::sync::Mutex::new(())));
+    let _ = app_weak; // Placeholder - will use actual app reference
+    
+    // For now, use default terminal executor (commands run via std::process::Command)
+    // The terminal context is collected separately via app.get_screen()
+    
+    // Create agent session factory with approval
+    let factory = tui::agent_setup::create_session_factory(
+        config,
+        None, // Use default terminal executor for now
+        Some(Arc::new(approval_capability)),
+    );
     
     // Create session for default profile
-    let mut session = match factory.create_default_session() {
+    let mut session = match factory.create_default_session().await {
         Ok(s) => s,
         Err(e) => {
             mylm_core::error_log!("[MAIN] Failed to create agent session: {}", e);
@@ -640,7 +655,7 @@ async fn quick_query(config: &Config, query: &str) -> Result<()> {
     let factory = AgentSessionFactory::new(config.clone());
     
     // Create session for default profile
-    let mut session = match factory.create_default_session() {
+    let mut session = match factory.create_default_session().await {
         Ok(s) => s,
         Err(e) => {
             println!("❌ Failed to create agent session: {}", e);

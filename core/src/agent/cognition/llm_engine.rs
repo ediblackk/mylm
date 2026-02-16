@@ -3,6 +3,8 @@
 //! Real cognitive engine that uses LLM to make decisions.
 //! Parses tool calls from LLM responses using Short-Key JSON format.
 
+use std::sync::Arc;
+
 use crate::agent::cognition::{
     engine::CognitiveEngine,
     state::AgentState,
@@ -10,6 +12,22 @@ use crate::agent::cognition::{
     decision::{Transition, AgentDecision, ToolCall, LLMRequest, AgentExitReason, ApprovalRequest},
     error::CognitiveError,
 };
+
+/// Trait for memory providers that can inject context into prompts
+/// 
+/// Implementors provide relevant memories based on the current conversation context.
+/// This is called proactively BEFORE the LLM generates a response.
+pub trait MemoryProvider: Send + Sync {
+    /// Get relevant memory context for the given user message
+    /// 
+    /// Returns a formatted string to be injected into the system prompt.
+    fn get_context(&self, user_message: &str) -> String;
+    
+    /// Save a memory fire-and-forget style
+    /// 
+    /// This should not block - the save happens asynchronously.
+    fn remember(&self, content: &str);
+}
 
 /// Short-Key Action representation (Simplified JSON Protocol)
 /// 
@@ -42,6 +60,8 @@ pub struct LLMBasedEngine {
     system_prompt: String,
     #[allow(dead_code)]
     max_tool_failures: usize,
+    /// Optional memory provider for proactive context injection
+    memory_provider: Option<Arc<dyn MemoryProvider>>,
 }
 
 impl LLMBasedEngine {
@@ -49,12 +69,30 @@ impl LLMBasedEngine {
         Self {
             system_prompt: build_system_prompt(),
             max_tool_failures: 2,
+            memory_provider: None,
         }
     }
     
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = prompt.into();
         self
+    }
+    
+    /// Set the memory provider for proactive context injection
+    /// 
+    /// When set, relevant memories will be automatically injected into prompts
+    /// before each LLM call.
+    pub fn with_memory_provider(mut self, provider: Arc<dyn MemoryProvider>) -> Self {
+        self.memory_provider = Some(provider);
+        self
+    }
+    
+    /// Get memory context for injection into prompt
+    fn get_memory_context(&self, user_message: &str) -> String {
+        self.memory_provider
+            .as_ref()
+            .map(|p| p.get_context(user_message))
+            .unwrap_or_default()
     }
     
     /// Parse LLM response to extract decision using Short-Key JSON Protocol
@@ -153,14 +191,27 @@ impl CognitiveEngine for LLMBasedEngine {
 
         match input {
             // User message - request LLM to decide (works for any step count)
-            Some(InputEvent::UserMessage(_msg)) => {
+            Some(InputEvent::UserMessage(msg)) => {
+                // Proactively inject relevant memory context BEFORE LLM call
+                crate::info_log!("[LLM_ENGINE] Processing user message, checking memory...");
+                let memory_context = self.get_memory_context(&msg);
+                
+                let enhanced_system_prompt = if memory_context.is_empty() {
+                    crate::info_log!("[LLM_ENGINE] No memory context to inject");
+                    self.system_prompt.clone()
+                } else {
+                    crate::info_log!("[LLM_ENGINE] Injecting {} bytes of memory context", memory_context.len());
+                    format!("{}\n\n## Relevant Context from Memory\n{}", 
+                        self.system_prompt, 
+                        memory_context)
+                };
+                
                 // The user message is already in history (added above)
                 // Scratchpad is just the instruction for the LLM
-                // Implement here 
                 let scratchpad = "What should I do?".to_string();
                 
                 let context = crate::agent::types::intents::Context::new(scratchpad)
-                    .with_system(self.system_prompt.clone());
+                    .with_system(enhanced_system_prompt);
                 
                 let decision = AgentDecision::RequestLLM(LLMRequest {
                     context,

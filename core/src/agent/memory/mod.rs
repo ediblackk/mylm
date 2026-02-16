@@ -34,6 +34,6 @@ pub mod manager;
 pub mod context;
 pub mod extraction;
 
-pub use manager::{AgentMemoryManager, MemoryMode, MemoryStats};
+pub use manager::{AgentMemoryManager, AgentMemoryProvider, MemoryMode, MemoryStats};
 pub use context::{MemoryContextBuilder, InjectionStrategy, inject_memory_context, get_context_for_query};
 pub use extraction::{MemoryExtractor, ExtractedMemory, extract_memories};

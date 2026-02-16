@@ -310,6 +310,8 @@ pub enum TuiEvent {
     ConfigUpdate(#[allow(dead_code)] String),
     /// Condensed history after memory management
     CondensedHistory(#[allow(dead_code)] Vec<ChatMessage>),
+    /// Status update from LLM client
+    StatusUpdate(String),
 }
 
 // ---------------------------------------------------------------------------
