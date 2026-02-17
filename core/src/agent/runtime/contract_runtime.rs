@@ -180,6 +180,7 @@ impl ContractRuntime {
                 })
             }
             Intent::RequestLLM(req) => {
+                crate::error_log!("[RUNTIME] Executing RequestLLM intent: intent_id={}", intent_id.0);
                 // Create runtime context for LLM execution
                 let ctx = RuntimeContext::new()
                     .with_terminal(Arc::clone(&self.terminal));
@@ -425,6 +426,7 @@ impl AgencyRuntime for ContractRuntime {
         &self,
         graph: &IntentGraph,
     ) -> Result<Vec<(IntentId, Observation)>, RuntimeError> {
+        crate::debug_log!("[RUNTIME] execute_dag called with {} nodes", graph.len());
         // Use the DAG executor
         let result = match DagExecutor::execute(Arc::new(self.clone()), graph).await {
             Ok(result) => result,
@@ -444,8 +446,9 @@ impl AgencyRuntime for ContractRuntime {
         
         // Convert errors to RuntimeError observations so they flow back to the engine
         let mut observations = result.observations;
+        crate::debug_log!("[RUNTIME] execute_dag: {} observations, {} errors", observations.len(), result.errors.len());
         for (intent_id, error) in &result.errors {
-            crate::error_log!("[RUNTIME] Error for intent {:?}: {}", intent_id, error);
+            crate::error_log!("[RUNTIME] Converting error for intent {:?}: {}", intent_id, error);
             
             let _ = self.telemetry_tx.send(TelemetryEvent::Error {
                 intent_id: Some(*intent_id),

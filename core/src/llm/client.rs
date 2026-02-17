@@ -168,6 +168,52 @@ impl LlmClient {
         }
     }
 
+    /// Log request and response to file for debugging WAF issues
+    /// status: "SENT" (before sending), "SUCCESS" (after success), "ERROR" (after error)
+    fn log_request_to_file(&self, body_json: &str, status: &str, error_msg: Option<&str>) {
+        use std::time::SystemTime;
+        
+        let timestamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        let agent_type = if self.is_worker { "worker" } else { "main" };
+        
+        // Create logs directory if it doesn't exist
+        let logs_dir = std::path::PathBuf::from("mylm/logs");
+        if let Err(e) = std::fs::create_dir_all(&logs_dir) {
+            crate::error_log!("[LLM_CLIENT] Failed to create logs directory: {}", e);
+            return;
+        }
+        
+        let filename = logs_dir.join(format!("llm_request_{}_{}_{}.json", status.to_lowercase(), agent_type, timestamp));
+        
+        let mut content = String::new();
+        content.push_str("{\n");
+        content.push_str(&format!("  \"timestamp\": {},\n", timestamp));
+        content.push_str(&format!("  \"status\": \"{}\",\n", status));
+        content.push_str(&format!("  \"agent_type\": \"{}\",\n", agent_type));
+        content.push_str(&format!("  \"model\": \"{}\",\n", self.config.model));
+        content.push_str(&format!("  \"provider\": {:?},\n", self.config.provider));
+        content.push_str(&format!("  \"base_url\": \"{}\",\n", self.config.base_url));
+        content.push_str(&format!("  \"body_size_bytes\": {},\n", body_json.len()));
+        
+        if let Some(err) = error_msg {
+            content.push_str(&format!("  \"error\": \"{}\",\n", err.replace('"', "\\\"")));
+        }
+        
+        content.push_str("  \"request_body\": ");
+        content.push_str(body_json);
+        content.push_str("\n}\n");
+        
+        if let Err(e) = std::fs::write(&filename, content) {
+            crate::error_log!("[LLM_CLIENT] Failed to write request log: {}", e);
+        } else {
+            crate::info_log!("[LLM_CLIENT] Request logged to: {}", filename.display());
+        }
+    }
+
     /// Check rate limit before making a request (legacy config manager method)
     async fn check_rate_limit_legacy(&self, estimated_tokens: usize) -> Result<()> {
         if let Some(cm) = &self.config_manager {
@@ -378,6 +424,9 @@ impl LlmClient {
         &'a self,
         request: &'a ChatRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send + 'a>> {
+        crate::debug_log!("[LLM_CLIENT] chat_stream called with provider: {:?}", self.config.provider);
+        crate::debug_log!("[LLM_CLIENT] chat_stream base_url: {}", self.config.base_url);
+        crate::debug_log!("[LLM_CLIENT] chat_stream model: {}", self.config.model);
         match self.config.provider {
             LlmProvider::OpenAiCompatible | LlmProvider::MoonshotKimi => self.chat_stream_openai(request),
             LlmProvider::GoogleGenerativeAi => self.chat_stream_gemini(request),
@@ -523,13 +572,31 @@ impl LlmClient {
             }).collect()),
         };
 
+        // Serialize body for request and logging
+        let body_json = serde_json::to_string(&body)
+            .unwrap_or_else(|e| {
+                crate::error_log!("[LLM_CLIENT] Failed to serialize request body: {}", e);
+                String::new()
+            });
+        
+        // Log non-streaming request details
+        crate::info_log!("[LLM_CLIENT] Non-streaming request to URL: {}", url);
+        crate::info_log!("[LLM_CLIENT] Non-streaming request model: {}", self.config.model);
+        crate::info_log!("[LLM_CLIENT] Non-streaming request messages count: {}", request.messages.len());
+
         let headers = self.build_headers()?;
+        
+        // Log headers (sanitized - no API keys)
+        let header_keys: Vec<_> = headers.keys().map(|k| k.as_str().to_string()).collect();
+        crate::info_log!("[LLM_CLIENT] Non-streaming request headers: {:?}", header_keys);
+        
         let response = self
             .retry_with_backoff(|| async {
                 self.http_client
                     .post(&url)
                     .headers(headers.clone())
-                    .json(&body)
+                    .body(body_json.clone())
+                    .header("content-type", "application/json")
                     .send()
                     .await
             })
@@ -538,6 +605,8 @@ impl LlmClient {
 
         match response.status() {
             StatusCode::OK => {
+                // Request logging disabled for normal operation
+                
                 let text = response.text().await.context("Failed to read OpenAI response text")?;
                 let response_body: OpenAiResponse = match serde_json::from_str(&text) {
                     Ok(body) => body,
@@ -581,10 +650,14 @@ impl LlmClient {
                 })
             }
             StatusCode::UNAUTHORIZED => {
-                bail!("Authentication failed. Check your API key.");
+                let err_msg = "Authentication failed. Check your API key.";
+                self.log_request_to_file(&body_json, "ERROR", Some(err_msg));
+                bail!("{}", err_msg);
             }
             StatusCode::TOO_MANY_REQUESTS => {
-                bail!("Rate limit exceeded. Please try again later.");
+                let err_msg = "Rate limit exceeded. Please try again later.";
+                self.log_request_to_file(&body_json, "ERROR", Some(err_msg));
+                bail!("{}", err_msg);
             }
             status => {
                 let error_body: Option<serde_json::Value> = response.json().await.ok();
@@ -594,7 +667,10 @@ impl LlmClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("Unknown error");
                 crate::error_log!("API request failed ({}): {}. Body: {:?}", status, error_msg, error_body);
-                bail!("API request failed ({}): {}", status, error_msg);
+                
+                let full_error = format!("API request failed ({}): {}", status, error_msg);
+                self.log_request_to_file(&body_json, "ERROR", Some(&full_error));
+                bail!("{}", full_error);
             }
         }
     }
@@ -803,20 +879,62 @@ impl LlmClient {
 
         let http_client = self.http_client.clone();
         let headers_res = self.build_headers();
+        
+        // Log streaming request details
+        crate::info_log!("[LLM_CLIENT] LLM request: model={}, messages={}", self.config.model, request.messages.len());
+        for (i, msg) in request.messages.iter().enumerate() {
+            crate::debug_log!("[LLM_CLIENT] Message {}: role={:?}, content_len={}", i, msg.role, msg.content.len());
+        }
 
+        // Serialize body for logging and request
+        let body_json = serde_json::to_string(&body)
+            .unwrap_or_else(|e| {
+                crate::error_log!("[LLM_CLIENT] Failed to serialize request body: {}", e);
+                String::new()
+            });
+        
+        // Log body size and preview (first 1000 chars)
+        if !body_json.is_empty() {
+            crate::info_log!("[LLM_CLIENT] Streaming request body size: {} bytes", body_json.len());
+            if body_json.len() < 1000 {
+                crate::debug_log!("[LLM_CLIENT] Streaming request body: {}", body_json);
+            } else {
+                crate::debug_log!("[LLM_CLIENT] Streaming request body preview: {}...", &body_json[..1000.min(body_json.len())]);
+            }
+        }
+
+        // Request logging disabled for normal operation
+        // Only ERROR logs are written for debugging WAF issues
+        
         Box::pin(async_stream::try_stream! {
             let headers = headers_res?;
+            
+            // Log headers (sanitized - no API keys)
+            let header_keys: Vec<_> = headers.keys().map(|k| k.as_str().to_string()).collect();
+            crate::debug_log!("[LLM_CLIENT] Streaming request headers: {:?}", header_keys);
+            
             let response = http_client
                 .post(&url)
                 .headers(headers)
-                .json(&body)
+                .body(body_json.clone())
                 .send()
                 .await
                 .context("Failed to send streaming request")?;
 
-            if !response.status().is_success() {
-                let status = response.status();
-                Err(anyhow::anyhow!("API request failed with status: {}", status))?;
+            let status = response.status();
+            crate::info_log!("[LLM_CLIENT] Streaming response status: {}", status);
+
+            if !status.is_success() {
+                // Log error details and propagate error
+                let error_body = response.text().await.unwrap_or_else(|_| "<failed to read error body>".to_string());
+                crate::error_log!("[LLM_CLIENT] Streaming request failed with status: {}", status);
+                crate::error_log!("[LLM_CLIENT] Error response body: {}", error_body);
+                
+                // Save request to file for WAF debugging
+                self.log_request_to_file(&body_json, "ERROR", Some(&format!("HTTP {}", status)));
+                
+                Err(anyhow::anyhow!("API request failed with status: {} - {}", status, error_body))?;
+                return; // Explicit return to satisfy compiler
             }
 
             let mut stream = response.bytes_stream();

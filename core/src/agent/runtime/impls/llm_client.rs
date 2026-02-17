@@ -7,13 +7,53 @@ use crate::agent::runtime::{
     context::RuntimeContext,
     error::LLMError,
 };
-use crate::agent::types::intents::LLMRequest;
+use crate::agent::types::intents::{LLMRequest, Role};
 use crate::agent::types::events::LLMResponse;
 use crate::llm::LlmClient;
-use crate::llm::chat::{ChatRequest, ChatMessage};
+use crate::llm::chat::{ChatRequest, ChatMessage, MessageRole};
 use std::sync::Arc;
 use std::pin::Pin;
 use futures::{Stream, StreamExt};
+
+/// Build messages from LLMRequest context
+/// 
+/// Constructs a complete message history including:
+/// - System prompt
+/// - Conversation history
+/// - Current scratchpad content
+fn build_messages_from_context(req: &LLMRequest) -> Vec<ChatMessage> {
+    let mut messages = vec![];
+    
+    // 1. Add system prompt
+    if !req.context.system_prompt.is_empty() {
+        messages.push(ChatMessage::system(req.context.system_prompt.clone()));
+    }
+    
+    // 2. Add conversation history
+    for msg in &req.context.history {
+        let chat_msg = match msg.role {
+            Role::User => ChatMessage::user(msg.content.clone()),
+            Role::Assistant => ChatMessage::assistant(msg.content.clone()),
+            Role::System => ChatMessage::system(msg.content.clone()),
+            Role::Tool => ChatMessage {
+                role: MessageRole::Tool,
+                content: msg.content.clone(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+                reasoning_content: None,
+            },
+        };
+        messages.push(chat_msg);
+    }
+    
+    // 3. Add current scratchpad as user message
+    if !req.context.scratchpad.is_empty() {
+        messages.push(ChatMessage::user(req.context.scratchpad.clone()));
+    }
+    
+    messages
+}
 
 /// LLM capability backed by existing LlmClient
 pub struct LlmClientCapability {
@@ -39,12 +79,8 @@ impl LLMCapability for LlmClientCapability {
         _ctx: &RuntimeContext,
         req: LLMRequest,
     ) -> Result<LLMResponse, LLMError> {
-        // Build messages from context
-        let mut messages = vec![];
-        if !req.context.system_prompt.is_empty() {
-            messages.push(ChatMessage::system(req.context.system_prompt.clone()));
-        }
-        messages.push(ChatMessage::user(req.context.scratchpad.clone()));
+        // Build messages from context (system prompt + history + scratchpad)
+        let messages = build_messages_from_context(&req);
         
         let chat_request = ChatRequest {
             model: req.model.unwrap_or_default(), // Will be filled by LlmClient from its config if empty
@@ -81,12 +117,8 @@ impl LLMCapability for LlmClientCapability {
         _ctx: &'a RuntimeContext,
         req: LLMRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamChunk, LLMError>> + Send + 'a>> {
-        // Build messages from context
-        let mut messages = vec![];
-        if !req.context.system_prompt.is_empty() {
-            messages.push(ChatMessage::system(req.context.system_prompt.clone()));
-        }
-        messages.push(ChatMessage::user(req.context.scratchpad.clone()));
+        // Build messages from context (system prompt + history + scratchpad)
+        let messages = build_messages_from_context(&req);
         
         let chat_request = ChatRequest {
             model: req.model.unwrap_or_default(),
@@ -122,13 +154,13 @@ impl LLMCapability for LlmClientCapability {
                     }
                     Ok(crate::llm::chat::StreamEvent::Error(msg)) => {
                         crate::error_log!("[LLM_CLIENT] Stream error from provider: {}", msg);
-                        // Don't fail - stream might have produced valid content already
-                        break;
+                        // Yield error so fallback can be triggered
+                        Err(LLMError::new(msg))?;
                     }
                     Err(e) => {
                         crate::error_log!("[LLM_CLIENT] Stream error: {:?}", e);
-                        // Don't fail - stream might have produced valid content already
-                        break;
+                        // Yield error so fallback can be triggered
+                        Err(LLMError::new(e.to_string()))?;
                     }
                 }
             }

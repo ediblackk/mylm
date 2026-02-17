@@ -105,6 +105,7 @@ pub async fn execute_dag<R: AgencyRuntime + 'static>(
                 }
                 Ok((id, Err(e))) => {
                     in_flight.lock().await.remove(&id);
+                    completed.lock().await.insert(id);  // Mark as completed (failed)
                     errors.push((id, e));
                 }
                 Err(e) => {

@@ -346,6 +346,21 @@ where
         self.transport.publish(envelope).await.map_err(SessionError::Transport)
     }
 
+    /// Abort the current pending execution graph.
+    /// 
+    /// Called when execution fails to prevent automatic retry of the same
+    /// failing intent. Session does not automatically retry failed DAGs.
+    /// User must provide new input to generate a fresh execution plan.
+    fn abort_pending_graph(&mut self) {
+        if self.pending_graph.is_some() {
+            crate::warn_log!("[SESSION] Aborting pending execution graph ({} intents)", 
+                self.pending_graph.as_ref().map(|g| g.len()).unwrap_or(0));
+            self.pending_graph = None;
+            // Also clear in-flight tracking since we're aborting
+            self.in_flight.clear();
+        }
+    }
+
     /// Process a batch of events through the kernel
     async fn process_events(&mut self, events: Vec<KernelEvent>) -> Result<IntentGraph, SessionError> {
         // Process through kernel
@@ -357,17 +372,25 @@ where
 
     /// Execute ready intents from the pending graph
     async fn execute_ready_intents(&mut self) -> Result<Vec<(IntentId, Observation)>, SessionError> {
+        crate::debug_log!("[SESSION] execute_ready_intents CALLED");
+        
         let Some(ref graph) = self.pending_graph else {
+            crate::debug_log!("[SESSION] execute_ready_intents: NO PENDING GRAPH, returning empty");
             return Ok(Vec::new());
         };
+        
+        crate::debug_log!("[SESSION] execute_ready_intents: graph has {} nodes", graph.len());
 
         // Get ready intents
         let ready: Vec<_> = graph.ready_nodes(&self.completed_intents.iter().copied().collect::<Vec<_>>())
             .into_iter()
             .cloned()
             .collect();
+        
+        crate::debug_log!("[SESSION] execute_ready_intents: {} ready intents", ready.len());
 
         if ready.is_empty() {
+            crate::debug_log!("[SESSION] execute_ready_intents: NO READY INTENTS, returning empty");
             return Ok(Vec::new());
         }
 
@@ -397,6 +420,11 @@ where
         // Execute via runtime
         let observations = self.runtime.execute_dag(graph).await
             .map_err(SessionError::Runtime)?;
+        
+        crate::debug_log!("[SESSION] execute_dag returned {} observations", observations.len());
+        for (i, (id, obs)) in observations.iter().enumerate() {
+            crate::debug_log!("[SESSION] Observation {}: id={}, type={:?}", i, id.0, std::mem::discriminant(obs));
+        }
 
         // Store results and update tracking
         let mut has_error = false;
@@ -412,25 +440,22 @@ where
                 let _ = self.output_tx.send(OutputEvent::ResponseComplete);
             }
             
-            // Check for LLM/runtime errors
+            // Check for LLM/runtime errors - mark error but don't return early
+            // Main loop will handle RuntimeError with circuit breaker logic
             if let Observation::RuntimeError { error, .. } = obs {
                 has_error = true;
                 error_msg = error.message.clone();
+                
+                crate::error_log!("[SESSION] RuntimeError observation in execute_ready_intents: {} (retryable={}, id={})", 
+                    error.message, error.retryable, id.0);
                 
                 // Emit error event immediately so UI can show it
                 let _ = self.output_tx.send(OutputEvent::Error {
                     message: format!("Runtime error: {}", error.message),
                 });
-
-                // Immediate halt if not retryable
-                if !error.retryable {
-                    let _ = self.output_tx.send(OutputEvent::Halted {
-                        reason: format!("Non-retryable runtime error: {}", error.message),
-                    });
-                    return Err(SessionError::Runtime(super::runtime::RuntimeError::Internal {
-                        message: format!("Non-retryable runtime error: {}", error.message)
-                    }));
-                }
+                
+                // Don't return early - let main loop handle circuit breaker logic
+                // This keeps the session alive for retry
             }
         }
 
@@ -440,19 +465,30 @@ where
             crate::error_log!("[SESSION] Consecutive error count: {}/{}", 
                 self.consecutive_errors, self.max_consecutive_errors);
             
-            // Add backoff delay to prevent spamming
-            let delay_ms = 500 * (2u64.pow(self.consecutive_errors.saturating_sub(1)));
-            let delay = std::time::Duration::from_millis(delay_ms.min(5000));
-            crate::warn_log!("[SESSION] Error detected, backing off for {:?}", delay);
+            // MANDATORY 3-second delay after ANY error before continuing
+            // This prevents spamming the provider regardless of error type
+            let delay = std::time::Duration::from_secs(3);
+            crate::warn_log!("[SESSION] MANDATORY 3-second delay after error. Will halt if {}/{} errors", 
+                self.consecutive_errors, self.max_consecutive_errors);
             tokio::time::sleep(delay).await;
 
             if self.consecutive_errors >= self.max_consecutive_errors {
+                crate::error_log!("[SESSION] HALTING after {} consecutive errors", self.consecutive_errors);
                 let _ = self.output_tx.send(OutputEvent::Error {
-                    message: format!("Stopping session after {} consecutive errors. Last error: {}", 
+                    message: format!("STOPPING session after {} consecutive errors. Last error: {}", 
                         self.consecutive_errors, error_msg),
                 });
-                return Err(SessionError::Internal("Max consecutive errors reached".to_string()));
+                let _ = self.output_tx.send(OutputEvent::Halted {
+                    reason: format!("Circuit breaker: {} consecutive errors", self.consecutive_errors),
+                });
+                return Err(SessionError::Internal(format!(
+                    "Circuit breaker triggered after {} consecutive errors", 
+                    self.consecutive_errors
+                )));
             }
+            
+            crate::warn_log!("[SESSION] Continuing after error delay. Error count: {}/{}",
+                self.consecutive_errors, self.max_consecutive_errors);
         } else if !observations.is_empty() {
             // Reset error count ONLY on success with actual observations
             if self.consecutive_errors > 0 {
@@ -514,9 +550,28 @@ where
         }
 
         loop {
+            crate::debug_log!("[SESSION] Loop iteration. consecutive_errors={}/{}", 
+                self.consecutive_errors, self.max_consecutive_errors);
+            
             // Check for interrupt
             if self.is_interrupted() {
                 return Err(SessionError::Interrupted);
+            }
+            
+            // Circuit breaker: halt if too many consecutive errors
+            if self.consecutive_errors >= self.max_consecutive_errors {
+                crate::error_log!("[SESSION] CIRCUIT BREAKER TRIGGERED: {} errors >= {} max", 
+                    self.consecutive_errors, self.max_consecutive_errors);
+                let _ = self.output_tx.send(OutputEvent::Error {
+                    message: format!("Session halted after {} consecutive errors", self.consecutive_errors),
+                });
+                let _ = self.output_tx.send(OutputEvent::Halted {
+                    reason: format!("Circuit breaker: {} consecutive errors", self.consecutive_errors),
+                });
+                return Err(SessionError::Internal(format!(
+                    "Circuit breaker triggered after {} consecutive errors", 
+                    self.consecutive_errors
+                )));
             }
 
             // Check if graph complete
@@ -559,20 +614,99 @@ where
                                 }
                                 
                                 // Execute any ready intents from new graph
-                                let observations = self.execute_ready_intents().await?;
+                                let observations = match self.execute_ready_intents().await {
+                                    Ok(obs) => obs,
+                                    Err(e) => {
+                                        crate::error_log!("[SESSION] execute_ready_intents FAILED: {:?}", e);
+                                        // Increment consecutive errors for circuit breaker
+                                        self.consecutive_errors += 1;
+                                        crate::error_log!("[SESSION] Consecutive error count: {}/{}", 
+                                            self.consecutive_errors, self.max_consecutive_errors);
+                                        
+                                        // ALWAYS wait 3 seconds after any error
+                                        crate::warn_log!("[SESSION] MANDATORY 3-second delay after error");
+                                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                        
+                                        // Abort the failed execution graph to prevent automatic retry.
+                                        // Session does not automatically retry failed DAGs.
+                                        self.abort_pending_graph();
+                                        
+                                        if self.consecutive_errors >= self.max_consecutive_errors {
+                                            crate::error_log!("[SESSION] HALTING after {} consecutive errors", 
+                                                self.consecutive_errors);
+                                            let _ = self.output_tx.send(OutputEvent::Error {
+                                                message: format!("STOPPING after {} errors", self.consecutive_errors),
+                                            });
+                                            let _ = self.output_tx.send(OutputEvent::Halted {
+                                                reason: format!("Circuit breaker: {} errors", self.consecutive_errors),
+                                            });
+                                            return Err(e);
+                                        }
+                                        
+                                        // Continue to next loop iteration.
+                                        // Session now waits for new events (user input) rather than
+                                        // retrying the same failing intent.
+                                        continue;
+                                    }
+                                };
                                 
-                                // Check for halt or runtime error observation
+                                // Reset consecutive errors on success
+                                if self.consecutive_errors > 0 {
+                                    self.consecutive_errors = 0;
+                                    crate::info_log!("[SESSION] Error count reset after success");
+                                }
+                                
+                                // Check for runtime errors first - handle them with circuit breaker logic
+                                let mut runtime_error_handled = false;
                                 for (_, obs) in &observations {
                                     if let Observation::RuntimeError { error, .. } = obs {
-                                        crate::error_log!("[SESSION] Runtime error received, stopping loop to prevent feedback loop");
-                                        let _ = self.output_tx.send(OutputEvent::Halted {
-                                            reason: format!("Runtime error: {}", error.message),
+                                        crate::error_log!("[SESSION] Runtime error detected in main loop: {} (retryable={})", 
+                                            error.message, error.retryable);
+                                        
+                                        // Send error event so UI shows it
+                                        let _ = self.output_tx.send(OutputEvent::Error {
+                                            message: format!("Runtime error: {}", error.message),
                                         });
-                                        return Err(SessionError::Runtime(super::runtime::RuntimeError::Internal {
-                                            message: error.message.clone(),
-                                        }));
+                                        
+                                        // Increment consecutive errors for circuit breaker
+                                        self.consecutive_errors += 1;
+                                        crate::error_log!("[SESSION] Consecutive error count: {}/{}", 
+                                            self.consecutive_errors, self.max_consecutive_errors);
+                                        
+                                        // ALWAYS wait 3 seconds after any error
+                                        crate::warn_log!("[SESSION] MANDATORY 3-second delay after RuntimeError");
+                                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                        
+                                        // Abort the failed execution graph to prevent automatic retry
+                                        self.abort_pending_graph();
+                                        
+                                        // Check if we've hit the circuit breaker limit
+                                        if self.consecutive_errors >= self.max_consecutive_errors {
+                                            crate::error_log!("[SESSION] CIRCUIT BREAKER: Halting after {} consecutive errors", 
+                                                self.consecutive_errors);
+                                            let _ = self.output_tx.send(OutputEvent::Halted {
+                                                reason: format!("Circuit breaker: {} consecutive RuntimeErrors", self.consecutive_errors),
+                                            });
+                                            return Err(SessionError::Internal(format!(
+                                                "Circuit breaker triggered after {} consecutive RuntimeErrors", 
+                                                self.consecutive_errors
+                                            )));
+                                        }
+                                        
+                                        // Mark as handled - will continue main loop after this block
+                                        runtime_error_handled = true;
+                                        crate::info_log!("[SESSION] RuntimeError handled, will continue to next loop iteration");
+                                        break;
                                     }
-
+                                }
+                                
+                                // If we handled a runtime error, skip to next main loop iteration
+                                if runtime_error_handled {
+                                    continue;
+                                }
+                                
+                                // Check for halt observation
+                                for (_, obs) in &observations {
                                     if matches!(obs, Observation::Halted { .. }) {
                                         crate::info_log!("[SESSION] Halt observation received, stopping loop");
                                         let _ = self.output_tx.send(OutputEvent::Halted {
@@ -588,7 +722,11 @@ where
                                 }
                                 
                                 // Convert to events and publish back to transport for potential expansion
+                                // BUT skip RuntimeError to prevent feedback loops (already handled above)
                                 for (_, obs) in observations {
+                                    if matches!(obs, Observation::RuntimeError { .. }) {
+                                        continue;
+                                    }
                                     let event = obs.clone().into_event();
                                     crate::debug_log!("[SESSION] Publishing observation: {:?}", event);
                                     self.publish_event(event).await?;

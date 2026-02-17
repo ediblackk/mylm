@@ -206,12 +206,30 @@ impl CognitiveEngine for LLMBasedEngine {
                         memory_context)
                 };
                 
-                // The user message is already in history (added above)
-                // Scratchpad is just the instruction for the LLM
-                let scratchpad = "What should I do?".to_string();
+                // Include the actual user message in the scratchpad
+                let scratchpad = format!("User: {}\n\nWhat should I do?", msg);
+                
+                // Convert state history to context history format
+                let history: Vec<crate::agent::types::intents::Message> = state.history.iter().map(|m| {
+                    let role = match m.role {
+                        crate::agent::cognition::history::MessageRole::User => 
+                            crate::agent::types::intents::Role::User,
+                        crate::agent::cognition::history::MessageRole::Assistant => 
+                            crate::agent::types::intents::Role::Assistant,
+                        crate::agent::cognition::history::MessageRole::System => 
+                            crate::agent::types::intents::Role::System,
+                        crate::agent::cognition::history::MessageRole::Tool => 
+                            crate::agent::types::intents::Role::Tool,
+                    };
+                    crate::agent::types::intents::Message {
+                        role,
+                        content: m.content.clone(),
+                    }
+                }).collect();
                 
                 let context = crate::agent::types::intents::Context::new(scratchpad)
-                    .with_system(enhanced_system_prompt);
+                    .with_system(enhanced_system_prompt)
+                    .with_history(history);
                 
                 let decision = AgentDecision::RequestLLM(LLMRequest {
                     context,

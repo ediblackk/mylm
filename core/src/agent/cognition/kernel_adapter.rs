@@ -104,11 +104,11 @@ impl<E: CognitiveEngine> CognitiveEngineAdapter<E> {
             KernelEvent::Tick { .. } => None,
             KernelEvent::Session { .. } => None,
             KernelEvent::RuntimeError { intent_id, error } => {
-                crate::info_log!("[KERNEL_ADAPTER] RuntimeError event: intent_id={:?}, error={}", intent_id, error);
-                Some(InputEvent::RuntimeError {
-                    intent_id: *intent_id,
-                    error: error.clone(),
-                })
+                crate::error_log!("[KERNEL_ADAPTER] RuntimeError event: intent_id={:?}, error={}", intent_id, error);
+                // DO NOT convert to InputEvent - RuntimeError should be terminal
+                // and handled by session layer only. Returning None prevents
+                // the engine from generating new intents from errors.
+                None
             }
         }
     }

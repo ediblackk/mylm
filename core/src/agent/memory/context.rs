@@ -100,13 +100,18 @@ impl<'a> MemoryContextBuilder<'a> {
 }
 
 /// Format a single memory for context
+/// 
+/// Content is sanitized to remove patterns that might trigger WAF/content filtering.
 fn format_context_line(mem: &Memory) -> String {
     let timestamp = chrono::DateTime::from_timestamp(mem.created_at, 0)
         .map(|dt| dt.format("%m-%d %H:%M").to_string())
         .unwrap_or_else(|| "???".to_string());
     
+    // Sanitize memory content to avoid WAF triggering
+    let sanitized = sanitize_memory_content(&mem.content);
+    
     // Truncate content to first line or 100 chars
-    let content = mem.content.lines().next().unwrap_or(&mem.content);
+    let content = sanitized.lines().next().unwrap_or(&sanitized);
     let truncated = if content.len() > 100 {
         format!("{}...", &content[..100])
     } else {
@@ -114,6 +119,26 @@ fn format_context_line(mem: &Memory) -> String {
     };
     
     format!("- [{} | {}] {}\n", timestamp, mem.r#type, truncated)
+}
+
+/// Sanitize memory content by removing patterns that trigger WAF:
+/// - ANSI escape sequences
+/// - Command substitution patterns like $(...), `...`, ${...}
+/// - Control characters
+fn sanitize_memory_content(content: &str) -> String {
+    // Step 1: Strip ANSI escape sequences
+    let ansi_regex = regex::Regex::new(r"\x1B\[[0-9;]*[a-zA-Z]|\x1B\][^\x07]*\x07|\x1B\[[\?0-9]*[hl]").unwrap();
+    let without_ansi = ansi_regex.replace_all(content, "");
+    
+    // Step 2: Replace command substitution patterns
+    let cmd_subst_regex = regex::Regex::new(r"\$\([^)]+\)|`[^`]+`|\$\{[^}]+\}").unwrap();
+    let without_cmd_subst = cmd_subst_regex.replace_all(&without_ansi, "[CMD]");
+    
+    // Step 3: Remove control characters except whitespace
+    without_cmd_subst
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || c.is_ascii_whitespace())
+        .collect()
 }
 
 /// Inject memory context into a chat history (represented as list of strings for flexibility)
