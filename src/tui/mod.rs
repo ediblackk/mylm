@@ -143,6 +143,10 @@ async fn handle_agent_event(
                 "🔧 Tool result:\n```\n{}\n```",
                 result
             )));
+            
+            // Add tool result to context manager history
+            app.context_manager.add_message("tool", &result);
+            
             app.state = AppState::Idle;
         }
         
@@ -201,6 +205,14 @@ async fn handle_agent_event(
                     mylm_core::info_log!("[AGENT_EVENT] Generation time: {}ms", generation_time_ms);
                 }
             }
+            
+            // Get the response content and update context manager
+            let response_content = app.chat_history.last()
+                .map(|m| m.message.content.clone())
+                .unwrap_or_default();
+            app.context_manager.on_llm_complete(&response_content);
+            let (cached_tokens, max_tokens) = app.context_manager.get_cached_token_usage();
+            mylm_core::info_log!("[AGENT_EVENT] Context updated: {}/{} cached tokens", cached_tokens, max_tokens);
             
             // Reset all streaming state
             app.current_response.clear();

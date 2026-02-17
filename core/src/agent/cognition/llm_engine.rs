@@ -192,6 +192,10 @@ impl CognitiveEngine for LLMBasedEngine {
         match input {
             // User message - request LLM to decide (works for any step count)
             Some(InputEvent::UserMessage(msg)) => {
+                // CRITICAL: Add user message to history FIRST
+                let state_with_message = state.clone()
+                    .with_message(crate::agent::cognition::history::Message::user(&msg));
+                
                 // Proactively inject relevant memory context BEFORE LLM call
                 crate::info_log!("[LLM_ENGINE] Processing user message, checking memory...");
                 let memory_context = self.get_memory_context(&msg);
@@ -210,7 +214,7 @@ impl CognitiveEngine for LLMBasedEngine {
                 let scratchpad = format!("User: {}\n\nWhat should I do?", msg);
                 
                 // Convert state history to context history format
-                let history: Vec<crate::agent::types::intents::Message> = state.history.iter().map(|m| {
+                let history: Vec<crate::agent::types::intents::Message> = state_with_message.history.iter().map(|m| {
                     let role = match m.role {
                         crate::agent::cognition::history::MessageRole::User => 
                             crate::agent::types::intents::Role::User,
@@ -240,37 +244,44 @@ impl CognitiveEngine for LLMBasedEngine {
                     stream: false,
                 });
                 
-                let next_state = state.clone().increment_step();
+                let next_state = state_with_message.increment_step();
                 Ok(Transition::new(next_state, decision))
             }
             
             // LLM response - parse and act
             Some(InputEvent::LLMResponse(llm_resp)) => {
+                // CRITICAL: Add assistant response to history
+                let state_with_response = state.clone()
+                    .with_message(crate::agent::cognition::history::Message::assistant(&llm_resp.content));
+                
                 match self.parse_response(state, &llm_resp.content) {
                     Ok(decision) => {
                         // Check if tool needs approval
-                        let final_decision = if let AgentDecision::CallTool(ref call) = decision {
+                        let (final_decision, pending_tool) = if let AgentDecision::CallTool(ref call) = decision {
                             let args_str = call.arguments.to_string();
                             if self.requires_approval(&call.name, &args_str) {
-                                AgentDecision::RequestApproval(ApprovalRequest {
+                                // Store the tool call as pending and request approval
+                                (AgentDecision::RequestApproval(ApprovalRequest {
                                     tool: call.name.clone(),
                                     args: args_str.clone(),
                                     reason: format!("Tool '{}' requires approval", call.name),
-                                })
+                                }), Some(call.clone()))
                             } else {
-                                decision
+                                (decision, None)
                             }
                         } else {
-                            decision
+                            (decision, None)
                         };
                         
-                        let next_state = state.clone().increment_step();
+                        let next_state = state_with_response
+                            .increment_step()
+                            .with_pending_tool(pending_tool);
                         Ok(Transition::new(next_state, final_decision))
                     }
                     Err(e) => {
                         // Parsing failed - emit error response
                         Ok(Transition::new(
-                            state.clone().increment_step(),
+                            state_with_response.increment_step(),
                             AgentDecision::EmitResponse(format!("Error: {}", e))
                         ))
                     }
@@ -290,6 +301,12 @@ impl CognitiveEngine for LLMBasedEngine {
                         ("cancelled", "Cancelled".to_string())
                     }
                 };
+                
+                // CRITICAL: Add tool result to history
+                let tool_content = format!("Tool '{}' {}: {}", tool, status, output);
+                let state_with_tool = state.clone()
+                    .with_message(crate::agent::cognition::history::Message::tool(&tool_content));
+                
                 let scratchpad = format!(
                     "Tool '{}' {} with output: {}\n\nWhat should I do next?",
                     tool, status, output
@@ -307,7 +324,7 @@ impl CognitiveEngine for LLMBasedEngine {
                     stream: false,
                 });
                 
-                let next_state = state.clone().increment_step();
+                let next_state = state_with_tool.increment_step();
                 Ok(Transition::new(next_state, decision))
             }
             
@@ -315,10 +332,19 @@ impl CognitiveEngine for LLMBasedEngine {
             Some(InputEvent::ApprovalResult(approval)) => {
                 match approval {
                     crate::agent::cognition::input::ApprovalOutcome::Granted => {
-                        // Continue - next step should have the actual tool call
-                        // This is simplified - real implementation would track pending tool
-                        let next_state = state.clone().increment_step();
-                        Ok(Transition::new(next_state, AgentDecision::None))
+                        // Execute the pending tool if we have one
+                        if let Some(ref tool_call) = state.pending_tool {
+                            crate::info_log!("[LLM_ENGINE] Approval granted, executing pending tool: {}", tool_call.name);
+                            let next_state = state.clone()
+                                .increment_step()
+                                .with_pending_tool(None); // Clear pending tool
+                            Ok(Transition::new(next_state, AgentDecision::CallTool(tool_call.clone())))
+                        } else {
+                            // No pending tool, just continue
+                            crate::warn_log!("[LLM_ENGINE] Approval granted but no pending tool found");
+                            let next_state = state.clone().increment_step();
+                            Ok(Transition::new(next_state, AgentDecision::None))
+                        }
                     }
                     crate::agent::cognition::input::ApprovalOutcome::Denied { .. } => {
                         let next_state = state.clone().increment_rejection();
@@ -408,7 +434,13 @@ impl CognitiveEngine for LLMBasedEngine {
 // ===== Helper Functions =====
 
 fn build_system_prompt() -> String {
-    r#"You are an AI assistant that helps users by using tools and reasoning step by step.
+    // Get current date/time in a human-readable format
+    let now = chrono::Local::now();
+    let date_time_str = now.format("%A, %B %d, %Y at %I:%M:%S %p %Z").to_string();
+    
+    format!(r#"You are an AI assistant that helps users by using tools and reasoning step by step.
+
+Current Date and Time: {date_time}
 
 Available tools:
 - shell <command>: Execute shell commands
@@ -420,10 +452,10 @@ Available tools:
 Response Format (Short-Key JSON - ALWAYS use this format):
 
 1. For tool calls:
-   {"t": "your reasoning", "a": "tool_name", "i": {"arg": "value"}}
+   {{"t": "your reasoning", "a": "tool_name", "i": {{"arg": "value"}}}}
 
 2. For final answers to user:
-   {"t": "your reasoning", "f": "your response to user"}
+   {{"t": "your reasoning", "f": "your response to user"}}
 
 Field meanings:
 - "t": Your internal thought/reasoning (required)
@@ -439,8 +471,8 @@ Rules:
 - Keep thoughts concise but clear
 
 Examples:
-{"t": "Need to check directory contents", "a": "shell", "i": {"command": "ls -la"}}
-{"t": "Found the files", "f": "Here are the files in your directory..."}"#.to_string()
+{{"t": "Need to check directory contents", "a": "shell", "i": {{"command": "ls -la"}}}}
+{{"t": "Found the files", "f": "Here are the files in your directory..."}}"#, date_time = date_time_str)
 }
 
 fn format_history(history: &[crate::agent::cognition::history::Message]) -> String {

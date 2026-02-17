@@ -209,7 +209,9 @@ async fn handle_chat_focus(app: &mut AppStateContainer, key: KeyEvent) -> LoopAc
         }
         // Control key shortcuts must come before KeyCode::Char(c)
         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.move_cursor_home();
+            // Toggle auto-approve
+            let current = app.auto_approve.load(std::sync::atomic::Ordering::SeqCst);
+            app.auto_approve.store(!current, std::sync::atomic::Ordering::SeqCst);
             LoopAction::Continue
         }
         KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -229,7 +231,7 @@ async fn handle_chat_focus(app: &mut AppStateContainer, key: KeyEvent) -> LoopAc
             LoopAction::Continue
         }
         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.copy_visible_conversation_to_clipboard();
+            app.verbose_mode = !app.verbose_mode;
             LoopAction::Continue
         }
         KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) && key.modifiers.contains(KeyModifiers::SHIFT) => {

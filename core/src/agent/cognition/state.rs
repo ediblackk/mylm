@@ -4,6 +4,7 @@
 //! No runtime objects. No Arc. No Mutex.
 
 use crate::agent::cognition::history::Message;
+use crate::agent::cognition::decision::ToolCall;
 
 /// Pure agent state - serializable, cloneable, deterministic
 #[derive(Debug, Clone)]
@@ -40,6 +41,9 @@ pub struct AgentState {
     
     /// Pending approval (waiting for user)
     pub pending_approval: bool,
+    
+    /// Pending tool call (waiting for approval)
+    pub pending_tool: Option<ToolCall>,
 }
 
 impl AgentState {
@@ -57,6 +61,7 @@ impl AgentState {
             shutdown_requested: false,
             pending_llm: false,
             pending_approval: false,
+            pending_tool: None,
         }
     }
     
@@ -118,6 +123,12 @@ impl AgentState {
     /// Set pending approval flag
     pub fn with_pending_approval(mut self, pending: bool) -> Self {
         self.pending_approval = pending;
+        self
+    }
+    
+    /// Set pending tool call (for approval tracking)
+    pub fn with_pending_tool(mut self, tool: Option<ToolCall>) -> Self {
+        self.pending_tool = tool;
         self
     }
     

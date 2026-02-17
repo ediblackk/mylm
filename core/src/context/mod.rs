@@ -20,7 +20,7 @@ pub mod action_stamp;
 pub mod pruning;
 
 // Re-export context manager types
-pub use manager::{ContextConfig, ContextManager, ContextError, Message, TokenCounter};
+pub use manager::{ContextConfig, ContextManager, ContextError, Message, TokenCounter, TokenBreakdown};
 
 // Re-export pruning types
 pub use pruning::{

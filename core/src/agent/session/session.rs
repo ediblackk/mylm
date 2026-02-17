@@ -14,6 +14,7 @@ use crate::agent::runtime::{AgentRuntime, RuntimeContext, RuntimeError};
 use crate::agent::session::input::{SessionInput, WorkerEvent};
 use crate::agent::session::persistence::{SessionPersistence, PersistedSession, SessionBuilder};
 use crate::agent::memory::AgentMemoryManager;
+use crate::context::ContextManager;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Receiver;
@@ -91,8 +92,11 @@ where
     /// Session ID
     session_id: String,
     
-    /// Chat history for persistence
-    history: Vec<crate::agent::cognition::history::Message>,
+    /// Context manager for token-aware history management
+    context_manager: ContextManager,
+    
+    /// LLM client for context condensation (optional)
+    llm_client: Option<Arc<crate::llm::LlmClient>>,
 }
 
 impl<E> Session<E>
@@ -108,6 +112,7 @@ where
         config: SessionConfig,
     ) -> Self {
         let state = AgentState::new(config.max_steps);
+        let context_config = crate::context::ContextConfig::default();
         
         Self {
             engine,
@@ -117,7 +122,8 @@ where
             memory_manager: None,
             persistence: Some(SessionPersistence::new()),
             session_id: uuid::Uuid::new_v4().to_string(),
-            history: Vec::new(),
+            context_manager: ContextManager::new(context_config),
+            llm_client: None,
         }
     }
     
@@ -131,6 +137,7 @@ where
         memory_config: &crate::config::agent::MemoryConfig,
     ) -> Self {
         let state = AgentState::new(session_config.max_steps);
+        let context_config = crate::context::ContextConfig::default();
         
         Self {
             engine,
@@ -140,7 +147,8 @@ where
             memory_manager: None,
             persistence: Some(SessionPersistence::from_config(memory_config)),
             session_id: uuid::Uuid::new_v4().to_string(),
-            history: Vec::new(),
+            context_manager: ContextManager::new(context_config),
+            llm_client: None,
         }
     }
     
@@ -153,6 +161,7 @@ where
     ) -> Self {
         let state = AgentState::new(config.max_steps);
         let persistence = SessionPersistence::from_config(memory_manager.config());
+        let context_config = crate::context::ContextConfig::default();
         
         Self {
             engine,
@@ -162,7 +171,8 @@ where
             memory_manager: Some(memory_manager),
             persistence: Some(persistence),
             session_id: uuid::Uuid::new_v4().to_string(),
-            history: Vec::new(),
+            context_manager: ContextManager::new(context_config),
+            llm_client: None,
         }
     }
     
@@ -179,16 +189,36 @@ where
             .unwrap_or_default();
         
         let state = AgentState::new(config.max_steps);
+        let context_config = crate::context::ContextConfig::default();
+        
+        // Convert persisted history to ContextManager
+        let mut context_manager = ContextManager::new(context_config.clone());
+        for msg in &persisted.history {
+            let role = match msg.role {
+                crate::agent::cognition::history::MessageRole::User => "user",
+                crate::agent::cognition::history::MessageRole::Assistant => "assistant",
+                crate::agent::cognition::history::MessageRole::System => "system",
+                crate::agent::cognition::history::MessageRole::Tool => "tool",
+            };
+            context_manager.add_message(role, &msg.content);
+        }
+        
+        // Also populate state history for the engine
+        let state_with_history = AgentState {
+            history: persisted.history.clone(),
+            ..state
+        };
         
         Self {
             engine,
-            state,
+            state: state_with_history,
             runtime,
             config,
             memory_manager,
             persistence: Some(SessionPersistence::new()),
             session_id: persisted.id,
-            history: persisted.history,
+            context_manager,
+            llm_client: None,
         }
     }
     
@@ -231,11 +261,77 @@ where
         }
     }
     
+    /// Set the LLM client for context condensation
+    pub fn set_llm_client(&mut self, client: Arc<crate::llm::LlmClient>) {
+        self.llm_client = Some(client);
+        // Update context manager config from LLM client
+        self.context_manager = ContextManager::from_llm_client(&self.llm_client.as_ref().unwrap());
+    }
+    
+    /// Get the context manager
+    pub fn context_manager(&self) -> &ContextManager {
+        &self.context_manager
+    }
+    
+    /// Get mutable context manager
+    pub fn context_manager_mut(&mut self) -> &mut ContextManager {
+        &mut self.context_manager
+    }
+    
+    /// Sync state history to ContextManager
+    fn sync_history_to_context_manager(&mut self) {
+        // Only add new messages from state.history that aren't in context_manager yet
+        let existing_count = self.context_manager.history().len();
+        let state_history_len = self.state.history.len();
+        
+        if state_history_len > existing_count {
+            for msg in &self.state.history[existing_count..] {
+                let role = match msg.role {
+                    crate::agent::cognition::history::MessageRole::User => "user",
+                    crate::agent::cognition::history::MessageRole::Assistant => "assistant",
+                    crate::agent::cognition::history::MessageRole::System => "system",
+                    crate::agent::cognition::history::MessageRole::Tool => "tool",
+                };
+                self.context_manager.add_message(role, &msg.content);
+            }
+            
+            crate::info_log!(
+                "[SESSION] Synced {} new messages to ContextManager (total: {})",
+                state_history_len - existing_count,
+                self.context_manager.history().len()
+            );
+        }
+    }
+    
+    /// Prepare context for LLM call with pruning/condensation
+    pub async fn prepare_context(&mut self) -> Result<Vec<crate::llm::chat::ChatMessage>, crate::context::ContextError> {
+        self.context_manager.prepare_context(self.llm_client.as_ref()).await
+    }
+    
     /// Build a persisted session snapshot
     pub fn build_persisted_session(&self) -> PersistedSession {
+        // Convert ContextManager history back to cognition messages
+        let history: Vec<crate::agent::cognition::history::Message> = self.context_manager
+            .history()
+            .iter()
+            .map(|m| {
+                let role = match m.role.as_str() {
+                    "user" => crate::agent::cognition::history::MessageRole::User,
+                    "assistant" => crate::agent::cognition::history::MessageRole::Assistant,
+                    "system" => crate::agent::cognition::history::MessageRole::System,
+                    "tool" => crate::agent::cognition::history::MessageRole::Tool,
+                    _ => crate::agent::cognition::history::MessageRole::User,
+                };
+                crate::agent::cognition::history::Message {
+                    role,
+                    content: m.content.clone(),
+                }
+            })
+            .collect();
+        
         SessionBuilder::new()
             .with_id(&self.session_id)
-            .with_history(self.history.clone())
+            .with_history(history)
             .build()
     }
     
@@ -303,8 +399,8 @@ where
             // Update state
             self.state = transition.next_state.clone();
             
-            // Sync session history with state history for persistence
-            self.history = self.state.history.clone();
+            // Sync session history with ContextManager for token-aware management
+            self.sync_history_to_context_manager();
             
             // Handle decision
             match transition.decision {

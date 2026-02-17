@@ -12,12 +12,7 @@ pub struct Keybinding {
     pub description: &'static str,
 }
 
-/// A slash command entry for display
-#[derive(Debug, Clone)]
-pub struct SlashCommand {
-    pub command: &'static str,
-    pub description: &'static str,
-}
+
 
 /// HelpSystem generates dynamic help content
 pub struct HelpSystem;
@@ -32,7 +27,7 @@ impl HelpSystem {
 
         // Header
         output.push_str("╔══════════════════════════════════════════════════════════════════════════════╗\n");
-        output.push_str("║                            MYLM HELP                                         ║\n");
+        output.push_str("║                            Info                                              ║\n");
         output.push_str("╠══════════════════════════════════════════════════════════════════════════════╣\n");
 
         // KEYBINDINGS SECTION
@@ -48,25 +43,6 @@ impl HelpSystem {
         output.push_str("║ MOUSE                                                                        ║\n");
         output.push_str("║   Shift+Click          Bypass mylm mouse capture (use terminal's native      ║\n");
         output.push_str("║                        selection & right-click menu)                         ║\n");
-        output.push_str("║   Drag                 Select text in terminal or chat pane                  ║\n");
-        output.push_str("║   Right/Middle-click   Paste clipboard (or copy if clicking on selection)    ║\n");
-        output.push_str("║   Scroll wheel         Scroll focused pane                                   ║\n");
-        output.push_str("╠══════════════════════════════════════════════════════════════════════════════╣\n");
-
-        // SLASH COMMANDS SECTION
-        output.push_str("║ SLASH COMMANDS (type in Chat input)                                          ║\n");
-        let commands = Self::get_slash_commands();
-        for cmd in &commands {
-            let line = format!("║   {:<20} {:<45}║\n", cmd.command, cmd.description);
-            output.push_str(&line);
-        }
-        output.push_str("╠══════════════════════════════════════════════════════════════════════════════╣\n");
-
-        // NOTES SECTION
-        output.push_str("║ NOTES                                                                        ║\n");
-        output.push_str("║   • Hold Shift when clicking to use your terminal's native mouse features    ║\n");
-        output.push_str("║   • Background jobs appear in jobs panel (F4)                                ║\n");
-        output.push_str("║   • Configuration hot-reloads when you edit config.toml                      ║\n");
         output.push_str("╚══════════════════════════════════════════════════════════════════════════════╝\n");
 
         output
@@ -78,26 +54,6 @@ impl HelpSystem {
             Keybinding {
                 keys: "Ctrl+Shift+←/→",
                 description: "Adjust chat/terminal split (20%-100%)",
-            },
-            Keybinding {
-                keys: "F1",
-                description: "Toggle this help screen",
-            },
-            Keybinding {
-                keys: "F2",
-                description: "Cycle focus (Terminal → Chat → Jobs)",
-            },
-            Keybinding {
-                keys: "F4",
-                description: "Toggle jobs panel",
-            },
-            Keybinding {
-                keys: "Enter",
-                description: "Submit message / Confirm action",
-            },
-            Keybinding {
-                keys: "Esc",
-                description: "Cancel / Back / Exit prompt",
             },
             Keybinding {
                 keys: "Ctrl+C",
@@ -142,35 +98,6 @@ impl HelpSystem {
         ]
     }
 
-    /// Get all slash commands
-    fn get_slash_commands() -> Vec<SlashCommand> {
-        vec![
-            SlashCommand {
-                command: "/help, /h",
-                description: "Show this help",
-            },
-            SlashCommand {
-                command: "/profile <name>",
-                description: "Switch to named profile",
-            },
-            SlashCommand {
-                command: "/model <name>",
-                description: "Set model for active profile",
-            },
-            SlashCommand {
-                command: "/exec <command>",
-                description: "Execute shell command",
-            },
-            SlashCommand {
-                command: "/verbose",
-                description: "Toggle verbose mode",
-            },
-            SlashCommand {
-                command: "/jobs",
-                description: "List active jobs",
-            },
-        ]
-    }
 }
 
 #[cfg(test)]
@@ -183,10 +110,4 @@ mod tests {
         assert!(!kbs.is_empty());
     }
 
-    #[test]
-    fn test_slash_commands_list_not_empty() {
-        let cmds = HelpSystem::get_slash_commands();
-        assert!(!cmds.is_empty());
-        assert!(cmds.iter().any(|cmd| cmd.command.contains("/help")));
-    }
 }

@@ -282,6 +282,7 @@ impl AppStateContainer {
         let pacore_rounds = config.features.pacore.rounds;
 
         // Create context manager with actual config values and pricing
+        // System prompt tokens are estimated at ~800 (tools + instructions + date)
         let ctx_config = mylm_core::context::ContextConfig::new(max_ctx)
             .with_pricing(input_price, output_price);
         let context_manager = ContextManager::new(ctx_config);

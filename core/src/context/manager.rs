@@ -191,11 +191,64 @@ impl std::fmt::Display for ContextError {
 
 impl StdError for ContextError {}
 
+/// Token usage breakdown for debugging/display
+#[derive(Debug, Clone)]
+pub struct TokenBreakdown {
+    /// System prompt tokens (always included)
+    pub system: usize,
+    /// Ephemeral context tokens (one-turn only)
+    pub ephemeral: usize,
+    /// Conversation history tokens (persistent)
+    pub history: usize,
+    /// Pending user message tokens
+    pub pending: usize,
+    /// Maximum allowed tokens
+    pub max: usize,
+}
+
+impl TokenBreakdown {
+    /// Total cached tokens (system + history)
+    pub fn cached(&self) -> usize {
+        self.system + self.history
+    }
+    
+    /// Total tokens for next request
+    pub fn next_request(&self) -> usize {
+        self.system + self.ephemeral + self.history + self.pending
+    }
+    
+    /// Format as human-readable string
+    pub fn format(&self) -> String {
+        format!(
+            "Cached: {} | Ephemeral: {} | Next: {}/{}",
+            self.cached(),
+            self.ephemeral,
+            self.next_request(),
+            self.max
+        )
+    }
+}
+
 /// Manages conversation context including pruning and condensation
+/// 
+/// Context structure for each request:
+/// - System prompt (always included, not shown in conversation)
+/// - Ephemeral context (terminal snapshots, etc. - ONE turn only)
+/// - Conversation history (persistent)
+/// - Pending user message (being composed)
+///
+/// After LLM responds, ephemeral is cleared and response added to history.
 #[derive(Debug, Clone)]
 pub struct ContextManager {
     config: ContextConfig,
+    /// System prompt (always included, estimated size)
+    system_prompt_tokens: usize,
+    /// Persistent conversation history (user/assistant/tool messages)
     history: Vec<Message>,
+    /// Ephemeral context - included for ONE turn only (snapshots, etc.)
+    ephemeral_context: Vec<Message>,
+    /// Pending user message (not yet sent)
+    pending_user_message: Option<Message>,
     /// Action stamps for tracking agent actions
     pub action_stamps: ActionStampRegistry,
     /// Current conversation topic/focus (to prevent context jumping)
@@ -209,7 +262,11 @@ impl ContextManager {
     pub fn new(config: ContextConfig) -> Self {
         Self {
             config,
+            // Estimate system prompt at ~800 tokens (tools + instructions + date)
+            system_prompt_tokens: 800,
             history: Vec::new(),
+            ephemeral_context: Vec::new(),
+            pending_user_message: None,
             action_stamps: ActionStampRegistry::new(50),
             conversation_topic: None,
             pruned_history: crate::context::pruning::PrunedHistory::new(10),
@@ -422,42 +479,117 @@ impl ContextManager {
         Some(result.segment)
     }
 
-    /// Add a message to the history
+    // ===== Context Building Methods =====
+
+    /// Set the pending user message (to be sent)
+    pub fn set_pending_user_message(&mut self, content: &str) {
+        self.pending_user_message = Some(Message::new("user", content));
+    }
+
+    /// Clear the pending user message
+    pub fn clear_pending_user_message(&mut self) {
+        self.pending_user_message = None;
+    }
+
+    /// Add ephemeral context (terminal snapshot, etc.) - cleared after one turn
+    pub fn add_ephemeral_context(&mut self, role: &str, content: &str) {
+        let message = Message::new(role, content);
+        self.ephemeral_context.push(message);
+    }
+
+    /// Clear all ephemeral context
+    pub fn clear_ephemeral_context(&mut self) {
+        self.ephemeral_context.clear();
+    }
+
+    /// Add a message to the persistent history
     pub fn add_message(&mut self, role: &str, content: &str) {
         let message = Message::new(role, content);
         self.history.push(message);
     }
 
-    /// Add a ChatMessage to the history
+    /// Add a ChatMessage to the persistent history
     pub fn add_chat_message(&mut self, msg: &ChatMessage) {
         let message = Message::from_chat_message(msg);
         self.history.push(message);
     }
 
-    /// Set the entire history from ChatMessages
+    /// Set the entire history from ChatMessages (replaces history, keeps ephemeral)
     pub fn set_history(&mut self, messages: &[ChatMessage]) {
         self.history = messages.iter().map(Message::from_chat_message).collect();
     }
 
-    /// Get the current token usage (current, max)
-    pub fn get_token_usage(&self) -> (usize, usize) {
-        let current: usize = self.history.iter().map(|m| m.token_count).sum();
-        (current, self.config.max_tokens)
+    /// Called when LLM response is complete
+    /// - Adds assistant response to history
+    /// - Clears ephemeral context (one-turn only)
+    /// - Clears pending user message
+    pub fn on_llm_complete(&mut self, assistant_content: &str) {
+        // Add assistant response to persistent history
+        self.history.push(Message::new("assistant", assistant_content));
+        
+        // Clear ephemeral context (was only needed for this turn)
+        self.ephemeral_context.clear();
+        
+        // Clear pending user message (now in history)
+        self.pending_user_message = None;
     }
 
-    /// Get the context ratio (current / max)
-    pub fn get_context_ratio(&self) -> f64 {
-        let (current, max) = self.get_token_usage();
+    // ===== Token Counting Methods =====
+
+    /// Get cached token usage (what's "saved" in history)
+    /// This is: system_prompt + conversation_history
+    /// Returns (cached_tokens, max_tokens)
+    pub fn get_cached_token_usage(&self) -> (usize, usize) {
+        let history_tokens: usize = self.history.iter().map(|m| m.token_count).sum();
+        (self.system_prompt_tokens + history_tokens, self.config.max_tokens)
+    }
+
+    /// Get token usage for NEXT request (includes ephemeral)
+    /// This is: system_prompt + ephemeral + history + pending
+    /// Returns (next_request_tokens, max_tokens)
+    pub fn get_next_request_tokens(&self) -> (usize, usize) {
+        let ephemeral_tokens: usize = self.ephemeral_context.iter().map(|m| m.token_count).sum();
+        let history_tokens: usize = self.history.iter().map(|m| m.token_count).sum();
+        let pending_tokens = self.pending_user_message.as_ref().map(|m| m.token_count).unwrap_or(0);
+        
+        let total = self.system_prompt_tokens + ephemeral_tokens + history_tokens + pending_tokens;
+        (total, self.config.max_tokens)
+    }
+
+    /// Get the context ratio for cached content (what UI should display)
+    pub fn get_cached_context_ratio(&self) -> f64 {
+        let (cached, max) = self.get_cached_token_usage();
         if max == 0 {
             0.0
         } else {
-            current as f64 / max as f64
+            (cached as f64 / max as f64).clamp(0.0, 1.0)
         }
     }
 
-    /// Check if condensation is needed based on threshold
+    /// Get the context ratio for next request (for warnings)
+    pub fn get_next_request_context_ratio(&self) -> f64 {
+        let (next, max) = self.get_next_request_tokens();
+        if max == 0 {
+            0.0
+        } else {
+            (next as f64 / max as f64).clamp(0.0, 1.0)
+        }
+    }
+
+    /// Get breakdown of token usage for debugging/display
+    pub fn get_token_breakdown(&self) -> TokenBreakdown {
+        TokenBreakdown {
+            system: self.system_prompt_tokens,
+            ephemeral: self.ephemeral_context.iter().map(|m| m.token_count).sum(),
+            history: self.history.iter().map(|m| m.token_count).sum(),
+            pending: self.pending_user_message.as_ref().map(|m| m.token_count).unwrap_or(0),
+            max: self.config.max_tokens,
+        }
+    }
+
+    /// Check if condensation is needed based on cached content
     pub fn needs_condensation(&self) -> bool {
-        self.get_context_ratio() > self.config.condense_threshold
+        self.get_cached_context_ratio() > self.config.condense_threshold
     }
 
     /// Get the total token count in history
@@ -772,8 +904,8 @@ impl ContextManager {
     /// [Condensed] User asked about X, discussed Y, decided Z...
     /// ```
     pub fn format_for_ui(&self) -> String {
-        let (current, max) = self.get_token_usage();
-        let ratio = self.get_context_ratio();
+        let (current, max) = self.get_cached_token_usage();
+        let ratio = self.get_cached_context_ratio();
         let percentage = (ratio * 100.0) as usize;
         
         let (byte_size, max_bytes) = self.get_byte_usage();
@@ -1017,7 +1149,7 @@ mod tests {
         let mut manager = ContextManager::new(ContextConfig::new(100));
         manager.add_message("user", "Hello world test message");
 
-        let ratio = manager.get_context_ratio();
+        let ratio = manager.get_cached_context_ratio();
         assert!(ratio > 0.0);
         assert!(ratio <= 1.0);
     }

@@ -253,4 +253,58 @@ mod tests {
         assert!(response.to_lowercase().contains("hello"), 
             "Response should contain 'hello', got: {}", response);
     }
+    
+    /// Test that conversation context is properly tracked across multiple turns
+    /// This verifies the critical fix for context loss bug
+    #[tokio::test]
+    async fn test_context_tracking_across_turns() {
+        // Create mock LLM that responds with a final answer
+        let mock_llm = Arc::new(MockLLM::new(vec![
+            r#"{"t": "Responding to first message", "f": "Hello! How can I help you?"}"#.to_string(),
+        ]));
+
+        let mut session = AgentBuilder::new()
+            .with_llm(mock_llm)
+            .with_auto_approve()
+            .with_config(SessionConfig { max_steps: 10 })
+            .build_with_llm_engine();
+
+        let (tx, rx) = mpsc::channel(10);
+        tx.send(SessionInput::Chat("Hello".to_string())).await.ok();
+        drop(tx);
+
+        let result = session.run(rx).await;
+        assert!(result.is_ok(), "Session should complete successfully");
+        
+        // Verify that context was tracked in ContextManager
+        let context_manager = session.context_manager();
+        let history = context_manager.history();
+        
+        // Should have at least user message and assistant response
+        assert!(
+            history.len() >= 2,
+            "Context manager should have at least 2 messages, got {}",
+            history.len()
+        );
+        
+        // Verify the first message is from user
+        assert_eq!(
+            history[0].role, "user",
+            "First message should be from user"
+        );
+        assert_eq!(
+            history[0].content, "Hello",
+            "First message content should be 'Hello'"
+        );
+        
+        // Verify the second message is from assistant
+        assert_eq!(
+            history[1].role, "assistant",
+            "Second message should be from assistant"
+        );
+        
+        // Verify token tracking is working
+        assert!(history[0].token_count > 0, "User message should have token count");
+        assert!(history[1].token_count > 0, "Assistant message should have token count");
+    }
 }

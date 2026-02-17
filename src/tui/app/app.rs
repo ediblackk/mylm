@@ -121,7 +121,7 @@ impl AppStateContainer {
             if let Some(pack) = builder.build_terminal_pack(&terminal_content) {
                 mylm_core::debug_log!("[APP] Adding terminal pack to message");
                 final_message.push_str(&pack.render());
-                self.last_terminal_snapshot = Some(terminal_content);
+                self.last_terminal_snapshot = Some(terminal_content.clone());
             }
         }
 
@@ -132,9 +132,20 @@ impl AppStateContainer {
             self.chat_history.len()
         );
         
-        // Update context manager with new message for token tracking
-        let chat_msgs: Vec<ChatMessage> = self.chat_history.iter().map(|m| m.message.clone()).collect();
-        self.context_manager.set_history(&chat_msgs);
+        // Update context manager with ephemeral context and pending message
+        self.context_manager.clear_ephemeral_context();
+        self.context_manager.set_history(
+            &self.chat_history.iter().map(|m| m.message.clone()).collect::<Vec<_>>()
+        );
+        self.context_manager.set_pending_user_message(&final_message);
+        
+        // Add terminal snapshot as ephemeral context (will be cleared after this turn)
+        if should_include_snapshot {
+            if let Some(pack) = builder.build_terminal_pack(&terminal_content) {
+                let snapshot_content = pack.render();
+                self.context_manager.add_ephemeral_context("user", &snapshot_content);
+            }
+        }
         
         // Set conversation topic from first user message to prevent context jumping
         if self.chat_history.len() <= 2 {
@@ -148,10 +159,12 @@ impl AppStateContainer {
             }
         }
         
-        // Pre-flight check for token count warning
-        if let Some(warning) = self.context_manager.preflight_check(Some(&final_message)) {
-            mylm_core::warn_log!("[APP] Token warning: {}", warning);
-            self.status_message = Some(format!("⚠️ {}", warning));
+        // Pre-flight check for token count warning (checks next request size)
+        let breakdown = self.context_manager.get_token_breakdown();
+        if breakdown.next_request() > self.config.active_profile().context_window {
+            mylm_core::warn_log!("[APP] Token warning: next request {} > limit {}", 
+                breakdown.next_request(), self.config.active_profile().context_window);
+            self.status_message = Some(format!("⚠️ Request will be {} tokens", breakdown.next_request()));
         }
 
         // Auto-save session

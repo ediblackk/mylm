@@ -363,10 +363,10 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
             Style::default().fg(if auto_approve { Color::Green } else { Color::DarkGray }),
         ),
         Span::raw(" "),
-        // PaCoRe toggle
+        // Verbose toggle
         Span::styled(
-            if app.pacore_enabled { format!("[PaCoRe:{}]", app.pacore_rounds) } else { "[PaCoRe:off]".to_string() },
-            Style::default().fg(if app.pacore_enabled { Color::Green } else { Color::DarkGray }),
+            if app.verbose_mode { "[Verbose on]" } else { "[Verbose off]" },
+            Style::default().fg(if app.verbose_mode { Color::Green } else { Color::DarkGray }),
         ),
         Span::raw(" "),
         // F-keys (full names)
@@ -390,8 +390,10 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
         Span::styled(format!(" {}", elapsed_text), Style::default().fg(Color::DarkGray)),
     ];
 
-    // Context usage gauge with color based on usage
-    let ratio = app.session_monitor.get_context_ratio();
+    // Context usage gauge - Show CACHED tokens (system + history)
+    // This is what remains for next request (minus ephemeral)
+    let (cached_tokens, max_tokens) = app.context_manager.get_cached_token_usage();
+    let ratio = app.context_manager.get_cached_context_ratio();
     let gauge_color = if ratio >= 0.9 {
         Color::Red
     } else if ratio >= 0.7 {
@@ -403,8 +405,8 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
     // Gauge label with cost and context
     let label = format!("${:.2} │ CTX:{}/{} {:.0}%",
         stats.cost,
-        format_tokens(stats.active_context_tokens),
-        format_tokens(stats.max_context_tokens),
+        format_tokens(cached_tokens as u32),
+        format_tokens(max_tokens as u32),
         (ratio * 100.0).clamp(0.0, 100.0)
     );
 
@@ -417,9 +419,10 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
         .split(area);
 
     // Split top row into left/center/right
+    // Use Percentage constraints to allow flexible sizing and prevent truncation
     let top_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(12), Constraint::Min(50), Constraint::Min(40)])
+        .constraints([Constraint::Percentage(15), Constraint::Percentage(60), Constraint::Percentage(25)])
         .split(rows[0]);
 
     let left_text = Line::from(left_spans);
@@ -759,9 +762,9 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
 
             let is_thought = trimmed.starts_with("Thought:") || trimmed.starts_with("**Thought:**") || trimmed.starts_with("💭");
             if is_thought {
-                // Always show thoughts (streaming), but style softly
+                // Show thoughts only in verbose mode
                 let thought_style = Style::default().fg(Color::Rgb(128, 128, 128)).add_modifier(Modifier::ITALIC);
-                if app.show_thoughts {
+                if app.verbose_mode {
                     lines_to_render.push((line, thought_style));
                 }
                 continue;
@@ -776,7 +779,7 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
                     let has_final = val.get("f").is_some();
 
                     if has_thought || has_action || has_final {
-                        if app.show_thoughts && has_thought && app.verbose_mode {
+                        if app.verbose_mode && has_thought {
                             if let Some(t) = val.get("t").and_then(|v| v.as_str()) {
                                 lines_to_render.push((format!("Thought: {}", t), Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC)));
                             }

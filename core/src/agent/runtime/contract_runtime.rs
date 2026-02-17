@@ -180,7 +180,7 @@ impl ContractRuntime {
                 })
             }
             Intent::RequestLLM(req) => {
-                crate::error_log!("[RUNTIME] Executing RequestLLM intent: intent_id={}", intent_id.0);
+                crate::info_log!("[RUNTIME] Executing RequestLLM intent: intent_id={}", intent_id.0);
                 // Create runtime context for LLM execution
                 let ctx = RuntimeContext::new()
                     .with_terminal(Arc::clone(&self.terminal));
