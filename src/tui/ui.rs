@@ -355,26 +355,26 @@ fn render_top_bar(frame: &mut Frame, app: &mut App, area: Rect, _height: u16) {
         Span::styled(format!("v{} ", env!("CARGO_PKG_VERSION")), Style::default().fg(Color::DarkGray)),
     ];
 
-    // Center: toggles + F-keys
+    // Center: toggles + F-keys (full names)
     let center_spans = vec![
         // Auto-Approve toggle
         Span::styled(
-            if auto_approve { "[A✓]" } else { "[A✗]" },
+            if auto_approve { "[Auto-approval ✓]" } else { "[Auto-approval ✗]" },
             Style::default().fg(if auto_approve { Color::Green } else { Color::DarkGray }),
         ),
         Span::raw(" "),
         // PaCoRe toggle
         Span::styled(
-            if app.pacore_enabled { format!("[P:{}]", app.pacore_rounds) } else { "[P:off]".to_string() },
+            if app.pacore_enabled { format!("[PaCoRe:{}]", app.pacore_rounds) } else { "[PaCoRe:off]".to_string() },
             Style::default().fg(if app.pacore_enabled { Color::Green } else { Color::DarkGray }),
         ),
         Span::raw(" "),
-        // F-keys (compact)
-        Span::styled("[F1:?]", Style::default().fg(if app.show_help_view { Color::Green } else { Color::Yellow })),
-        Span::styled("[F2:⇄]", Style::default().fg(Color::Yellow)),
-        Span::styled("[F3:M]", Style::default().fg(if app.show_memory_view { Color::Green } else { Color::Yellow })),
-        Span::styled("[F4:J]", Style::default().fg(if app.show_jobs_panel { Color::Green } else { Color::Yellow })),
-        Span::styled("[Esc:◀]", Style::default().fg(Color::Red)),
+        // F-keys (full names)
+        Span::styled("[F1 Help]", Style::default().fg(if app.show_help_view { Color::Green } else { Color::Yellow })),
+        Span::styled("[F2 Focus]", Style::default().fg(Color::Yellow)),
+        Span::styled("[F3 Memory]", Style::default().fg(if app.show_memory_view { Color::Green } else { Color::Yellow })),
+        Span::styled("[F4 Jobs]", Style::default().fg(if app.show_jobs_panel { Color::Green } else { Color::Yellow })),
+        Span::styled("[Esc: Exit]", Style::default().fg(Color::Red)),
     ];
 
     // Right side: animated spinner + state + elapsed
@@ -842,7 +842,8 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
         }
 
         // Process lines for visual representation
-        let content_width = available_width.saturating_sub(prefix.len());
+        // Subtract prefix_len to account for indentation on continuation lines
+        let content_width = available_width.saturating_sub(prefix.len()).saturating_sub(prefix_len);
         let mut first_line_flag = true;
         for (text, style) in lines_to_render {
             if text.is_empty() && !first_line_flag {
