@@ -119,9 +119,9 @@ impl PromptLoader {
         }
     }
 
-    /// Ensure default prompt files exist, creating them if necessary
+    /// Ensure default prompt files exist, creating or updating them if necessary
     /// 
-    /// Returns the number of files created
+    /// Returns the number of files created/updated
     pub fn ensure_defaults(&self) -> Result<usize, PromptLoaderError> {
         let mut created = 0;
 
@@ -135,7 +135,7 @@ impl PromptLoader {
                 )))?;
         }
 
-        // Ensure each default prompt exists
+        // Ensure each default prompt exists and is up to date
         let defaults = [
             ("system", system_prompt_config()),
             ("minimal", minimal_prompt_config()),
@@ -145,7 +145,17 @@ impl PromptLoader {
         for (name, config) in defaults {
             let file_path = self.config_dir.join(format!("{}.json", name));
             
-            if !file_path.exists() {
+            let needs_update = if !file_path.exists() {
+                true
+            } else {
+                // Check if version matches
+                match self.load_from_file(&file_path) {
+                    Ok(existing) => existing.version != config.version,
+                    Err(_) => true, // If we can't parse it, regenerate
+                }
+            };
+            
+            if needs_update {
                 let json = serde_json::to_string_pretty(&config)
                     .map_err(|e| PromptLoaderError::ParseError(e.to_string()))?;
                 
@@ -157,7 +167,7 @@ impl PromptLoader {
                     )))?;
                 
                 created += 1;
-                tracing::info!("Created default prompt config: {}", file_path.display());
+                tracing::info!("Updated default prompt config: {}", file_path.display());
             }
         }
 
@@ -211,7 +221,7 @@ impl Default for PromptLoader {
 /// Versatile AI assistant that adapts to any user task
 fn system_prompt_config() -> PromptConfig {
     PromptConfig {
-        version: "2.0".to_string(),
+        version: "2.4".to_string(),
         identity: IdentitySection {
             name: "MYLM".to_string(),
             description: "Versatile AI assistant with tool capabilities and parallel execution".to_string(),
@@ -247,7 +257,8 @@ fn system_prompt_config() -> PromptConfig {
                     - `f`: Final answer to user - chat only, no action (use this to chat!)\n\
                     - `a`: Action/tool name to execute (use this to call tools!)\n\
                     - `i`: Input arguments for the action (optional JSON object)\n\
-                    - `c`: Confirm flag - chat first, wait for approval (optional, default false)\n\n\
+                    - `c`: Confirm flag - chat first, wait for approval (optional, default false)\n\
+                    - `r`: Remember - save content to long-term memory (optional, works with any response)\n\n\
                     ## Rules\n\
                     1. ALL output MUST be valid JSON\n\
                     2. To chat only: {\"f\": \"your message\"}\n\
@@ -263,6 +274,10 @@ fn system_prompt_config() -> PromptConfig {
                     ```json\n\
                     {\"t\": \"User wants to see files\", \"a\": \"shell\", \"i\": {\"command\": \"ls -la\"}}\n\
                     ```\n\
+                    Remember user preference:\n\
+                    ```json\n\
+                    {\"t\": \"User likes Python\", \"r\": \"User prefers Python over other languages\", \"f\": \"I'll use Python for this task\"}\n\
+                    ```\n
                     Confirm before acting:\n\
                     ```json\n\
                     {\"t\": \"I can help with that. Should I proceed?\", \"c\": true, \"a\": \"delegate\", \"i\": {\"objective\": \"Process user request\", \"workers\": 2}}\n\

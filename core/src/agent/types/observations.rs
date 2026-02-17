@@ -71,6 +71,12 @@ pub enum Observation {
     Cancelled {
         intent_id: IntentId,
     },
+
+    /// Content was remembered
+    Remembered {
+        intent_id: IntentId,
+        content: String,
+    },
 }
 
 impl Observation {
@@ -87,6 +93,7 @@ impl Observation {
             Observation::RuntimeError { intent_id, .. } => *intent_id = id,
             Observation::Timeout { intent_id, .. } => *intent_id = id,
             Observation::Cancelled { intent_id, .. } => *intent_id = id,
+            Observation::Remembered { intent_id, .. } => *intent_id = id,
         }
     }
 
@@ -128,6 +135,10 @@ impl Observation {
                 KernelEvent::Tick { time: 0 }
             }
             Observation::Cancelled { .. } => {
+                KernelEvent::Tick { time: 0 }
+            }
+            Observation::Remembered { .. } => {
+                // Remembered doesn't map directly to KernelEvent
                 KernelEvent::Tick { time: 0 }
             }
         }
@@ -223,6 +234,9 @@ impl ExecutionSummary {
                 }
                 Observation::Cancelled { .. } => {
                     summary.record_cancelled();
+                }
+                Observation::Remembered { .. } => {
+                    summary.record_completed(0);
                 }
             }
         }

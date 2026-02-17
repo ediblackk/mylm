@@ -88,6 +88,13 @@ impl AgentRuntime {
                 // No operation
                 Ok(None)
             }
+            
+            AgentDecision::Remember { content } => {
+                // Remember is handled by memory capability
+                // TODO: Hook up to actual memory system
+                crate::info_log!("[RUNTIME] Remember intent received: {}", content);
+                Ok(None)
+            }
         };
         
         result

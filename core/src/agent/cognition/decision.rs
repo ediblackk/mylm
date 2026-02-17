@@ -38,6 +38,9 @@ pub enum AgentDecision {
     /// Emit response to user
     EmitResponse(String),
     
+    /// Remember content to long-term memory
+    Remember { content: String },
+    
     /// Exit agent
     Exit(AgentExitReason),
     
@@ -54,6 +57,7 @@ impl AgentDecision {
                 | AgentDecision::SpawnWorker(_)
                 | AgentDecision::RequestApproval(_)
                 | AgentDecision::RequestLLM(_)
+                | AgentDecision::Remember { .. }
         )
     }
 }

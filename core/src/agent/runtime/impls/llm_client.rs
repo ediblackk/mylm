@@ -10,7 +10,7 @@ use crate::agent::runtime::{
 use crate::agent::types::intents::{LLMRequest, Role};
 use crate::agent::types::events::LLMResponse;
 use crate::llm::LlmClient;
-use crate::llm::chat::{ChatRequest, ChatMessage, MessageRole};
+use crate::llm::chat::{ChatRequest, ChatMessage};
 use std::sync::Arc;
 use std::pin::Pin;
 use futures::{Stream, StreamExt};
@@ -18,31 +18,34 @@ use futures::{Stream, StreamExt};
 /// Build messages from LLMRequest context
 /// 
 /// Constructs a complete message history including:
-/// - System prompt
+/// - System prompt (with available tools appended)
 /// - Conversation history
 /// - Current scratchpad content
 fn build_messages_from_context(req: &LLMRequest) -> Vec<ChatMessage> {
     let mut messages = vec![];
     
-    // 1. Add system prompt
-    if !req.context.system_prompt.is_empty() {
-        messages.push(ChatMessage::system(req.context.system_prompt.clone()));
+    // 1. Build system prompt with tools
+    let mut system_prompt = req.context.system_prompt.clone();
+    if !req.context.available_tools.is_empty() {
+        system_prompt.push_str("\n\n=== AVAILABLE TOOLS ===\n");
+        for tool in &req.context.available_tools {
+            system_prompt.push_str(&format!("- {}: {}\n", tool.name, tool.description));
+        }
+        system_prompt.push_str("\nUse these tools with the Short-Key JSON format: {\"a\": \"tool_name\", \"i\": {...}}");
+    }
+    if !system_prompt.is_empty() {
+        messages.push(ChatMessage::system(system_prompt));
     }
     
     // 2. Add conversation history
+    // Note: Tool messages are sent as user messages since we use Short-Key JSON
+    // protocol instead of OpenAI's native tool calling API
     for msg in &req.context.history {
         let chat_msg = match msg.role {
             Role::User => ChatMessage::user(msg.content.clone()),
             Role::Assistant => ChatMessage::assistant(msg.content.clone()),
             Role::System => ChatMessage::system(msg.content.clone()),
-            Role::Tool => ChatMessage {
-                role: MessageRole::Tool,
-                content: msg.content.clone(),
-                name: None,
-                tool_call_id: None,
-                tool_calls: None,
-                reasoning_content: None,
-            },
+            Role::Tool => ChatMessage::user(msg.content.clone()), // Tool results as user messages
         };
         messages.push(chat_msg);
     }

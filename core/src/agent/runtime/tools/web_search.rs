@@ -742,7 +742,7 @@ impl ToolCapability for WebSearchTool {
             });
         }
 
-        // Extract query from args
+        // Extract query from args (accepts plain string, {"query": "..."}, or {"args": "..."})
         let query = call
             .arguments
             .as_str()
@@ -753,7 +753,13 @@ impl ToolCapability for WebSearchTool {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
             })
-            .ok_or_else(|| ToolError::new("Expected query string or {\"query\": \"...\"}"))?;
+            .or_else(|| {
+                call.arguments
+                    .get("args")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .ok_or_else(|| ToolError::new("Expected query string, {\"query\": \"...\"}, or {\"args\": \"...\"}"))?;
 
         if query.is_empty() {
             crate::warn_log!("[WEB_SEARCH] Empty search query received");

@@ -170,9 +170,54 @@ impl ShortKeyParser {
             }
         }
 
-        // 4. If nothing worked, return a Parse Error
+        // 4. Try XML-style tool calls (e.g., <function=web_search>)
+        if let Some(action) = self.parse_xml_tool_call(content) {
+            return Ok(vec![action]);
+        }
+
+        // 5. If nothing worked, return a Parse Error
         Err(ParseError::new("Failed to parse Short-Key JSON from model response")
             .with_content(content))
+    }
+
+    /// Parse XML-style tool calls like:
+    /// <tool_call>
+    /// <function=web_search>
+    /// <parameter=args>query</parameter>
+    /// </function>
+    /// </tool_call>
+    fn parse_xml_tool_call(&self, content: &str) -> Option<ShortKeyAction> {
+        // Look for <function=name> pattern
+        let func_start = content.find("<function=")?;
+        let func_name_start = func_start + 10; // len("<function=")
+        let func_name_end = content[func_name_start..].find(">")?;
+        let tool_name = &content[func_name_start..func_name_start + func_name_end];
+        
+        // Look for <parameter=name>value</parameter>
+        let param_start = content.find("<parameter=")?;
+        let param_name_start = param_start + 11; // len("<parameter=")
+        let param_name_end = content[param_name_start..].find(">")?;
+        let param_name = &content[param_name_start..param_name_start + param_name_end];
+        
+        // Extract value between <parameter=name> and </parameter>
+        let value_start = param_name_start + param_name_end + 1;
+        let value_end_marker = format!("</parameter>");
+        let value_end = content[value_start..].find(&value_end_marker)?;
+        let param_value = &content[value_start..value_start + value_end];
+        
+        // Build the input object
+        let input = serde_json::json!({
+            param_name: param_value.trim()
+        });
+        
+        Some(ShortKeyAction {
+            thought: format!("XML tool call: {}", tool_name),
+            action: Some(tool_name.to_string()),
+            input: Some(input),
+            final_answer: None,
+            confirm: false,
+            remember: None,
+        })
     }
 
     /// Parse as batch (array) or single object

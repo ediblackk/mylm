@@ -3,8 +3,6 @@
 //! Real cognitive engine that uses LLM to make decisions.
 //! Parses tool calls from LLM responses using Short-Key JSON format.
 
-use std::sync::Arc;
-
 use crate::agent::cognition::{
     engine::CognitiveEngine,
     state::AgentState,
@@ -12,22 +10,6 @@ use crate::agent::cognition::{
     decision::{Transition, AgentDecision, ToolCall, LLMRequest, AgentExitReason, ApprovalRequest},
     error::CognitiveError,
 };
-
-/// Trait for memory providers that can inject context into prompts
-/// 
-/// Implementors provide relevant memories based on the current conversation context.
-/// This is called proactively BEFORE the LLM generates a response.
-pub trait MemoryProvider: Send + Sync {
-    /// Get relevant memory context for the given user message
-    /// 
-    /// Returns a formatted string to be injected into the system prompt.
-    fn get_context(&self, user_message: &str) -> String;
-    
-    /// Save a memory fire-and-forget style
-    /// 
-    /// This should not block - the save happens asynchronously.
-    fn remember(&self, content: &str);
-}
 
 /// Short-Key Action representation (Simplified JSON Protocol)
 /// 
@@ -37,6 +19,7 @@ pub trait MemoryProvider: Send + Sync {
 /// - `i`: Input arguments for the action (optional JSON)
 /// - `f`: Final answer/message to user (optional)
 /// - `c`: Confirm flag - when true, wait for user approval
+/// - `r`: Remember - save content to long-term memory (optional)
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
 struct ShortKeyAction {
     #[serde(rename = "t", default)]
@@ -49,6 +32,16 @@ struct ShortKeyAction {
     final_answer: Option<String>,
     #[serde(rename = "c", default)]
     confirm: bool,
+    #[serde(rename = "r")]
+    remember: Option<String>,
+}
+
+/// Tool description for dynamic prompt generation
+#[derive(Debug, Clone)]
+pub struct ToolDescription {
+    pub name: String,
+    pub description: String,
+    pub usage: String,
 }
 
 /// LLM-based cognitive engine
@@ -60,8 +53,8 @@ pub struct LLMBasedEngine {
     system_prompt: String,
     #[allow(dead_code)]
     max_tool_failures: usize,
-    /// Optional memory provider for proactive context injection
-    memory_provider: Option<Arc<dyn MemoryProvider>>,
+    /// Dynamic tool descriptions for prompt generation
+    tool_descriptions: Vec<ToolDescription>,
 }
 
 impl LLMBasedEngine {
@@ -69,7 +62,7 @@ impl LLMBasedEngine {
         Self {
             system_prompt: build_system_prompt(),
             max_tool_failures: 2,
-            memory_provider: None,
+            tool_descriptions: Vec::new(),
         }
     }
     
@@ -78,21 +71,24 @@ impl LLMBasedEngine {
         self
     }
     
-    /// Set the memory provider for proactive context injection
+    /// Set dynamic tool descriptions for prompt generation
     /// 
-    /// When set, relevant memories will be automatically injected into prompts
-    /// before each LLM call.
-    pub fn with_memory_provider(mut self, provider: Arc<dyn MemoryProvider>) -> Self {
-        self.memory_provider = Some(provider);
+    /// This allows the engine to generate system prompts with
+    /// the actual available tools rather than hardcoded lists.
+    pub fn with_tool_descriptions(mut self, descriptions: Vec<ToolDescription>) -> Self {
+        self.tool_descriptions = descriptions;
         self
     }
     
-    /// Get memory context for injection into prompt
-    fn get_memory_context(&self, user_message: &str) -> String {
-        self.memory_provider
-            .as_ref()
-            .map(|p| p.get_context(user_message))
-            .unwrap_or_default()
+    /// Convert tool descriptions to ToolDef format for Context
+    fn build_tool_defs(&self) -> Vec<crate::agent::types::intents::ToolDef> {
+        self.tool_descriptions.iter().map(|desc| {
+            crate::agent::types::intents::ToolDef {
+                name: desc.name.clone(),
+                description: desc.description.clone(),
+                parameters: serde_json::json!({}), // Simplified - tools parse their own args
+            }
+        }).collect()
     }
     
     /// Parse LLM response to extract decision using Short-Key JSON Protocol
@@ -101,6 +97,11 @@ impl LLMBasedEngine {
         
         // Try Short-Key JSON format first
         if let Some(action) = parse_short_key_action(trimmed) {
+            // Check for remember field first (pure - just return the decision)
+            if let Some(remember_content) = action.remember {
+                return Ok(AgentDecision::Remember { content: remember_content });
+            }
+            
             // If has final answer, emit response
             if let Some(final_answer) = action.final_answer {
                 return Ok(AgentDecision::EmitResponse(final_answer));
@@ -123,6 +124,12 @@ impl LLMBasedEngine {
             }
         }
         
+        // Fallback: Parse Kimi XML tool call format
+        // <tool_call><function=name><parameter=key>value</parameter></function></tool_call>
+        if let Some(tool_call) = parse_kimi_xml_tool_call(trimmed) {
+            return Ok(AgentDecision::CallTool(tool_call));
+        }
+        
         // Fallback: Check for response to user (XML format legacy)
         if let Some(response_text) = parse_user_response(trimmed) {
             return Ok(AgentDecision::EmitResponse(response_text));
@@ -131,35 +138,21 @@ impl LLMBasedEngine {
         // Default: emit the response as-is
         Ok(AgentDecision::EmitResponse(trimmed.to_string()))
     }
-    
-    /// Build the prompt for the LLM
-    fn build_full_prompt(&self, state: &AgentState) -> String {
-        let history = format_history(&state.history);
-        let tools = format_tools();
-        let scratchpad = &state.scratchpad;
-        
-        format!(
-            "{system_prompt}\n\n\
-             {tools}\n\n\
-             === SESSION HISTORY ===\n{history}\n\n\
-             === SCRATCHPAD ===\n{scratchpad}\n\n\
-             Based on the history and scratchpad, what should I do next?\n\
-             Respond with ONE of:\n\
-             1. <tool>tool_name</tool><args>arguments</args> - to use a tool\n\
-             2. <response>message to user</response> - to respond to user\n\
-             3. <worker>task description</worker> - to delegate to worker\n\
-             4. <exit/> - when task is complete",
-            system_prompt = self.system_prompt,
-            tools = tools,
-            history = history,
-            scratchpad = scratchpad
-        )
-    }
 }
 
 impl Default for LLMBasedEngine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl From<crate::agent::runtime::tools::ToolDescription> for ToolDescription {
+    fn from(desc: crate::agent::runtime::tools::ToolDescription) -> Self {
+        Self {
+            name: desc.name.to_string(),
+            description: desc.description.to_string(),
+            usage: desc.usage.to_string(),
+        }
     }
 }
 
@@ -196,20 +189,6 @@ impl CognitiveEngine for LLMBasedEngine {
                 let state_with_message = state.clone()
                     .with_message(crate::agent::cognition::history::Message::user(&msg));
                 
-                // Proactively inject relevant memory context BEFORE LLM call
-                crate::info_log!("[LLM_ENGINE] Processing user message, checking memory...");
-                let memory_context = self.get_memory_context(&msg);
-                
-                let enhanced_system_prompt = if memory_context.is_empty() {
-                    crate::info_log!("[LLM_ENGINE] No memory context to inject");
-                    self.system_prompt.clone()
-                } else {
-                    crate::info_log!("[LLM_ENGINE] Injecting {} bytes of memory context", memory_context.len());
-                    format!("{}\n\n## Relevant Context from Memory\n{}", 
-                        self.system_prompt, 
-                        memory_context)
-                };
-                
                 // Include the actual user message in the scratchpad
                 let scratchpad = format!("User: {}\n\nWhat should I do?", msg);
                 
@@ -232,8 +211,9 @@ impl CognitiveEngine for LLMBasedEngine {
                 }).collect();
                 
                 let context = crate::agent::types::intents::Context::new(scratchpad)
-                    .with_system(enhanced_system_prompt)
-                    .with_history(history);
+                    .with_system(self.system_prompt.clone())
+                    .with_history(history)
+                    .with_tools(self.build_tool_defs());
                 
                 let decision = AgentDecision::RequestLLM(LLMRequest {
                     context,
@@ -307,13 +287,33 @@ impl CognitiveEngine for LLMBasedEngine {
                 let state_with_tool = state.clone()
                     .with_message(crate::agent::cognition::history::Message::tool(&tool_content));
                 
+                // Convert history for context
+                let history: Vec<crate::agent::types::intents::Message> = state_with_tool.history.iter().map(|m| {
+                    let role = match m.role {
+                        crate::agent::cognition::history::MessageRole::User => 
+                            crate::agent::types::intents::Role::User,
+                        crate::agent::cognition::history::MessageRole::Assistant => 
+                            crate::agent::types::intents::Role::Assistant,
+                        crate::agent::cognition::history::MessageRole::System => 
+                            crate::agent::types::intents::Role::System,
+                        crate::agent::cognition::history::MessageRole::Tool => 
+                            crate::agent::types::intents::Role::Tool,
+                    };
+                    crate::agent::types::intents::Message {
+                        role,
+                        content: m.content.clone(),
+                    }
+                }).collect();
+                
                 let scratchpad = format!(
                     "Tool '{}' {} with output: {}\n\nWhat should I do next?",
                     tool, status, output
                 );
                 
                 let context = crate::agent::types::intents::Context::new(scratchpad)
-                    .with_system(self.system_prompt.clone());
+                    .with_system(self.system_prompt.clone())
+                    .with_history(history)
+                    .with_tools(self.build_tool_defs());
                 
                 let decision = AgentDecision::RequestLLM(LLMRequest {
                     context,
@@ -350,7 +350,8 @@ impl CognitiveEngine for LLMBasedEngine {
                         let next_state = state.clone().increment_rejection();
                         let scratchpad = "Tool execution was denied by user. What should I do instead?".to_string();
                         let context = crate::agent::types::intents::Context::new(scratchpad)
-                            .with_system(self.system_prompt.clone());
+                            .with_system(self.system_prompt.clone())
+                            .with_tools(self.build_tool_defs());
                         let decision = AgentDecision::RequestLLM(LLMRequest {
                             context,
                             max_tokens: None,
@@ -373,7 +374,8 @@ impl CognitiveEngine for LLMBasedEngine {
                 
                 let scratchpad = format!("{}\n\nWhat should I do next?", output);
                 let context = crate::agent::types::intents::Context::new(scratchpad)
-                    .with_system(self.system_prompt.clone());
+                    .with_system(self.system_prompt.clone())
+                    .with_tools(self.build_tool_defs());
                 let decision = AgentDecision::RequestLLM(LLMRequest {
                     context,
                     max_tokens: None,
@@ -413,8 +415,11 @@ impl CognitiveEngine for LLMBasedEngine {
         }
     }
     
-    fn build_prompt(&self, state: &AgentState) -> String {
-        self.build_full_prompt(state)
+    fn build_prompt(&self, _state: &AgentState) -> String {
+        // Note: This method is required by the trait but not used in the current
+        // architecture. The actual prompt building happens in build_messages_from_context()
+        // which includes tools dynamically.
+        self.system_prompt.clone()
     }
     
     fn requires_approval(&self, tool: &str, args: &str) -> bool {
@@ -442,13 +447,6 @@ fn build_system_prompt() -> String {
 
 Current Date and Time: {date_time}
 
-Available tools:
-- shell <command>: Execute shell commands
-- read_file <path>: Read file contents
-- write_file <path> <content>: Write to file
-- list_dir <path>: List directory contents
-- search <pattern> <path>: Search for pattern in files
-
 Response Format (Short-Key JSON - ALWAYS use this format):
 
 1. For tool calls:
@@ -457,38 +455,28 @@ Response Format (Short-Key JSON - ALWAYS use this format):
 2. For final answers to user:
    {{"t": "your reasoning", "f": "your response to user"}}
 
+3. To remember something (can add to any response):
+   {{"t": "Learning user preference", "r": "User prefers dark mode", "f": "I'll use dark mode for you"}}
+
 Field meanings:
 - "t": Your internal thought/reasoning (required)
 - "a": Action/tool name to execute (for tool calls)
 - "i": Input arguments as JSON object (for tool calls)
 - "f": Final answer message to user (for responses)
+- "r": Remember - save content to long-term memory (optional, works with any response type)
 
 Rules:
 - ALWAYS respond with valid JSON
 - Use "f" to respond to the user
 - Use "a" + "i" when calling tools
+- Use "r" anytime you learn something worth remembering (user preferences, facts, context)
 - Do not use both "a" and "f" in same response
 - Keep thoughts concise but clear
 
 Examples:
 {{"t": "Need to check directory contents", "a": "shell", "i": {{"command": "ls -la"}}}}
-{{"t": "Found the files", "f": "Here are the files in your directory..."}}"#, date_time = date_time_str)
-}
-
-fn format_history(history: &[crate::agent::cognition::history::Message]) -> String {
-    history.iter()
-        .map(|m| format!("{:?}: {}", m.role, m.content.chars().take(200).collect::<String>()))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn format_tools() -> String {
-    r#"=== AVAILABLE TOOLS ===
-<tool>shell</tool><args>command to execute</args>
-<tool>read_file</tool><args>file path</args>
-<tool>write_file</tool><args>path "content"</args>
-<tool>list_dir</tool><args>directory path</args>
-<tool>search</tool><args>pattern path</args>"#.to_string()
+{{"t": "Found the files", "f": "Here are the files in your directory..."}}
+{{"t": "User likes Python", "r": "User prefers Python over other languages", "f": "I'll use Python for this task"}}"#, date_time = date_time_str)
 }
 
 // ===== Response Parsers =====
@@ -507,6 +495,49 @@ fn parse_user_response(response: &str) -> Option<String> {
     }
     
     None
+}
+
+/// Parse Kimi XML tool call format
+/// 
+/// Format: <tool_call><function=name><parameter=key>value</parameter></function></tool_call>
+/// Or: <tool_call>\n<function=name>\n<parameter=key>\nvalue\n</parameter>\n</function>\n</tool_call>
+fn parse_kimi_xml_tool_call(response: &str) -> Option<ToolCall> {
+    // Check if it contains tool_call tag
+    if !response.contains("<tool_call>") {
+        return None;
+    }
+    
+    // Extract function name: <function=name> or <function name="...">
+    let func_re = regex::Regex::new(r"<function=([^>]+)>").ok()?;
+    let tool_name = func_re.captures(response)?
+        .get(1)?
+        .as_str()
+        .trim()
+        .to_string();
+    
+    // Extract parameters - handle multiple <parameter=name>value</parameter>
+    let param_re = regex::Regex::new(r"<parameter=([^>]+)>\s*(.*?)\s*</parameter>").ok()?;
+    let mut args = serde_json::Map::new();
+    
+    for caps in param_re.captures_iter(response) {
+        if let (Some(key), Some(value)) = (caps.get(1), caps.get(2)) {
+            args.insert(
+                key.as_str().trim().to_string(),
+                serde_json::Value::String(value.as_str().trim().to_string())
+            );
+        }
+    }
+    
+    if tool_name.is_empty() {
+        return None;
+    }
+    
+    Some(ToolCall {
+        name: tool_name,
+        arguments: serde_json::Value::Object(args),
+        working_dir: None,
+        timeout_secs: None,
+    })
 }
 
 /// Response parser for different LLM output formats

@@ -849,7 +849,11 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
         let content_width = available_width.saturating_sub(prefix.len()).saturating_sub(prefix_len);
         let mut first_line_flag = true;
         for (text, style) in lines_to_render {
-            if text.is_empty() && !first_line_flag {
+            if text.is_empty() {
+                if first_line_flag {
+                    // Skip empty lines at the start (don't render "AI:" alone)
+                    continue;
+                }
                 // Empty line (soft wrap break) - no prefix
                 all_visual_lines.push(VisualLineInfo { full_text: String::new(), prefix_len: 0, prefix_style: Style::default(), content_style: Style::default() });
                 app.chat_visual_lines.push((String::new(), abs_line_idx));

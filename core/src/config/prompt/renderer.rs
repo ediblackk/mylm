@@ -151,6 +151,9 @@ impl PromptRenderer {
 
         // Build output
         let mut parts = Vec::new();
+        
+        // Add version comment for debugging
+        parts.push(format!("# Prompt Version: {}", config.version));
 
         // Add identity section first
         parts.push(Self::render_identity(&config.identity));

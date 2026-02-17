@@ -37,3 +37,19 @@ pub mod extraction;
 pub use manager::{AgentMemoryManager, AgentMemoryProvider, MemoryMode, MemoryStats};
 pub use context::{MemoryContextBuilder, InjectionStrategy, inject_memory_context, get_context_for_query};
 pub use extraction::{MemoryExtractor, ExtractedMemory, extract_memories};
+
+/// Trait for memory providers that can inject context into prompts
+/// 
+/// Implementors provide relevant memories based on the current conversation context.
+/// This is called proactively BEFORE the LLM generates a response.
+pub trait MemoryProvider: Send + Sync {
+    /// Get relevant memory context for the given user message
+    /// 
+    /// Returns a formatted string to be injected into the system prompt.
+    fn get_context(&self, user_message: &str) -> String;
+    
+    /// Save a memory fire-and-forget style
+    /// 
+    /// This should not block - the save happens asynchronously.
+    fn remember(&self, content: &str);
+}

@@ -8,8 +8,9 @@
 //! - `InMemoryTransport`: Single-process FIFO transport
 //!
 //! ## Tools
-//! - `ToolRegistry`: Dynamic tool registry with 8 built-in tools
 //! - `SimpleToolExecutor`: Basic tool executor
+//! 
+//! Note: `ToolRegistry` is now in `runtime::tools` module
 //!
 //! ## LLM
 //! - `LlmClientCapability`: Bridge to existing LlmClient
@@ -38,21 +39,13 @@
 //!
 //! | Tool | Description |
 //! |------|-------------|
-//! | `shell` | Execute shell commands |
-//! | `read_file` / `cat` | Read file contents |
-//! | `write_file` | Write to file |
-//! | `list_dir` / `ls` | List directory |
-//! | `search` | Search files |
-//! | `pwd` | Print working directory |
-//!
-//! See `MOD.md` for implementation guide.
+//! See `runtime::tools` for the actual tool registry.
 
 pub mod retry;
 pub mod local;
 pub mod llm_client;
 pub mod terminal_approval;
 pub mod simple_tool;
-pub mod tool_registry;
 pub mod local_worker;
 pub mod console_telemetry;
 pub mod web_search;
@@ -68,7 +61,6 @@ pub use retry::{
 pub use llm_client::LlmClientCapability;
 pub use terminal_approval::{TerminalApprovalCapability, AutoApproveCapability};
 pub use simple_tool::SimpleToolExecutor;
-pub use tool_registry::ToolRegistry;
 pub use local_worker::LocalWorkerCapability;
 pub use console_telemetry::ConsoleTelemetry;
 pub use web_search::{WebSearchCapability, StubWebSearch, SearchProvider};

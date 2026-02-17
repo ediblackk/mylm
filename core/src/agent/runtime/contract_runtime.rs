@@ -382,6 +382,15 @@ impl ContractRuntime {
                     },
                 })
             }
+            Intent::Remember { content } => {
+                crate::info_log!("[RUNTIME] Remember intent executed: content={}", content);
+                // TODO: Hook up to actual memory system via memory capability
+                // For now, just acknowledge the remember operation
+                Ok(Observation::Remembered {
+                    intent_id,
+                    content,
+                })
+            }
         };
 
         // Emit telemetry: intent completed
@@ -405,6 +414,7 @@ fn intent_type_name(intent: &Intent) -> &'static str {
         Intent::RequestApproval(_) => "RequestApproval",
         Intent::SpawnWorker(_) => "SpawnWorker",
         Intent::EmitResponse(_) => "EmitResponse",
+        Intent::Remember { .. } => "Remember",
         Intent::Halt(_) => "Halt",
     }
 }

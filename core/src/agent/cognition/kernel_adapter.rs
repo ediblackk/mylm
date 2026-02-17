@@ -142,6 +142,9 @@ impl<E: CognitiveEngine> CognitiveEngineAdapter<E> {
             AgentDecision::EmitResponse(text) => {
                 Intent::EmitResponse(text)
             }
+            AgentDecision::Remember { content } => {
+                Intent::Remember { content }
+            }
             AgentDecision::Exit(reason) => {
                 crate::info_log!("[KERNEL_ADAPTER] Exit decision: {:?}", reason);
                 Intent::Halt(match reason {
@@ -181,12 +184,15 @@ impl<E: CognitiveEngine> AgencyKernel for CognitiveEngineAdapter<E> {
                     });
                 }
                 KernelEvent::LLMCompleted { response, .. } => {
+                    // Convert XML tool calls to Short-Key JSON for consistent history format
+                    let normalized_content = normalize_llm_response(&response.content);
+                    
                     // Add LLM response to history
                     self.contract_state.history.push(ContractMessage {
                         role: Role::Assistant,
-                        content: response.content.clone(),
+                        content: normalized_content.clone(),
                     });
-                    crate::info_log!("[KERNEL_ADAPTER] Added LLM response to history: {}", &response.content.chars().take(100).collect::<String>());
+                    crate::info_log!("[KERNEL_ADAPTER] Added LLM response to history: {}", &normalized_content.chars().take(100).collect::<String>());
                 }
                 _ => {}
             }
@@ -268,5 +274,59 @@ mod tests {
         
         let graph = kernel.process(&events).unwrap();
         assert!(!graph.is_empty());
+    }
+}
+
+/// Normalize LLM response to Short-Key JSON format
+/// 
+/// Converts XML tool calls to JSON format for consistent history:
+/// - XML: "<tool_call><function=name><parameter=k>v</parameter></function></tool_call>"
+/// - JSON: {"a": "name", "i": {"k": "v"}}
+fn normalize_llm_response(content: &str) -> String {
+    // Check if contains XML tool call
+    if !content.contains("<tool_call>") {
+        // No XML, return as-is (already JSON or plain text)
+        return content.to_string();
+    }
+    
+    // Extract text before tool call (thought/preamble)
+    let text_before = content.split("<tool_call>").next().unwrap_or("").trim();
+    
+    // Extract tool name: <function=name>
+    let func_re = regex::Regex::new(r"<function=([^>]+)>").ok();
+    let tool_name = func_re
+        .and_then(|re| re.captures(content))
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str().trim());
+    
+    // Extract parameters
+    let param_re = regex::Regex::new(r"<parameter=([^>]+)>\s*(.*?)\s*</parameter>").ok();
+    let mut args = std::collections::HashMap::new();
+    if let Some(re) = param_re {
+        for caps in re.captures_iter(content) {
+            if let (Some(key), Some(val)) = (caps.get(1), caps.get(2)) {
+                args.insert(key.as_str().trim().to_string(), val.as_str().trim().to_string());
+            }
+        }
+    }
+    
+    // Build Short-Key JSON
+    if let Some(tool) = tool_name {
+        let args_json = if args.is_empty() {
+            "{}".to_string()
+        } else {
+            serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
+        };
+        
+        if text_before.is_empty() {
+            format!(r#"{{"a": "{}", "i": {}}}"#, tool, args_json)
+        } else {
+            // Escape quotes in thought
+            let thought = text_before.replace('"', "\\\"").replace('\n', "\\n");
+            format!(r#"{{"t": "{}", "a": "{}", "i": {}}}"#, thought, tool, args_json)
+        }
+    } else {
+        // Could not parse XML, return original
+        content.to_string()
     }
 }

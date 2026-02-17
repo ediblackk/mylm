@@ -79,6 +79,12 @@ impl AppStateContainer {
                 category: ToolCategory::Internal,
             },
             ToolInfo {
+                name: "web_search".to_string(),
+                description: "Search the web for information".to_string(),
+                usage: "web_search <query>".to_string(),
+                category: ToolCategory::Other("web".to_string()),
+            },
+            ToolInfo {
                 name: "delegate".to_string(),
                 description: "Spawn worker agents for parallel tasks".to_string(),
                 usage: "delegate <workers>".to_string(),

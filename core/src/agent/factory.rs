@@ -13,12 +13,13 @@ use crate::agent::{
     cognition::kernel_adapter::CognitiveEngineAdapter,
     runtime::contract_runtime::ContractRuntime,
     runtime::impls::InMemoryTransport,
+    runtime::tools::ToolRegistry,
     runtime::terminal::TerminalExecutor,
     runtime::capability::ApprovalCapability,
     // Cognition
     cognition::LLMBasedEngine,
     // Memory
-    memory::{AgentMemoryManager, AgentMemoryProvider},
+    memory::AgentMemoryManager,
 };
 
 /// Factory for creating agent sessions from configuration
@@ -106,11 +107,23 @@ impl AgentSessionFactory {
         // Step 2: Create LLM client
         let llm_client = Arc::new(LlmClient::new(llm_config)?);
         
-        // Step 3: Create output channel for streaming events (shared between session and runtime)
+        // Step 3: Create ToolRegistry with all default tools
+        let tool_registry = ToolRegistry::new();
+        let tool_descriptions: Vec<_> = tool_registry.descriptions()
+            .into_iter()
+            .map(|d| crate::agent::cognition::llm_engine::ToolDescription {
+                name: d.name.to_string(),
+                description: d.description.to_string(),
+                usage: d.usage.to_string(),
+            })
+            .collect();
+        crate::info_log!("[FACTORY] Available tools: {:?}", tool_descriptions.iter().map(|d| &d.name).collect::<Vec<_>>());
+        
+        // Step 4: Create output channel for streaming events (shared between session and runtime)
         let (output_tx, _) = tokio::sync::broadcast::channel(100);
         
-        // Step 4: Create ContractRuntime with LLM client and output sender
-        let mut runtime = ContractRuntime::new(llm_client.clone())
+        // Step 5: Create ContractRuntime with LLM client, tools, and output sender
+        let mut runtime = ContractRuntime::with_tools(llm_client.clone(), Arc::new(tool_registry))
             .with_output_sender(output_tx.clone());
         
         // Step 4b: Attach terminal executor if provided
@@ -159,16 +172,10 @@ impl AgentSessionFactory {
             None
         };
         
-        // Step 7: Create cognitive engine with dynamic tools and memory provider
-        let engine = if let Some(ref mm) = memory_manager {
-            crate::info_log!("[FACTORY] Attaching memory provider to engine");
-            let provider = Arc::new(AgentMemoryProvider::new(mm.clone()));
-            LLMBasedEngine::new()
-                .with_memory_provider(provider)
-        } else {
-            crate::info_log!("[FACTORY] Creating engine without memory provider");
-            LLMBasedEngine::new()
-        };
+        // Step 7: Create cognitive engine with dynamic tools
+        // NOTE: Memory is now handled at runtime layer via Intent::Remember
+        let engine = LLMBasedEngine::new()
+            .with_tool_descriptions(tool_descriptions);
         
         // Step 8: Wrap engine in adapter to implement AgencyKernel trait
         let kernel = CognitiveEngineAdapter::new(engine);

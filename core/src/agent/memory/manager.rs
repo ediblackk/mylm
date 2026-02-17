@@ -454,7 +454,7 @@ pub struct MemoryStats {
 // TODO: restore with new architecture
 // ===== MemoryProvider Implementation =====
 
-use crate::agent::cognition::llm_engine::MemoryProvider;
+use crate::agent::memory::MemoryProvider;
 use std::sync::Weak;
 
 /// A MemoryProvider implementation that wraps AgentMemoryManager

@@ -27,6 +27,9 @@ pub enum Intent {
     /// Emit a response to the user
     EmitResponse(String),
 
+    /// Remember content to long-term memory
+    Remember { content: String },
+
     /// Halt execution with a reason
     Halt(ExitReason),
 }
@@ -153,6 +156,12 @@ impl Context {
     /// With conversation history
     pub fn with_history(mut self, history: Vec<Message>) -> Self {
         self.history = history;
+        self
+    }
+    
+    /// With available tools
+    pub fn with_tools(mut self, tools: Vec<ToolDef>) -> Self {
+        self.available_tools = tools;
         self
     }
 }

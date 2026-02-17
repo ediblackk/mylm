@@ -28,11 +28,12 @@ use crate::agent::runtime::{
     WorkerCapability, TelemetryCapability,
 };
 use crate::agent::runtime::impls::{
-    LlmClientCapability, ToolRegistry, TerminalApprovalCapability,
+    LlmClientCapability, TerminalApprovalCapability,
     AutoApproveCapability, LocalWorkerCapability, ConsoleTelemetry,
     WebSearchCapability, StubWebSearch, MemoryCapability,
     AgentMemoryManager,
 };
+use crate::agent::runtime::tools::ToolRegistry;
 use crate::memory::store::VectorStore;
 use crate::llm::LlmClient;
 use std::sync::Arc;

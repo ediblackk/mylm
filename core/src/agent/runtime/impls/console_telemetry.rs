@@ -112,6 +112,10 @@ fn format_decision(decision: &AgentDecision) -> String {
         ),
         AgentDecision::Exit(reason) => format!("Exit({:?})", reason),
         AgentDecision::None => "None".to_string(),
+        AgentDecision::Remember { content } => format!(
+            "Remember({})",
+            truncate(content, 50)
+        ),
     }
 }
 
