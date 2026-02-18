@@ -68,7 +68,7 @@ pub trait WorkerCapability: Capability {
         &self,
         ctx: &RuntimeContext,
         spec: WorkerSpec,
-    ) -> Result<WorkerHandle, WorkerError>;
+    ) -> Result<WorkerSpawnHandle, WorkerError>;
 }
 
 /// Telemetry capability - observability
@@ -78,8 +78,12 @@ pub trait TelemetryCapability: Capability {
     async fn record_result(&self, ctx: &RuntimeContext, event: &InputEvent);
 }
 
-/// Worker handle returned by spawn
+/// Minimal worker identifier returned by spawn
+/// 
+/// This is a lightweight handle containing only the worker ID.
+/// For full worker management (waiting for results, etc.), use the
+/// higher-level WorkerHandle from crate::agent::worker.
 #[derive(Debug, Clone)]
-pub struct WorkerHandle {
+pub struct WorkerSpawnHandle {
     pub id: WorkerId,
 }

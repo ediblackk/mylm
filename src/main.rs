@@ -4,16 +4,13 @@
 //! All handlers are stubbed for individual implementation.
 
 use anyhow::{Context, Result};
-use clap::Parser;
 use std::sync::Arc;
 
 use mylm_core::config::Config;
 
-mod cli;
 mod hub;
 mod tui;
 
-use cli::{Cli, Commands};
 use hub::{HubChoice, SettingsMenuChoice, show_hub, show_settings_dashboard};
 
 /// ============================================================================
@@ -31,31 +28,8 @@ async fn main() -> Result<()> {
         .join("mylm");
     std::fs::create_dir_all(&data_dir)?;
     
-    // Parse CLI
-    let cli = Cli::parse();
-    
     // Load configuration
     let mut config = Config::load_or_default();
-    
-    // Handle subcommands
-    match cli.command {
-        Some(Commands::Config) => {
-            run_settings_dashboard(&mut config).await?;
-            return Ok(());
-        }
-        Some(Commands::Setup) => {
-            setup_wizard(&mut config).await?;
-            return Ok(());
-        }
-        _ => {}
-    }
-    
-    // Handle direct query
-    if !cli.query.is_empty() {
-        let query = cli.query.join(" ");
-        quick_query(&config, &query).await?;
-        return Ok(());
-    }
     
     // Check for first-run onboarding
     if !config.is_initialized() && config.providers.is_empty() {

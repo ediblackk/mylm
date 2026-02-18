@@ -69,15 +69,11 @@ use async_trait::async_trait;
 use tokio::sync::{broadcast, mpsc};
 use std::collections::{HashMap, HashSet};
 
-use super::{
-    AgencyKernel,
-    runtime::AgencyRuntime,
-    transport::EventTransport,
+use super::{AgencyKernel, AgencyRuntime, EventTransport, IntentGraph, Observation, IntentId};
+use crate::agent::types::KernelEventEnvelope;
+use crate::agent::types::{
     events::{KernelEvent, TokenUsage},
-    graph::IntentGraph,
-    observations::Observation,
-    ids::{IntentId, EventId},
-    envelope::KernelEventEnvelope,
+    ids::EventId,
 };
 use crate::agent::cognition::ApprovalOutcome;
 
@@ -154,10 +150,10 @@ pub enum OutputEvent {
     ApprovalRequested { intent_id: IntentId, tool: String, args: String },
     
     /// Worker spawned
-    WorkerSpawned { worker_id: super::events::WorkerId, objective: String },
+    WorkerSpawned { worker_id: crate::agent::types::events::WorkerId, objective: String },
     
     /// Worker completed
-    WorkerCompleted { worker_id: super::events::WorkerId },
+    WorkerCompleted { worker_id: crate::agent::types::events::WorkerId },
     
     /// Error occurred
     Error { message: String },
@@ -206,7 +202,7 @@ pub struct SessionStatus {
 #[derive(Debug)]
 pub enum SessionError {
     Kernel(super::kernel::KernelError),
-    Runtime(super::runtime::RuntimeError),
+    Runtime(crate::agent::runtime::AgencyRuntimeError),
     Transport(super::transport::TransportError),
     Interrupted,
     Internal(String),
@@ -337,9 +333,9 @@ where
     async fn publish_event(&mut self, event: KernelEvent) -> Result<(), SessionError> {
         let envelope = KernelEventEnvelope::new(
             self.next_event_id(),
-            super::ids::NodeId::new(0), // Local node
-            super::ids::LogicalClock::new(self.kernel.state().step_count as u64),
-            super::ids::SessionId::generate(), // Should be real session ID
+            super::NodeId::new(0), // Local node
+            super::LogicalClock::new(self.kernel.state().step_count as u64),
+            super::SessionId::generate(), // Should be real session ID
             event,
             0, // sequence
         );
@@ -397,14 +393,14 @@ where
         // Emit output events for ready intents
         for node in &ready {
             match &node.intent {
-                super::intents::Intent::CallTool(call) => {
+                super::Intent::CallTool(call) => {
                     let _ = self.output_tx.send(OutputEvent::ToolExecuting {
                         intent_id: node.id,
                         tool: call.name.clone(),
                         args: call.arguments.to_string(),
                     });
                 }
-                super::intents::Intent::EmitResponse(_text) => {
+                super::Intent::EmitResponse(_text) => {
                     // Don't send chunk here - runtime already streamed it
                     // ResponseComplete will be sent after execution
                 }
@@ -524,7 +520,7 @@ where
                     let _ = self.output_tx.send(OutputEvent::Halted {
                         reason: format!("Runtime error: {}", error.message),
                     });
-                    return Err(SessionError::Runtime(super::runtime::RuntimeError::Internal {
+                    return Err(SessionError::Runtime(crate::agent::runtime::AgencyRuntimeError::Internal {
                         message: error.message.clone(),
                     }));
                 }
@@ -541,7 +537,7 @@ where
                     let _ = self.output_tx.send(OutputEvent::Halted {
                         reason: format!("Runtime error: {}", error.message),
                     });
-                    return Err(SessionError::Runtime(super::runtime::RuntimeError::Internal {
+                    return Err(SessionError::Runtime(crate::agent::runtime::AgencyRuntimeError::Internal {
                         message: error.message.clone(),
                     }));
                 }

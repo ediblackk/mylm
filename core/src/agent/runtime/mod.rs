@@ -13,7 +13,7 @@ pub mod terminal;
 
 /// Contract runtime implementation
 /// 
-/// Bridges the new contract's AgencyRuntime trait to existing V3 capabilities.
+/// Bridges the AgencyRuntime trait to existing V3 capabilities.
 pub mod contract_runtime;
 
 pub use capability::*;

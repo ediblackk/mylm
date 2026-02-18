@@ -214,7 +214,7 @@ impl crate::agent::runtime::capability::WorkerCapability for WorkerCapabilityImp
         &self,
         _ctx: &crate::agent::runtime::context::RuntimeContext,
         spec: crate::agent::types::intents::WorkerSpec,
-    ) -> Result<crate::agent::runtime::capability::WorkerHandle, crate::agent::runtime::error::WorkerError> {
+    ) -> Result<crate::agent::runtime::capability::WorkerSpawnHandle, crate::agent::runtime::error::WorkerError> {
         // Generate an ID for the worker
         let worker_id = self.manager.generate_id();
         let worker_spec = WorkerSpawnParams {
@@ -224,7 +224,7 @@ impl crate::agent::runtime::capability::WorkerCapability for WorkerCapabilityImp
         };
         
         self.manager.spawn(worker_spec).await
-            .map(|handle| crate::agent::runtime::capability::WorkerHandle {
+            .map(|handle| crate::agent::runtime::capability::WorkerSpawnHandle {
                 id: handle.id,
             })
             .map_err(|e| crate::agent::runtime::error::WorkerError::new(e))

@@ -90,18 +90,16 @@ pub mod agent;
 
 // Other modules
 pub mod error;
-pub mod terminal;
 pub mod config;
-pub mod context;
-pub mod executor;
-pub mod llm;
+pub mod environment;
+pub mod conversation;
+pub mod ui;
+pub mod provider;
 pub mod memory;
-pub mod output;
 pub mod scheduler;
-pub mod state;
 pub mod protocol;
+pub mod update;
 pub mod util;
-pub mod rate_limiter;
 
 // TODO: Restore factory module or migrate to new architecture
 // pub mod factory;

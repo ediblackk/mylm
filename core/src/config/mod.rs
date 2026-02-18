@@ -1,18 +1,58 @@
 //! Configuration management
 //!
 //! Unified configuration system for MyLM.
-//! All configuration types are exported from this module.
+//! 
+//! # Module Structure
+//! 
+//! - `base` - Core types: Provider, SearchProvider, ConfigError
+//! - `unified` - Main Config with profiles, providers, app settings
+//! - `app` - AppConfig, FeatureConfig, Theme, PaCoReConfig
+//! - `profile` - ProfileConfig, ResolvedProfile, WebSearchConfig
+//! - `provider` - ProviderConfig, ProviderType
+//! - `manager` - ConfigManager with hot-reload and rate limiting
+//! - `bridge` - Bridge functions to convert Config to LLM/Agent configs
+//! - `prompt` - Prompt schema definitions
+//! - `agent` - Agent-specific configuration
+//! - `legacy` - DEPRECATED: ConfigV2 for backward compatibility
 
-pub mod agent;
+// Core types
+pub mod base;
+
+// Main configuration
+pub mod unified;
+pub mod app;
+pub mod profile;
+pub mod provider;
+
+// Management and utilities
+pub mod manager;
 pub mod bridge;
-pub mod llm;
 pub mod prompt;
 pub mod prompt_schema;
-pub mod store;
-pub mod types;
-pub mod manager;
+pub mod agent;
 
-// Re-export bridge functions
+// Legacy (for migration only)
+pub mod legacy;
+
+// Re-exports from base
+pub use base::{
+    Provider, SearchProvider, ConfigError,
+    AgentPermissions, WorkerShellConfig, EscalationMode, AgentVersion,
+    ContextProfile,
+};
+
+// Re-exports from unified (main config)
+pub use unified::{
+    Config,
+    ProfileConfig, ResolvedProfile, WebSearchConfig,
+    ProviderConfig, ProviderType,
+    AppConfig, FeatureConfig, PaCoReConfig, Theme,
+};
+
+// Re-exports from manager
+pub use manager::{ConfigManager, CostPerToken, RateLimitError};
+
+// Re-exports from bridge
 pub use bridge::{
     config_to_llm_config,
     config_to_kernel_config,
@@ -22,61 +62,13 @@ pub use bridge::{
     BridgeError,
 };
 
-// Re-export manager types
-pub use manager::{ConfigManager, CostPerToken, RateLimitError};
-pub use manager::Config as ManagerConfig;
-pub use manager::ConfigError as ManagerConfigError;
+// Re-exports from agent
+pub use agent::{AgentConfig, MemoryConfig};
 
-// Re-export types
-pub use types::{Provider, SearchProvider, ConfigError, AgentPermissions, WorkerShellConfig, EscalationMode, AgentVersion};
-
-// Re-export agent config
-pub use agent::AgentConfig;
-
-// Re-export new store (primary config interface)
-pub use store::{
-    Config, ProfileConfig, ProviderConfig, ProviderType,
-    AppConfig, FeatureConfig, PaCoReConfig, Theme,
-};
-
-// Re-export LLM config (legacy ConfigV2)
-pub use llm::{ConfigV2, AgentConfig as LlmAgentConfig, EndpointConfig, Profile, ResolvedConfig, WebSearchConfig};
-pub use llm::{EndpointOverride, FeaturesConfig, MemoryConfig, PacoreConfig, PromptsConfig, AgentOverride};
+// Re-exports from prompt_schema (prompt types)
+pub use prompt_schema::{PromptConfig, IdentitySection, Section, Protocols, JsonKeys, ReactProtocol};
 
 use std::path::PathBuf;
-use serde::{Deserialize, Serialize};
-
-/// Context budgeting profile
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ContextProfile {
-    Minimal,
-    #[default]
-    Balanced,
-    Verbose,
-}
-
-impl std::fmt::Display for ContextProfile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ContextProfile::Minimal => write!(f, "Minimal"),
-            ContextProfile::Balanced => write!(f, "Balanced"),
-            ContextProfile::Verbose => write!(f, "Verbose"),
-        }
-    }
-}
-
-/// Command execution configuration
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
-pub struct CommandConfig {
-    #[serde(default)]
-    pub allow_execution: bool,
-    #[serde(default)]
-    pub allowlist_paths: Vec<PathBuf>,
-    #[serde(default)]
-    pub allowed_commands: Vec<String>,
-    #[serde(default)]
-    pub blocked_commands: Vec<String>,
-}
 
 /// Find the configuration file in standard locations
 pub fn find_config_file() -> Option<PathBuf> {
@@ -114,18 +106,33 @@ pub fn get_config_dir() -> Option<PathBuf> {
 }
 
 /// Create default configuration
-pub fn create_default_config() -> ConfigV2 {
-    ConfigV2::default()
+pub fn create_default_config() -> Config {
+    Config::default()
+}
+
+/// Get prompts directory
+pub fn get_prompts_dir() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("mylm")
+        .join("prompts")
+}
+
+/// Load prompt from file
+pub fn load_prompt(name: &str) -> anyhow::Result<String> {
+    let path = get_prompts_dir().join(format!("{}.md", name));
+    std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("Failed to load prompt {}: {}", name, e))
 }
 
 /// Build system prompt for TUI sessions (stub)
 pub async fn build_system_prompt(
-    _context: &crate::context::TerminalContext,
+    _context: &crate::environment::EnvironmentContext,
     _prompt_name: &str,
     _mode: Option<&str>,
-    _prompts: Option<&PromptsConfig>,
+    _prompts: Option<&crate::config::prompt_schema::PromptConfig>,
     _tools: Option<&[&str]>,
-    _agent_config: Option<&crate::config::llm::AgentConfig>,
+    _agent_config: Option<&crate::config::agent::AgentConfig>,
 ) -> anyhow::Result<String> {
     Ok(r#"You are mylm, a helpful AI assistant for terminal tasks.
 
@@ -137,19 +144,4 @@ You can use tools to:
 - Delegate tasks to workers
 
 Be concise and helpful."#.to_string())
-}
-
-/// Get prompts directory (stub)
-pub fn get_prompts_dir() -> std::path::PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("mylm")
-        .join("prompts")
-}
-
-/// Load prompt from file (stub)
-pub fn load_prompt(name: &str) -> anyhow::Result<String> {
-    let path = get_prompts_dir().join(format!("{}.md", name));
-    std::fs::read_to_string(&path)
-        .map_err(|e| anyhow::anyhow!("Failed to load prompt {}: {}", name, e))
 }

@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::llm::TokenUsage;
+use crate::provider::TokenUsage;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MessageEnvelope<T> {

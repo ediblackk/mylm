@@ -1,7 +1,7 @@
 //! Input handling - cursor movement, text editing, and selection
 use crate::tui::app::state::{AppStateContainer, Focus};
 use crate::tui::types::TimestampedChatMessage;
-use mylm_core::llm::TokenUsage;
+use mylm_core::provider::TokenUsage;
 
 impl AppStateContainer {
     // Cursor movement
@@ -390,7 +390,7 @@ impl AppStateContainer {
 
     // History management
     #[allow(dead_code)]
-    pub fn set_history(&mut self, history: Vec<mylm_core::llm::chat::ChatMessage>) {
+    pub fn set_history(&mut self, history: Vec<mylm_core::provider::chat::ChatMessage>) {
         self.chat_history = history.into_iter().map(TimestampedChatMessage::from).collect();
     }
 
@@ -404,7 +404,7 @@ impl AppStateContainer {
         self.session_monitor.add_usage(&usage, input_price, output_price);
         
         // Update context manager with new message for token tracking
-        let chat_msgs: Vec<mylm_core::llm::chat::ChatMessage> = self.chat_history.iter().map(|m| m.message.clone()).collect();
+        let chat_msgs: Vec<mylm_core::provider::chat::ChatMessage> = self.chat_history.iter().map(|m| m.message.clone()).collect();
         self.context_manager.set_history(&chat_msgs);
 
         if self.chat_auto_scroll {
@@ -417,7 +417,7 @@ impl AppStateContainer {
         self.chat_history.push(TimestampedChatMessage::system(content.to_string()));
         
         // Update context manager with new message for token tracking
-        let chat_msgs: Vec<mylm_core::llm::chat::ChatMessage> = self.chat_history.iter().map(|m| m.message.clone()).collect();
+        let chat_msgs: Vec<mylm_core::provider::chat::ChatMessage> = self.chat_history.iter().map(|m| m.message.clone()).collect();
         self.context_manager.set_history(&chat_msgs);
 
         if self.chat_auto_scroll {
@@ -431,7 +431,7 @@ impl AppStateContainer {
         self.chat_history.push(TimestampedChatMessage::assistant(content.to_string()));
         
         // Update context manager with new message for token tracking
-        let chat_msgs: Vec<mylm_core::llm::chat::ChatMessage> = self.chat_history.iter().map(|m| m.message.clone()).collect();
+        let chat_msgs: Vec<mylm_core::provider::chat::ChatMessage> = self.chat_history.iter().map(|m| m.message.clone()).collect();
         self.context_manager.set_history(&chat_msgs);
 
         if self.chat_auto_scroll {
@@ -477,7 +477,7 @@ impl AppStateContainer {
 
     /// Build a Session object from current state
     pub async fn build_current_session(&self) -> crate::tui::session::Session {
-        use mylm_core::llm::chat::MessageRole;
+        use mylm_core::provider::chat::MessageRole;
         let stats = self.session_monitor.get_stats();
         let preview = self
             .chat_history

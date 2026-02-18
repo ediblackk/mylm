@@ -14,7 +14,7 @@ use crate::agent::runtime::{AgentRuntime, RuntimeContext, RuntimeError};
 use crate::agent::session::input::{SessionInput, WorkerEvent};
 use crate::agent::session::persistence::{SessionPersistence, PersistedSession, SessionBuilder};
 use crate::agent::memory::AgentMemoryManager;
-use crate::context::ContextManager;
+use crate::conversation::ContextManager;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Receiver;
@@ -96,7 +96,7 @@ where
     context_manager: ContextManager,
     
     /// LLM client for context condensation (optional)
-    llm_client: Option<Arc<crate::llm::LlmClient>>,
+    llm_client: Option<Arc<crate::provider::LlmClient>>,
 }
 
 impl<E> Session<E>
@@ -112,7 +112,7 @@ where
         config: SessionConfig,
     ) -> Self {
         let state = AgentState::new(config.max_steps);
-        let context_config = crate::context::ContextConfig::default();
+        let context_config = crate::conversation::ContextConfig::default();
         
         Self {
             engine,
@@ -137,7 +137,7 @@ where
         memory_config: &crate::config::agent::MemoryConfig,
     ) -> Self {
         let state = AgentState::new(session_config.max_steps);
-        let context_config = crate::context::ContextConfig::default();
+        let context_config = crate::conversation::ContextConfig::default();
         
         Self {
             engine,
@@ -161,7 +161,7 @@ where
     ) -> Self {
         let state = AgentState::new(config.max_steps);
         let persistence = SessionPersistence::from_config(memory_manager.config());
-        let context_config = crate::context::ContextConfig::default();
+        let context_config = crate::conversation::ContextConfig::default();
         
         Self {
             engine,
@@ -189,7 +189,7 @@ where
             .unwrap_or_default();
         
         let state = AgentState::new(config.max_steps);
-        let context_config = crate::context::ContextConfig::default();
+        let context_config = crate::conversation::ContextConfig::default();
         
         // Convert persisted history to ContextManager
         let mut context_manager = ContextManager::new(context_config.clone());
@@ -262,7 +262,7 @@ where
     }
     
     /// Set the LLM client for context condensation
-    pub fn set_llm_client(&mut self, client: Arc<crate::llm::LlmClient>) {
+    pub fn set_llm_client(&mut self, client: Arc<crate::provider::LlmClient>) {
         self.llm_client = Some(client);
         // Update context manager config from LLM client
         self.context_manager = ContextManager::from_llm_client(&self.llm_client.as_ref().unwrap());
@@ -304,7 +304,7 @@ where
     }
     
     /// Prepare context for LLM call with pruning/condensation
-    pub async fn prepare_context(&mut self) -> Result<Vec<crate::llm::chat::ChatMessage>, crate::context::ContextError> {
+    pub async fn prepare_context(&mut self) -> Result<Vec<crate::provider::chat::ChatMessage>, crate::conversation::ContextError> {
         self.context_manager.prepare_context(self.llm_client.as_ref()).await
     }
     

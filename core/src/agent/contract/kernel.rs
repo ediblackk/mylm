@@ -6,12 +6,8 @@
 //! - Has NO async, NO IO, NO side effects
 //! - Is fully deterministic and replayable
 
-use super::{
-    events::KernelEvent,
-    graph::IntentGraph,
-    config::KernelConfig,
-    ContractError,
-};
+use super::{IntentGraph, KernelConfig, ContractError, IntentId, IntentNode, Intent, ExitReason};
+use crate::agent::types::events::KernelEvent;
 
 // Re-use Message type from intents
 pub use crate::agent::types::intents::Message;
@@ -229,7 +225,7 @@ impl AgentState {
 /// Pending approval state
 #[derive(Debug, Clone)]
 pub struct PendingApproval {
-    pub intent_id: super::ids::IntentId,
+    pub intent_id: super::IntentId,
     pub tool: String,
     pub args: String,
     pub requested_at: std::time::SystemTime,
@@ -282,14 +278,11 @@ impl AgencyKernel for StubKernel {
     }
 
     fn process(&mut self, events: &[KernelEvent]) -> Result<IntentGraph, KernelError> {
-        use super::intents::{Intent, ExitReason, IntentNode};
-        use super::ids::IntentId;
-
         self.state.increment_step();
 
         // Simple stub: echo first user message or halt
         for event in events {
-            if let super::events::KernelEvent::UserMessage { content } = event {
+            if let KernelEvent::UserMessage { content } = event {
                 let mut graph = IntentGraph::new();
                 
                 if self.state.at_limit() {
@@ -322,7 +315,7 @@ impl AgencyKernel for StubKernel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::events::KernelEvent;
+    use crate::agent::types::events::KernelEvent;
 
     #[test]
     fn test_stub_kernel() {

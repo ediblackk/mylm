@@ -4,12 +4,12 @@
 //! This allows gradual migration without breaking existing code.
 
 use crate::agent::contract::{
-    AgencyKernel, KernelConfig,
+    AgencyKernel, KernelConfig, IntentGraph, IntentId, ExitReason,
     kernel::{AgentState as ContractAgentState, KernelError},
+};
+use crate::agent::types::{
     events::{KernelEvent, ToolResult},
-    graph::IntentGraph,
-    intents::{Intent, ExitReason, WorkerSpec, Role, Message as ContractMessage},
-    ids::IntentId,
+    intents::{Intent, WorkerSpec, Role, Message as ContractMessage},
 };
 
 use crate::agent::cognition::{
@@ -123,7 +123,7 @@ impl<E: CognitiveEngine> CognitiveEngineAdapter<E> {
                 Intent::RequestLLM(req) // Already the unified type
             }
             AgentDecision::RequestApproval(req) => {
-                Intent::RequestApproval(crate::agent::contract::intents::ApprovalRequest {
+                Intent::RequestApproval(crate::agent::types::intents::ApprovalRequest {
                     tool: req.tool,
                     args: req.args,
                     reason: req.reason,
@@ -249,7 +249,7 @@ impl<E: CognitiveEngine> AgencyKernel for CognitiveEngineAdapter<E> {
     }
 }
 
-use crate::agent::contract::graph::IntentGraphBuilder;
+use crate::agent::types::IntentGraphBuilder;
 
 /// Creates a kernel from an existing CognitiveEngine
 pub fn kernel_from_engine<E: CognitiveEngine>(engine: E) -> CognitiveEngineAdapter<E> {

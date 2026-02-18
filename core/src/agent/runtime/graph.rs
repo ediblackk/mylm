@@ -3,7 +3,7 @@
 //! Strongly typed capability composition. No dynamic lookup.
 
 use std::sync::Arc;
-use crate::agent::runtime::capability::{LLMCapability, ToolCapability, ApprovalCapability, WorkerCapability, TelemetryCapability, Capability, WorkerHandle};
+use crate::agent::runtime::capability::{LLMCapability, ToolCapability, ApprovalCapability, WorkerCapability, TelemetryCapability, Capability, WorkerSpawnHandle};
 use crate::agent::runtime::context::RuntimeContext;
 use crate::agent::runtime::error::{LLMError, ToolError, ApprovalError, WorkerError};
 use crate::agent::types::intents::{LLMRequest, ToolCall, ApprovalRequest, WorkerSpec};
@@ -110,9 +110,9 @@ impl Capability for StubWorkers {
 }
 #[async_trait::async_trait]
 impl WorkerCapability for StubWorkers {
-    async fn spawn(&self, _ctx: &RuntimeContext, _spec: WorkerSpec) -> Result<WorkerHandle, WorkerError> {
+    async fn spawn(&self, _ctx: &RuntimeContext, _spec: WorkerSpec) -> Result<WorkerSpawnHandle, WorkerError> {
         // WorkerId is now u64-based, not string-based
-        Ok(WorkerHandle { id: WorkerId(0) })
+        Ok(WorkerSpawnHandle { id: WorkerId(0) })
     }
 }
 

@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
-use mylm_core::llm::TokenUsage;
-use mylm_core::llm::chat::ChatMessage;
+use mylm_core::provider::TokenUsage;
+use mylm_core::provider::chat::ChatMessage;
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 

@@ -3,7 +3,7 @@
 //! Spawns workers as tokio tasks with parent-child communication.
 
 use crate::agent::runtime::{
-    capability::{Capability, WorkerCapability, WorkerHandle},
+    capability::{Capability, WorkerCapability, WorkerSpawnHandle},
     context::RuntimeContext,
     error::WorkerError,
 };
@@ -67,7 +67,7 @@ impl LocalWorkerCapability {
         &self,
         spec: WorkerSpec,
         results: Arc<Mutex<HashMap<WorkerId, WorkerStatus>>>,
-    ) -> Result<WorkerHandle, WorkerError> {
+    ) -> Result<WorkerSpawnHandle, WorkerError> {
         let worker_id = self.generate_id();
         let (status_tx, _status_rx) = mpsc::channel(10);
         
@@ -100,7 +100,7 @@ impl LocalWorkerCapability {
         
         self.workers.lock().await.insert(worker_id.clone(), instance);
         
-        Ok(WorkerHandle { id: worker_id })
+        Ok(WorkerSpawnHandle { id: worker_id })
     }
 }
 
@@ -122,7 +122,7 @@ impl WorkerCapability for LocalWorkerCapability {
         &self,
         _ctx: &RuntimeContext,
         spec: WorkerSpec,
-    ) -> Result<WorkerHandle, WorkerError> {
+    ) -> Result<WorkerSpawnHandle, WorkerError> {
         self.spawn_worker(spec, self.results.clone()).await
     }
 }

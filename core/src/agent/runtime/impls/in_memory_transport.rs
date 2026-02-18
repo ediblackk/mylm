@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::agent::contract::{
     transport::{EventTransport, TransportError, TransportCapabilities, DeliveryGuarantee},
-    envelope::{KernelEventEnvelope, OrderingGuarantee},
+    crate::agent::types::{KernelEventEnvelope, OrderingGuarantee},
 
 };
 
@@ -197,10 +197,8 @@ pub fn connected_pair(buffer_size: usize) -> (InMemoryTransport, InMemoryTranspo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::contract::{
-        ids::{EventId, NodeId, SessionId, LogicalClock},
-        events::KernelEvent,
-    };
+    use crate::agent::contract::{EventId, NodeId, SessionId, LogicalClock};
+    use crate::agent::types::events::KernelEvent;
 
     #[tokio::test]
     async fn test_basic_publish_receive() {

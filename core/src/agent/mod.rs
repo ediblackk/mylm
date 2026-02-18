@@ -93,6 +93,7 @@ pub mod contract;
 pub use types::{
     TaskId, JobId, SessionId,
     TokenUsage, ToolResult, Approval,
+    ResponseParser, ParsedResponse, ParseError,
 };
 
 pub use cognition::{
@@ -100,7 +101,7 @@ pub use cognition::{
     InputEvent, ApprovalOutcome, LLMResponse,
     AgentDecision, Transition, CognitiveEngine,
     CognitiveError,
-    LLMBasedEngine, ResponseParser,
+    LLMBasedEngine,
 };
 
 pub use runtime::{
@@ -141,10 +142,8 @@ pub use memory::{
 // pub use cognition::llm_engine::MemoryProvider;
 
 #[cfg(test)]
-mod test_architecture;
-
-#[cfg(test)]
-mod example_integration;
-
-#[cfg(test)]
-mod integration_tests;
+mod tests {
+    mod test_architecture;
+    mod example_integration;
+    mod integration_tests;
+}

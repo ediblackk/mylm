@@ -16,17 +16,17 @@
 // ============================================================================
 
 // Chat/LLM types
-pub use mylm_core::llm::TokenUsage;
+pub use mylm_core::provider::TokenUsage;
 
 // Use the real ChatMessage from mylm_core (with fallback to stub for compatibility)
-pub use mylm_core::llm::chat::ChatMessage;
+pub use mylm_core::provider::chat::ChatMessage;
 
 // Memory types
 // pub use mylm_core::memory::graph::MemoryGraph;  // Currently unused
 
-// Context management
-// pub use mylm_core::context::manager::ContextManager;  // Currently unused
-// pub use mylm_core::context::action_stamp::{ActionStamp, ActionStampType};  // Currently unused
+// Context management (from reorganized modules)
+// pub use mylm_core::conversation::ContextManager;  // Currently unused
+// pub use mylm_core::ui::{ActionStamp, ActionStampType};  // Currently unused
 
 // Agent session contract types
 // pub use mylm_core::agent::contract::session::{OutputEvent, UserInput};  // Currently unused

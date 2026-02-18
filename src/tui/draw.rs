@@ -84,7 +84,7 @@ fn draw_chat_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_chat_history(f: &mut Frame, app: &App, area: Rect) {
-    use mylm_core::llm::chat::MessageRole;
+    use mylm_core::provider::chat::MessageRole;
     
     let mut lines: Vec<Line> = Vec::new();
     

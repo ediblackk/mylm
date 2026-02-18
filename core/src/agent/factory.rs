@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use crate::config::{Config, BridgeError, config_to_llm_config, config_to_kernel_config};
-use crate::llm::LlmClient;
+use crate::provider::LlmClient;
 use crate::agent::{
     // Contract types
     contract::session::AgencySession,

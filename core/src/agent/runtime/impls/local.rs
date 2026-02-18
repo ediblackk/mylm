@@ -2,7 +2,7 @@
 //!
 //! Placeholder implementations for local execution.
 
-use crate::agent::runtime::capability::{Capability, LLMCapability, ToolCapability, ApprovalCapability, WorkerCapability, TelemetryCapability, WorkerHandle};
+use crate::agent::runtime::capability::{Capability, LLMCapability, ToolCapability, ApprovalCapability, WorkerCapability, TelemetryCapability, WorkerSpawnHandle};
 use crate::agent::runtime::context::RuntimeContext;
 use crate::agent::runtime::error::{LLMError, ToolError, ApprovalError, WorkerError};
 use crate::agent::types::intents::{LLMRequest, ToolCall, ApprovalRequest, WorkerSpec};
@@ -140,9 +140,9 @@ impl WorkerCapability for LocalWorkerStub {
         &self,
         _ctx: &RuntimeContext,
         _spec: WorkerSpec,
-    ) -> Result<WorkerHandle, WorkerError> {
+    ) -> Result<WorkerSpawnHandle, WorkerError> {
         // Generate a simple ID (in real impl would use atomic counter)
-        Ok(WorkerHandle {
+        Ok(WorkerSpawnHandle {
             id: WorkerId(1),
         })
     }

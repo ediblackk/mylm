@@ -11,9 +11,9 @@ use crate::tui::app::state::AppStateContainer;
 use crate::tui::types::{AppState, TuiEvent, TimestampedChatMessage};
 
 use mylm_core::agent::contract::session::UserInput;
-use mylm_core::context::pack::ContextBuilder;
-use mylm_core::context::SmartPruning;
-use mylm_core::llm::chat::ChatMessage;
+use mylm_core::environment::ContextBuilder;
+use mylm_core::conversation::SmartPruning;
+use mylm_core::provider::chat::ChatMessage;
 use tokio::sync::mpsc::UnboundedSender;
 
 pub use crate::tui::app::state::AppStateContainer as App;

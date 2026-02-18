@@ -13,7 +13,7 @@ use base64::Engine;
 use mylm_core::config::Config;
 use mylm_core::agent::core::AgentDecision;
 use mylm_core::agent::tool::ToolOutput;
-use mylm_core::llm::chat::ChatMessage;
+use mylm_core::provider::chat::ChatMessage;
 use crate::tui::app::state::TuiEvent;
 use mylm_core::protocol::{ServerEvent, ClientMessage, MessageEnvelope, ServerInfo, Capabilities, SessionSummary, SystemInfo};
 

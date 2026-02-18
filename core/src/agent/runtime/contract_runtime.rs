@@ -9,13 +9,11 @@ use std::time::Instant;
 use futures::StreamExt;
 
 use crate::agent::contract::{
-    AgencyRuntime,
-    Intent,
-    IntentGraph,
-    ids::IntentId,
-    observations::{Observation, ExecutionError},
-    runtime::{RuntimeError, TelemetryEvent, HealthStatus},
+    Intent, IntentGraph, IntentId, Observation, ExecutionError, ExitReason, HaltReason,
     session::OutputEvent,
+};
+use crate::agent::runtime::{
+    AgencyRuntime, AgencyRuntimeError, TelemetryEvent, HealthStatus,
 };
 
 use crate::agent::runtime::impls::{
@@ -30,7 +28,7 @@ use crate::agent::runtime::capability::{WorkerCapability, LLMCapability, ToolCap
 use crate::agent::runtime::terminal::{TerminalExecutor, DefaultTerminalExecutor};
 
 use crate::agent::runtime::context::RuntimeContext;
-use crate::llm::LlmClient;
+use crate::provider::LlmClient;
 
 /// Full runtime implementation that fulfills the AgencyRuntime contract
 ///
@@ -138,7 +136,7 @@ impl ContractRuntime {
         &self,
         intent_id: IntentId,
         intent: Intent,
-    ) -> Result<Observation, RuntimeError> {
+    ) -> Result<Observation, AgencyRuntimeError> {
         let start_time = Instant::now();
         
         // Emit telemetry: intent started
@@ -158,7 +156,7 @@ impl ContractRuntime {
                 // Execute tool via registry
                 let tool_start = Instant::now();
                 let result = self.tools.execute(&ctx, call.clone()).await
-                    .map_err(|e| RuntimeError::ToolExecutionFailed {
+                    .map_err(|e| AgencyRuntimeError::ToolExecutionFailed {
                         tool: call.name.clone(),
                         error: e.to_string(),
                     })?;
@@ -261,7 +259,7 @@ impl ContractRuntime {
                                     message: format!("LLM API error: {} (streaming: {})", e, stream_error),
                                 });
                                 
-                                return Err(RuntimeError::LLMRequestFailed {
+                                return Err(AgencyRuntimeError::LLMRequestFailed {
                                     provider: "llm".to_string(),
                                     error: format!("{} (streaming failed: {})", e, stream_error),
                                 });
@@ -288,7 +286,7 @@ impl ContractRuntime {
                 } else {
                     // Non-streaming fallback
                     let response = self.llm.complete(&ctx, req).await
-                        .map_err(|e| RuntimeError::LLMRequestFailed {
+                        .map_err(|e| AgencyRuntimeError::LLMRequestFailed {
                             provider: "llm".to_string(),
                             error: e.to_string(),
                         })?;
@@ -328,7 +326,7 @@ impl ContractRuntime {
                         })
                     }
                     Err(e) => {
-                        Err(RuntimeError::Internal {
+                        Err(AgencyRuntimeError::Internal {
                             message: format!("Approval request failed: {}", e),
                         })
                     }
@@ -339,7 +337,7 @@ impl ContractRuntime {
                 let ctx = RuntimeContext::new()
                     .with_terminal(Arc::clone(&self.terminal));
                 let handle = self.workers.spawn(&ctx, spec.clone()).await
-                    .map_err(|e| RuntimeError::Internal { message: e.to_string() })?;
+                    .map_err(|e| AgencyRuntimeError::Internal { message: e.to_string() })?;
                 
                 // Emit telemetry: worker spawned
                 let _ = self.telemetry_tx.send(TelemetryEvent::WorkerSpawned {
@@ -364,20 +362,20 @@ impl ContractRuntime {
                 Ok(Observation::Halted {
                     intent_id,
                     reason: match reason {
-                        crate::agent::contract::intents::ExitReason::Completed => {
-                            crate::agent::contract::observations::HaltReason::Completed
+                        ExitReason::Completed => {
+                            HaltReason::Completed
                         }
-                        crate::agent::contract::intents::ExitReason::StepLimit => {
-                            crate::agent::contract::observations::HaltReason::StepLimitReached { max_steps: 0 }
+                        ExitReason::StepLimit => {
+                            HaltReason::StepLimitReached { max_steps: 0 }
                         }
-                        crate::agent::contract::intents::ExitReason::UserRequest => {
-                            crate::agent::contract::observations::HaltReason::UserRequest
+                        ExitReason::UserRequest => {
+                            HaltReason::UserRequest
                         }
-                        crate::agent::contract::intents::ExitReason::Error(msg) => {
-                            crate::agent::contract::observations::HaltReason::Error(msg)
+                        ExitReason::Error(msg) => {
+                            HaltReason::Error(msg)
                         }
-                        crate::agent::contract::intents::ExitReason::Interrupted => {
-                            crate::agent::contract::observations::HaltReason::Interrupted
+                        ExitReason::Interrupted => {
+                            HaltReason::Interrupted
                         }
                     },
                 })
@@ -421,21 +419,21 @@ fn intent_type_name(intent: &Intent) -> &'static str {
 
 #[async_trait]
 impl AgencyRuntime for ContractRuntime {
-    async fn execute(&self, intent: Intent) -> Result<Observation, RuntimeError> {
+    async fn execute(&self, intent: Intent) -> Result<Observation, AgencyRuntimeError> {
         // For single intent execution, generate a new intent_id
         // In practice, this should come from the caller
         let intent_id = IntentId::new(0);
         self.execute_intent(intent_id, intent).await
     }
 
-    async fn execute_with_id(&self, intent_id: IntentId, intent: Intent) -> Result<Observation, RuntimeError> {
+    async fn execute_with_id(&self, intent_id: IntentId, intent: Intent) -> Result<Observation, AgencyRuntimeError> {
         self.execute_intent(intent_id, intent).await
     }
 
     async fn execute_dag(
         &self,
         graph: &IntentGraph,
-    ) -> Result<Vec<(IntentId, Observation)>, RuntimeError> {
+    ) -> Result<Vec<(IntentId, Observation)>, AgencyRuntimeError> {
         crate::debug_log!("[RUNTIME] execute_dag called with {} nodes", graph.len());
         // Use the DAG executor
         let result = match DagExecutor::execute(Arc::new(self.clone()), graph).await {
@@ -448,7 +446,7 @@ impl AgencyRuntime for ContractRuntime {
                 // The kernel will handle this and halt the session
                 let error_obs = Observation::RuntimeError {
                     intent_id: IntentId::new(0),
-                    error: crate::agent::contract::observations::ExecutionError::new(e.to_string()),
+                    error: ExecutionError::new(e.to_string()),
                 };
                 return Ok(vec![(IntentId::new(0), error_obs)]);
             }
@@ -488,7 +486,7 @@ impl AgencyRuntime for ContractRuntime {
         HealthStatus::Healthy
     }
 
-    async fn shutdown(&self) -> Result<(), RuntimeError> {
+    async fn shutdown(&self) -> Result<(), AgencyRuntimeError> {
         // Graceful shutdown of all components
         // TODO: Implement actual shutdown logic for workers, etc.
         Ok(())
@@ -513,9 +511,7 @@ impl Clone for ContractRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::contract::{
-        intents::{ToolCall, LLMRequest, Context},
-    };
+    use crate::agent::types::intents::{ToolCall, LLMRequest, Context};
 
     #[tokio::test]
     async fn test_tool_execution() {

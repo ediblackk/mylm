@@ -264,37 +264,56 @@ side effects within the pure cognition layer.
 3. `kernel_adapter` converts to intent
 4. Runtime handles the actual remember operation
 
-### 6. ⚠️ APPROVAL BYPASS BUG
+### 6. ✅ APPROVAL SYSTEM ARCHITECTURE (FIXED)
 **Files**: 
-- `cognition/llm_engine.rs` - `requires_approval()`
-- `runtime/contract_runtime.rs` - Tool execution
+- `cognition/llm_engine.rs` - Removed hardcoded `requires_approval()`
+- `runtime/contract_runtime.rs` - Added approval policy check
+- `config/store.rs` - Per-profile approval settings
+- `src/tui/approval.rs` - Auto-approve integration
 
-**Issue**: The cognition layer has a hardcoded safety policy that determines which tools require approval:
-```rust
-fn requires_approval(&self, tool: &str, args: &str) -> bool {
-    let dangerous_tools = ["shell", "write_file", "rm", "sudo"];
-    // web_search is NOT in this list!
-}
+**OLD BUG**: Cognition layer had hardcoded approval logic that bypassed user settings.
+
+**NEW ARCHITECTURE**:
+```
+┌─────────────────────────────────────────────────────────────┐
+│  CONFIG (per-profile)                                       │
+│  ├─ auto_approve: bool          (Ctrl+A toggle)             │
+│  ├─ always_allow: Vec<String>   (light tools)               │
+│  ├─ always_restrict: Vec<String>(never auto-approved)       │
+│  └─ main_agent vs worker: separate configs                  │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│  COGNITION (pure)                                           │
+│  ├─ Parse LLM response → AgentDecision::CallTool            │
+│  └─ If LLM sends {"c": true} → RequestApproval (explicit)   │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│  RUNTIME (side effects)                                     │
+│  ├─ Check approval_policy:                                  │
+│  │   1. IF tool in always_restrict → RequestApproval        │
+│  │   2. ELIF tool in always_allow → Execute                 │
+│  │   3. ELIF auto_approve ON → Execute                      │
+│  │   4. ELSE → RequestApproval                              │
+│  └─ ApprovalCapability checks auto_approve flag             │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-**Problem Flow**:
-1. User asks for web search
-2. Cognition engine parses response → `AgentDecision::CallTool`
-3. `web_search` not in dangerous list → NO approval requested
-4. Kernel adapter converts to `Intent::CallTool`
-5. Runtime executes tool immediately
-6. **TUI's `auto_approve` flag is IGNORED!**
+**Configuration Example**:
+```toml
+[profiles.default.permissions.main_agent]
+always_allow = ["read_file", "list_files", "git_status"]
+always_restrict = ["shell", "write_file", "rm", "sudo"]
 
-**Root Cause**: Approval decision is made in cognition layer, but the runtime's approval capability and TUI's `auto_approve` setting are not consulted.
+[profiles.worker.permissions.main_agent]
+always_allow = []
+always_restrict = ["shell", "rm", "sudo"]
+```
 
-**Impact**: Tools like `web_search`, `read_file`, `git_status` bypass approval entirely, even when user has auto-approve OFF.
-
-**Recommended Fix**: Move approval check to runtime layer:
-- Cognition should ALWAYS emit `AgentDecision::CallTool`
-- Runtime checks `ApprovalCapability` before executing
-- Runtime's decision respects user settings (auto-approve OFF = request approval for all tools)
-
-**Workaround**: Add all tools to `dangerous_tools` list in `llm_engine.rs` (not recommended for long-term).
+**TUI Integration**: Ctrl+A toggles shared `Arc<AtomicBool>` that both TUI and approval capability check.
 
 ---
 

@@ -8,7 +8,6 @@ pub mod decision;
 pub mod engine;
 pub mod error;
 pub mod history;
-pub mod parser;
 pub mod llm_engine;
 
 /// Adapter to bridge old CognitiveEngine to new AgencyKernel contract
@@ -24,4 +23,3 @@ pub use engine::*;
 pub use error::*;
 pub use history::*;
 pub use llm_engine::LLMBasedEngine;
-pub use parser::{ResponseParser, ParsedResponse, ParseError};

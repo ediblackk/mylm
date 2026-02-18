@@ -172,7 +172,7 @@ async fn handle_agent_event(
             app.current_response.push_str(&content);
             
             // Extract partial "t" and "f" values from streaming JSON
-            use mylm_core::agent::cognition::parser::ShortKeyParser;
+            use mylm_core::agent::types::parser::ShortKeyParser;
             let parser = ShortKeyParser::new();
             let (thought, final_answer, _is_complete) = parser.extract_streaming_content(&app.current_response);
             

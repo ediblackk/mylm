@@ -35,7 +35,7 @@ use crate::agent::runtime::impls::{
 };
 use crate::agent::runtime::tools::ToolRegistry;
 use crate::memory::store::VectorStore;
-use crate::llm::LlmClient;
+use crate::provider::LlmClient;
 use std::sync::Arc;
 
 /// Agent builder - constructs fully configured agents

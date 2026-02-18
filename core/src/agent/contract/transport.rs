@@ -9,10 +9,8 @@
 
 use async_trait::async_trait;
 
-use super::{
-    envelope::KernelEventEnvelope,
-    ContractError,
-};
+use crate::agent::types::{KernelEventEnvelope, AgentError};
+use super::ContractError;
 
 /// EventTransport trait - abstracts event source/sink
 ///
@@ -69,7 +67,7 @@ pub enum TransportError {
     Disconnected { reason: String },
 
     /// Publish failed
-    PublishFailed { event_id: super::ids::EventId, error: String },
+    PublishFailed { event_id: super::EventId, error: String },
 
     /// Receive failed
     ReceiveFailed { error: String },
@@ -126,7 +124,7 @@ pub struct TransportCapabilities {
     pub delivery_guarantee: DeliveryGuarantee,
 
     /// Ordering guarantee
-    pub ordering_guarantee: super::envelope::OrderingGuarantee,
+    pub ordering_guarantee: crate::agent::types::envelope::OrderingGuarantee,
 
     /// Supports persistence (replay)
     pub supports_persistence: bool,
@@ -148,7 +146,7 @@ impl TransportCapabilities {
             can_publish: true,
             can_receive: true,
             delivery_guarantee: DeliveryGuarantee::AtLeastOnce,
-            ordering_guarantee: super::envelope::OrderingGuarantee::Causal,
+            ordering_guarantee: crate::agent::types::envelope::OrderingGuarantee::Causal,
             supports_persistence: true,
             supports_broadcast: true,
             max_message_size: 0,

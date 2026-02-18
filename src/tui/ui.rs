@@ -2,7 +2,7 @@
 use crate::tui::app::state::AppStateContainer as App;
 use crate::tui::types::{AppState, Focus, JobStatus, ActionType};
 use crate::tui::help::HelpSystem;
-use mylm_core::llm::chat::MessageRole;
+use mylm_core::provider::chat::MessageRole;
 use std::sync::atomic::Ordering;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -892,7 +892,7 @@ fn render_chat(frame: &mut Frame, app: &mut App, area: Rect) {
     // Add action stamps as conversation items at the end
     let recent_stamps = app.context_manager.recent_stamps(10);
     if !recent_stamps.is_empty() {
-        use mylm_core::context::action_stamp::ActionStampType;
+        use mylm_core::ui::ActionStampType;
         
         // Add a small header for stamps section
         all_visual_lines.push(VisualLineInfo { 

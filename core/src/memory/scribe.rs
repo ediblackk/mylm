@@ -28,8 +28,8 @@ use tokio::sync::Mutex;
 use anyhow::{Result, Context};
 use serde_json;
 use serde::{Deserialize, Serialize};
-use crate::llm::LlmClient;
-use crate::llm::chat::{ChatMessage, ChatRequest};
+use crate::provider::LlmClient;
+use crate::provider::chat::{ChatMessage, ChatRequest};
 use crate::memory::journal::{Journal, InteractionType};
 use crate::memory::store::{VectorStore, MemoryType};
 

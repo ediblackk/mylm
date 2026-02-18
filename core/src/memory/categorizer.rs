@@ -1,4 +1,4 @@
-use crate::llm::{LlmClient, chat::{ChatMessage, ChatRequest}};
+use crate::provider::{LlmClient, chat::{ChatMessage, ChatRequest}};
 use crate::memory::store::MemoryCategory;
 use anyhow::{Result, Context};
 use std::sync::Arc;

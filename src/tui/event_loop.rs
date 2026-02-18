@@ -17,7 +17,7 @@ pub async fn handle_key_event(app: &mut AppStateContainer, key: KeyEvent) -> Loo
                     if let Some((intent_id, tool_name, _)) = app.pending_approval.take() {
                         if let Some(ref input_tx) = app.input_tx {
                             use mylm_core::agent::contract::session::UserInput;
-                            use mylm_core::agent::contract::ids::IntentId;
+                            use mylm_core::agent::types::ids::IntentId;
                             let _ = input_tx.send(UserInput::Approval {
                                 intent_id: IntentId::new(intent_id),
                                 approved: true,
@@ -35,7 +35,7 @@ pub async fn handle_key_event(app: &mut AppStateContainer, key: KeyEvent) -> Loo
                     if let Some((intent_id, tool_name, _)) = app.pending_approval.take() {
                         if let Some(ref input_tx) = app.input_tx {
                             use mylm_core::agent::contract::session::UserInput;
-                            use mylm_core::agent::contract::ids::IntentId;
+                            use mylm_core::agent::types::ids::IntentId;
                             let _ = input_tx.send(UserInput::Approval {
                                 intent_id: IntentId::new(intent_id),
                                 approved: false,

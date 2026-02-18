@@ -1,7 +1,7 @@
 //! Slash command handling for the terminal UI
 use crate::tui::app::state::AppStateContainer;
 use crate::tui::types::{TuiEvent, TimestampedChatMessage};
-use mylm_core::llm::chat::ChatMessage;
+use mylm_core::provider::chat::ChatMessage;
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -173,7 +173,7 @@ impl AppStateContainer {
             
             let _ = event_tx_clone.send(TuiEvent::AgentResponse(
                 ChatMessage::assistant(message),
-                mylm_core::llm::TokenUsage::default()
+                mylm_core::provider::TokenUsage::default()
             ));
         });
     }

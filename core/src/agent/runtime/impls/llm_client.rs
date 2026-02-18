@@ -9,8 +9,8 @@ use crate::agent::runtime::{
 };
 use crate::agent::types::intents::{LLMRequest, Role};
 use crate::agent::types::events::LLMResponse;
-use crate::llm::LlmClient;
-use crate::llm::chat::{ChatRequest, ChatMessage};
+use crate::provider::LlmClient;
+use crate::provider::chat::{ChatRequest, ChatMessage};
 use std::sync::Arc;
 use std::pin::Pin;
 use futures::{Stream, StreamExt};
@@ -139,23 +139,23 @@ impl LLMCapability for LlmClientCapability {
             
             while let Some(event) = stream.next().await {
                 match event {
-                    Ok(crate::llm::chat::StreamEvent::Content(content)) => {
+                    Ok(crate::provider::chat::StreamEvent::Content(content)) => {
                         yield StreamChunk {
                             content,
                             is_final: false,
                         };
                     }
-                    Ok(crate::llm::chat::StreamEvent::Done) => {
+                    Ok(crate::provider::chat::StreamEvent::Done) => {
                         yield StreamChunk {
                             content: String::new(),
                             is_final: true,
                         };
                         break;
                     }
-                    Ok(crate::llm::chat::StreamEvent::Usage(_)) => {
+                    Ok(crate::provider::chat::StreamEvent::Usage(_)) => {
                         // Usage info at end, ignore for now
                     }
-                    Ok(crate::llm::chat::StreamEvent::Error(msg)) => {
+                    Ok(crate::provider::chat::StreamEvent::Error(msg)) => {
                         crate::error_log!("[LLM_CLIENT] Stream error from provider: {}", msg);
                         // Yield error so fallback can be triggered
                         Err(LLMError::new(msg))?;

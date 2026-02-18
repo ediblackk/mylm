@@ -8,9 +8,9 @@
 //! - `Config` (app settings) → `RuntimeConfig` (for agent runtime)
 
 use crate::config::{Config, ProviderType};
-use crate::llm::{LlmConfig, LlmProvider};
-use crate::agent::contract::config::KernelConfig;
-use crate::agent::contract::runtime::RuntimeConfig;
+use crate::provider::{LlmConfig, LlmProvider};
+use crate::agent::types::KernelConfig;
+use crate::agent::runtime::RuntimeConfig;
 
 /// Error type for config bridge operations
 #[derive(Debug, thiserror::Error)]
@@ -121,7 +121,7 @@ pub fn config_to_kernel_config(
     config: &Config,
     profile_name: &str,
 ) -> Result<KernelConfig, BridgeError> {
-    use crate::agent::contract::config::PromptConfig;
+    use crate::agent::types::PromptConfig;
     
     let profile = config.profiles.get(profile_name)
         .ok_or_else(|| BridgeError::ProfileNotFound(profile_name.to_string()))?;

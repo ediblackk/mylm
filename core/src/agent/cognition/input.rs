@@ -37,7 +37,7 @@ pub enum InputEvent {
     LLMResponse(LLMResponse),
     
     /// Runtime error occurred (e.g., LLM request failed)
-    RuntimeError { intent_id: crate::agent::contract::ids::IntentId, error: String },
+    RuntimeError { intent_id: crate::agent::types::ids::IntentId, error: String },
     
     /// Shutdown requested
     Shutdown,

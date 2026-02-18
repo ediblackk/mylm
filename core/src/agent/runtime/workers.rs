@@ -13,9 +13,9 @@ pub enum WorkerStatus {
     Cancelled,
 }
 
-/// Worker handle
+/// Job handle for tracking background jobs
 #[derive(Debug, Clone)]
-pub struct WorkerHandle {
+pub struct JobHandle {
     pub id: JobId,
     pub status: WorkerStatus,
 }
@@ -23,7 +23,7 @@ pub struct WorkerHandle {
 /// Worker runtime - manages background jobs
 #[derive(Debug, Default)]
 pub struct WorkerRuntime {
-    workers: RwLock<HashMap<JobId, WorkerHandle>>,
+    workers: RwLock<HashMap<JobId, JobHandle>>,
 }
 
 impl WorkerRuntime {
@@ -33,8 +33,8 @@ impl WorkerRuntime {
         }
     }
     
-    pub async fn spawn(&self, id: JobId) -> WorkerHandle {
-        let handle = WorkerHandle {
+    pub async fn spawn(&self, id: JobId) -> JobHandle {
+        let handle = JobHandle {
             id: id.clone(),
             status: WorkerStatus::Running,
         };
@@ -48,7 +48,7 @@ impl WorkerRuntime {
         }
     }
     
-    pub async fn list_active(&self) -> Vec<WorkerHandle> {
+    pub async fn list_active(&self) -> Vec<JobHandle> {
         self.workers
             .read()
             .await

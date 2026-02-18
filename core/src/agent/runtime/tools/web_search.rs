@@ -165,7 +165,7 @@ impl WebSearchTool {
     /// Reload configuration from the global config file
     /// This allows the tool to pick up changes made via the TUI/settings menu
     pub fn reload_config_from_disk(&mut self) {
-        use crate::config::store::Config;
+        use crate::config::Config;
         
         let config = Config::load_or_default();
         let profile = config.active_profile();
@@ -399,7 +399,7 @@ impl WebSearchTool {
     /// 3. When Kimi returns `finish_reason: "tool_calls"` with `$web_search`, echo back the arguments
     /// 4. Kimi performs the search internally and returns results in the follow-up response
     async fn search_kimi(&self, query: &str, api_key: Option<&str>) -> Result<ToolResult, ToolError> {
-        use crate::llm::{
+        use crate::provider::{
             chat::{ChatFunction, ChatMessage, ChatRequest, ChatTool},
             LlmClient, LlmConfig, LlmProvider,
         };
@@ -716,7 +716,7 @@ impl ToolCapability for WebSearchTool {
         call: ToolCall,
     ) -> Result<ToolResult, ToolError> {
         // Reload config from disk to pick up any changes made via TUI/settings
-        let config = crate::config::store::Config::load_or_default();
+        let config = crate::config::Config::load_or_default();
         let profile = config.active_profile();
         let enabled = profile.web_search.enabled;
         

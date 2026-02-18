@@ -11,7 +11,7 @@ pub use crate::tui::types::{
     TimestampedChatMessage,
 };
 use mylm_core::agent::contract::session::{OutputEvent, UserInput};
-use mylm_core::context::ContextManager;
+use mylm_core::conversation::ContextManager;
 use mylm_core::memory::graph::MemoryGraph;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -283,7 +283,7 @@ impl AppStateContainer {
 
         // Create context manager with actual config values and pricing
         // System prompt tokens are estimated at ~800 (tools + instructions + date)
-        let ctx_config = mylm_core::context::ContextConfig::new(max_ctx)
+        let ctx_config = mylm_core::conversation::ContextConfig::new(max_ctx)
             .with_pricing(input_price, output_price);
         let context_manager = ContextManager::new(ctx_config);
 

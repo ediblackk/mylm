@@ -10,12 +10,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::agent::contract::{
-    graph::IntentGraph,
-    observations::{Observation, ExecutionSummary},
-    ids::IntentId,
-    AgencyRuntime,
-    runtime::RuntimeError,
+    IntentGraph, IntentId, Observation, AgencyRuntime, AgencyRuntimeError,
 };
+use crate::agent::types::observations::ExecutionSummary;
 
 /// DAG execution result
 #[derive(Debug)]
@@ -25,7 +22,7 @@ pub struct DagExecutionResult {
     /// Execution summary
     pub summary: ExecutionSummary,
     /// Any errors that occurred
-    pub errors: Vec<(IntentId, RuntimeError)>,
+    pub errors: Vec<(IntentId, AgencyRuntimeError)>,
 }
 
 /// Executes a DAG of intents respecting dependencies
@@ -33,7 +30,7 @@ pub async fn execute_dag<R: AgencyRuntime + 'static>(
     runtime: Arc<R>,
     graph: &IntentGraph,
     max_parallel: usize,
-) -> Result<DagExecutionResult, RuntimeError> {
+) -> Result<DagExecutionResult, AgencyRuntimeError> {
     let completed = Arc::new(Mutex::new(HashSet::<IntentId>::new()));
     let in_flight = Arc::new(Mutex::new(HashSet::<IntentId>::new()));
     let mut observations = Vec::new();
@@ -109,7 +106,7 @@ pub async fn execute_dag<R: AgencyRuntime + 'static>(
                     errors.push((id, e));
                 }
                 Err(e) => {
-                    return Err(RuntimeError::Internal {
+                    return Err(AgencyRuntimeError::Internal {
                         message: format!("Task panic: {:?}", e),
                     });
                 }
@@ -136,7 +133,7 @@ impl DagExecutor {
     pub async fn execute<R: AgencyRuntime + 'static>(
         runtime: Arc<R>,
         graph: &IntentGraph,
-    ) -> Result<DagExecutionResult, RuntimeError> {
+    ) -> Result<DagExecutionResult, AgencyRuntimeError> {
         execute_dag(runtime, graph, 10).await
     }
 
@@ -145,7 +142,7 @@ impl DagExecutor {
         runtime: Arc<R>,
         graph: &IntentGraph,
         max_parallel: usize,
-    ) -> Result<DagExecutionResult, RuntimeError> {
+    ) -> Result<DagExecutionResult, AgencyRuntimeError> {
         execute_dag(runtime, graph, max_parallel).await
     }
 }
@@ -153,19 +150,15 @@ impl DagExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::contract::{
-        intents::Intent,
-        graph::IntentGraphBuilder,
-        ids::IntentId,
-        events::ToolResult,
-    };
+    use crate::agent::contract::{Intent, IntentId, IntentGraphBuilder, TelemetryEvent, HealthStatus};
+    use crate::agent::types::events::ToolResult;
     use async_trait::async_trait;
 
     struct MockRuntime;
 
     #[async_trait]
     impl AgencyRuntime for MockRuntime {
-        async fn execute(&self, intent: Intent) -> Result<Observation, RuntimeError> {
+        async fn execute(&self, intent: Intent) -> Result<Observation, AgencyRuntimeError> {
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
             
             match intent {
@@ -190,21 +183,21 @@ mod tests {
         async fn execute_dag(
             &self,
             _graph: &IntentGraph,
-        ) -> Result<Vec<(IntentId, Observation)>, RuntimeError> {
+        ) -> Result<Vec<(IntentId, Observation)>, AgencyRuntimeError> {
             // Simple stub - just return empty results
             Ok(Vec::new())
         }
 
-        fn subscribe_telemetry(&self) -> tokio::sync::broadcast::Receiver<crate::agent::contract::runtime::TelemetryEvent> {
+        fn subscribe_telemetry(&self) -> tokio::sync::broadcast::Receiver<TelemetryEvent> {
             let (tx, _) = tokio::sync::broadcast::channel(1);
             tx.subscribe()
         }
 
-        async fn health_check(&self) -> crate::agent::contract::runtime::HealthStatus {
-            crate::agent::contract::runtime::HealthStatus::Healthy
+        async fn health_check(&self) -> HealthStatus {
+            HealthStatus::Healthy
         }
 
-        async fn shutdown(&self) -> Result<(), RuntimeError> {
+        async fn shutdown(&self) -> Result<(), AgencyRuntimeError> {
             Ok(())
         }
     }
