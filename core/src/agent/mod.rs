@@ -51,7 +51,7 @@
 //!     .with_llm_client(llm_client)
 //!     .with_tools(ToolRegistry::new())
 //!     .with_terminal_approval()
-//!     .build_with_llm_engine();
+//!     .build_with_planner();
 //!
 //! // Run session
 //! let (tx, rx) = mpsc::channel(10);
@@ -75,19 +75,21 @@ pub mod types;
 pub mod cognition;
 pub mod runtime;
 pub mod session;
+pub mod tools;
 pub mod builder;
 pub mod worker;
 pub mod factory;
 pub mod memory;
+pub mod identity;
+pub mod commonbox;
+
+// Governance is now part of runtime::governance
 
 /// Contract module - Core type definitions and traits
 ///
-/// This module defines the stable contracts between:
-/// - AgencyKernel (pure, sync, deterministic)
-/// - AgencyRuntime (async, side effects)
-/// - EventTransport (pluggable event queue)
-/// - Session (orchestration with dynamic DAG expansion)
-pub mod contract;
+// Note: The contract module has been moved to runtime/ and types/.
+// Use runtime::orchestrator for AgencyKernel, runtime::session for Session,
+// and runtime::transport for EventTransport.
 
 // Selective re-exports to avoid ambiguity
 pub use types::{
@@ -101,13 +103,14 @@ pub use cognition::{
     InputEvent, ApprovalOutcome, LLMResponse,
     AgentDecision, Transition, CognitiveEngine,
     CognitiveError,
-    LLMBasedEngine,
+    Planner, LegacyPlanner,
 };
 
 pub use runtime::{
     AgentRuntime, RuntimeContext, RuntimeError, TraceId,
     CapabilityGraph,
     LLMCapability, ToolCapability, ApprovalCapability, WorkerCapability, TelemetryCapability,
+    UserInput, OutputEvent,
 };
 
 pub use builder::{AgentBuilder, presets};

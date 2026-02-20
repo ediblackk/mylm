@@ -5,7 +5,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
 
 use crate::tui::app::state::{AppState, AppStateContainer, Focus};
-use crate::tui::app::types::TimestampedMessage;
+use crate::tui::app::types::TimestampedChatMessage;
 
 /// Handle key events
 pub async fn handle_key_event(app: &mut AppStateContainer, key: KeyEvent) -> LoopAction {
@@ -13,33 +13,25 @@ pub async fn handle_key_event(app: &mut AppStateContainer, key: KeyEvent) -> Loo
     match &app.state {
         AppState::AwaitingApproval { tool: _tool, .. } => {
             match key.code {
-                // Ctrl+A: Toggle auto-approve even while waiting for approval
-                KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    let current = app.auto_approve.load(std::sync::atomic::Ordering::SeqCst);
-                    app.auto_approve.store(!current, std::sync::atomic::Ordering::SeqCst);
-                    return LoopAction::Continue;
-                }
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    if let Some((intent_id, tool_name, _)) = app.pending_approval.take() {
-                        // First, respond to the approval capability (this unblocks the runtime)
-                        if let Some(ref handle) = app.approval_handle {
-                            if let Err(e) = handle.approve().await {
-                                mylm_core::error_log!("[EVENT_LOOP] Failed to approve: {}", e);
-                            }
+                    // Get the pending approval with response channel first
+                    if let Some(pending) = app.pending_approval_with_response.take() {
+                        let tool_name = pending.request.tool.clone();
+                        
+                        // Send approval response through the oneshot channel (unblocks runtime)
+                        use mylm_core::agent::types::events::ApprovalOutcome;
+                        match pending.response_tx.send(ApprovalOutcome::Granted) {
+                            Ok(_) => mylm_core::info_log!("[EVENT_LOOP] Approval response sent successfully"),
+                            Err(_) => mylm_core::error_log!("[EVENT_LOOP] Failed to send approval - receiver dropped"),
                         }
                         
-                        // Also send to session input (for state tracking)
-                        if let Some(ref input_tx) = app.input_tx {
-                            use mylm_core::agent::contract::session::UserInput;
-                            use mylm_core::agent::types::ids::IntentId;
-                            let _ = input_tx.send(UserInput::Approval {
-                                intent_id: IntentId::new(intent_id),
-                                approved: true,
-                            }).await;
-                        }
+                        // Clear pending approval state (no need to send UserInput::Approval - 
+                        // the runtime will return Observation::ApprovalCompleted which becomes
+                        // KernelEvent::ApprovalGiven through the proper observation path)
+                        let _ = app.pending_approval.take();
                         
                         // Add approval confirmation to chat
-                        app.chat_history.push(TimestampedMessage::assistant(format!(
+                        app.chat_history.push(TimestampedChatMessage::assistant(format!(
                             "✅ {} approved", tool_name
                         )));
                     }
@@ -47,26 +39,24 @@ pub async fn handle_key_event(app: &mut AppStateContainer, key: KeyEvent) -> Loo
                     return LoopAction::Continue;
                 }
                 KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                    if let Some((intent_id, tool_name, _)) = app.pending_approval.take() {
-                        // First, respond to the approval capability (this unblocks the runtime)
-                        if let Some(ref handle) = app.approval_handle {
-                            if let Err(e) = handle.deny(None).await {
-                                mylm_core::error_log!("[EVENT_LOOP] Failed to deny: {}", e);
-                            }
+                    // Get the pending approval with response channel first
+                    if let Some(pending) = app.pending_approval_with_response.take() {
+                        let tool_name = pending.request.tool.clone();
+                        
+                        // Send denial response through the oneshot channel (unblocks runtime)
+                        use mylm_core::agent::types::events::ApprovalOutcome;
+                        match pending.response_tx.send(ApprovalOutcome::Denied { reason: Some("User denied".to_string()) }) {
+                            Ok(_) => mylm_core::info_log!("[EVENT_LOOP] Denial response sent successfully"),
+                            Err(_) => mylm_core::error_log!("[EVENT_LOOP] Failed to send denial - receiver dropped"),
                         }
                         
-                        // Also send to session input (for state tracking)
-                        if let Some(ref input_tx) = app.input_tx {
-                            use mylm_core::agent::contract::session::UserInput;
-                            use mylm_core::agent::types::ids::IntentId;
-                            let _ = input_tx.send(UserInput::Approval {
-                                intent_id: IntentId::new(intent_id),
-                                approved: false,
-                            }).await;
-                        }
+                        // Clear pending approval state (no need to send UserInput::Approval - 
+                        // the runtime will return Observation::ApprovalCompleted which becomes
+                        // KernelEvent::ApprovalGiven through the proper observation path)
+                        let _ = app.pending_approval.take();
                         
                         // Add denial confirmation to chat
-                        app.chat_history.push(TimestampedMessage::assistant(format!(
+                        app.chat_history.push(TimestampedChatMessage::assistant(format!(
                             "❌ {} cancelled", tool_name
                         )));
                     }
@@ -119,21 +109,6 @@ pub async fn handle_key_event(app: &mut AppStateContainer, key: KeyEvent) -> Loo
     
     // Global shortcuts
     match key.code {
-        // 'q' to close overlay views
-        KeyCode::Char('q') => {
-            if app.show_job_detail {
-                app.show_job_detail = false;
-                return LoopAction::Continue;
-            }
-            if app.show_help_view {
-                app.show_help_view = false;
-                return LoopAction::Continue;
-            }
-            if app.show_memory_view {
-                app.show_memory_view = false;
-                return LoopAction::Continue;
-            }
-        }
         KeyCode::F(1) => {
             app.show_help_view = !app.show_help_view;
             return LoopAction::Continue;
@@ -160,10 +135,6 @@ pub async fn handle_key_event(app: &mut AppStateContainer, key: KeyEvent) -> Loo
             return LoopAction::Continue;
         }
         KeyCode::Esc => {
-            if app.show_job_detail {
-                app.show_job_detail = false;
-                return LoopAction::Continue;
-            }
             if app.show_help_view {
                 app.show_help_view = false;
                 return LoopAction::Continue;
@@ -242,7 +213,8 @@ async fn handle_chat_focus(app: &mut AppStateContainer, key: KeyEvent) -> LoopAc
             mylm_core::info_log!("[EVENT_LOOP] Enter pressed in chat focus");
             if !app.chat_input.is_empty() {
                 mylm_core::debug_log!("[EVENT_LOOP] Input not empty, calling submit_message");
-                let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<crate::tui::app::types::TuiEvent>();
+                // Create a dummy event sender since we're handling directly
+                let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
                 app.submit_message(tx).await;
             } else {
                 mylm_core::debug_log!("[EVENT_LOOP] Input is empty, ignoring Enter");
@@ -433,8 +405,8 @@ fn handle_jobs_focus(app: &mut AppStateContainer, key: KeyEvent) -> LoopAction {
 pub fn handle_mouse_event(app: &mut AppStateContainer, mouse: MouseEvent) {
     match mouse.kind {
         MouseEventKind::Down(_) => {
-            // TODO: Implement pane focus on click
-            // Requires tracking pane areas from last render
+            // Determine which pane was clicked
+            // This is simplified - in reality we'd need to track pane areas
         }
         MouseEventKind::Drag(_) => {
             if app.is_selecting {
@@ -448,15 +420,15 @@ pub fn handle_mouse_event(app: &mut AppStateContainer, mouse: MouseEvent) {
         }
         MouseEventKind::ScrollDown => {
             match app.focus {
-                Focus::Chat => app.scroll_chat_down(),
-                Focus::Terminal => app.scroll_terminal_down(),
+                Focus::Chat => app.scroll_chat_up(),
+                Focus::Terminal => app.scroll_terminal_up(),
                 _ => {}
             }
         }
         MouseEventKind::ScrollUp => {
             match app.focus {
-                Focus::Chat => app.scroll_chat_up(),
-                Focus::Terminal => app.scroll_terminal_up(),
+                Focus::Chat => app.scroll_chat_down(),
+                Focus::Terminal => app.scroll_terminal_down(),
                 _ => {}
             }
         }
@@ -489,7 +461,8 @@ async fn load_memory_graph(app: &mut AppStateContainer) {
     };
     
     // Create memory manager from config
-    // TODO: Cache the memory manager in App to avoid creating it on every F3 press
+    // This is a temporary solution - in the future, the memory manager should be 
+    // shared between the agent and the TUI
     let memory_manager = match AgentMemoryManager::new(memory_config).await {
         Ok(mm) => mm,
         Err(e) => {

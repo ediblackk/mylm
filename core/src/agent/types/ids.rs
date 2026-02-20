@@ -39,6 +39,11 @@ impl IntentId {
     pub fn intent_index(&self) -> u32 {
         (self.0 & 0xFFFFFFFF) as u32
     }
+
+    /// Create IntentId from monotonic sequence (simple, collision-free)
+    pub const fn from_seq(seq: u64) -> Self {
+        Self(seq)
+    }
 }
 
 impl std::fmt::Display for IntentId {

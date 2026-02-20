@@ -8,16 +8,19 @@ use std::sync::Arc;
 use crate::config::{Config, BridgeError, config_to_llm_config, config_to_kernel_config};
 use crate::provider::LlmClient;
 use crate::agent::{
-    // Contract types
-    contract::session::AgencySession,
-    cognition::kernel_adapter::CognitiveEngineAdapter,
-    runtime::contract_runtime::ContractRuntime,
-    runtime::impls::InMemoryTransport,
-    runtime::tools::ToolRegistry,
-    runtime::terminal::TerminalExecutor,
-    runtime::capability::ApprovalCapability,
+    // Session types
+    runtime::session::session::AgencySession,
+    runtime::session::ContractRuntime,
+    runtime::capabilities::InMemoryTransport,
+    tools::{ToolRegistry, DelegateTool},
+    runtime::core::terminal::TerminalExecutor,
+    runtime::core::ApprovalCapability,
+    runtime::core::LLMCapability,
+    // Coordination
+    commonbox::Commonbox,
     // Cognition
-    cognition::LLMBasedEngine,
+    cognition::Planner,
+    cognition::prompts::system::ToolDescription,
     // Memory
     memory::AgentMemoryManager,
 };
@@ -36,10 +39,38 @@ use crate::agent::{
 /// let factory = AgentSessionFactory::new(config);
 /// let session = factory.create_session("default").await?;
 /// ```
+/// Factory for creating agent sessions
+/// 
+/// Note: Clone is derived for creating child factories (e.g., for workers)
+/// without sharing the commonbox (to avoid circular dependencies).
+#[derive(Clone)]
 pub struct AgentSessionFactory {
     config: Config,
     terminal: Option<Arc<dyn TerminalExecutor>>,
     approval: Option<Arc<dyn ApprovalCapability>>,
+    /// Custom LLM capability for testing (optional)
+    llm: Option<Arc<dyn LLMCapability>>,
+    /// Commonbox for worker coordination (optional, enables delegate tool)
+    /// Not cloned - workers get their own factory without commonbox
+    #[allow(clippy::skip_vec_init)]
+    commonbox: Option<Arc<Commonbox>>,
+}
+
+/// Configuration for worker session creation
+#[derive(Debug, Clone)]
+pub struct WorkerSessionConfig {
+    /// Pre-approved tools for this worker
+    pub allowed_tools: Vec<String>,
+    /// Initial scratchpad content
+    pub scratchpad: Option<String>,
+    /// Output channel for worker events
+    pub output_tx: Option<tokio::sync::mpsc::Sender<crate::agent::runtime::session::OutputEvent>>,
+    /// Worker's objective
+    pub objective: String,
+    /// Instructions for the worker
+    pub instructions: Option<String>,
+    /// Tags for categorization
+    pub tags: Option<Vec<String>>,
 }
 
 /// Error type for factory operations
@@ -62,7 +93,27 @@ impl AgentSessionFactory {
             config,
             terminal: None,
             approval: None,
+            llm: None,
+            commonbox: None,
         }
+    }
+    
+    /// Enable worker spawning by providing a Commonbox
+    /// 
+    /// When set, the delegate tool will be available for spawning workers.
+    pub fn with_commonbox(mut self, commonbox: Arc<Commonbox>) -> Self {
+        self.commonbox = Some(commonbox);
+        self
+    }
+    
+    /// Set a custom LLM capability for testing
+    /// 
+    /// When set, this LLM capability will be used instead of creating
+    /// a real LlmClient from configuration. Useful for testing with
+    /// mock LLMs.
+    pub fn with_llm(mut self, llm: Arc<dyn LLMCapability>) -> Self {
+        self.llm = Some(llm);
+        self
     }
     
     /// Set a custom terminal executor for the session
@@ -83,6 +134,28 @@ impl AgentSessionFactory {
         self
     }
     
+    /// Create ContractRuntime with optional custom LLM and memory provider
+    fn create_runtime(
+        &self, 
+        llm_client: Arc<LlmClient>, 
+        tools: Arc<ToolRegistry>,
+        memory_provider: Option<Arc<dyn crate::agent::memory::MemoryProvider>>,
+    ) -> ContractRuntime {
+        match &self.llm {
+            Some(custom_llm) => {
+                crate::info_log!("[FACTORY] Using custom LLM capability");
+                // Custom LLM doesn't support memory injection currently
+                if memory_provider.is_some() {
+                    crate::warn_log!("[FACTORY] Memory provider not supported with custom LLM capability");
+                }
+                ContractRuntime::with_llm_capability(Arc::clone(custom_llm), tools)
+            }
+            None => {
+                ContractRuntime::with_tools_and_memory(llm_client, tools, memory_provider)
+            }
+        }
+    }
+    
     /// Create a new session for the specified profile
     /// 
     /// # Arguments
@@ -95,7 +168,7 @@ impl AgentSessionFactory {
         profile_name: &str,
     ) -> Result<
         AgencySession<
-            CognitiveEngineAdapter<LLMBasedEngine>,
+            Planner,
             ContractRuntime,
             InMemoryTransport,
         >,
@@ -109,40 +182,46 @@ impl AgentSessionFactory {
         
         // Step 3: Create ToolRegistry with all default tools
         let tool_registry = ToolRegistry::new();
-        let tool_descriptions: Vec<_> = tool_registry.descriptions()
+        
+        // Step 3b: Add delegate tool if commonbox is configured (enables worker spawning)
+        let tool_registry = if let Some(ref commonbox) = self.commonbox {
+            crate::info_log!("[FACTORY] Enabling delegate tool for worker spawning");
+            
+            // Create worker factory (same config but without commonbox to avoid recursion)
+            let worker_factory = Self {
+                config: self.config.clone(),
+                terminal: self.terminal.clone(),
+                approval: self.approval.clone(),
+                llm: self.llm.clone(),
+                commonbox: None,
+            };
+            
+            // Create delegate tool - it will use the registry for parent tool lookup
+            let parent_tools: Arc<dyn crate::agent::runtime::core::ToolCapability> = Arc::new(tool_registry);
+            let delegate = DelegateTool::new(
+                Arc::clone(commonbox),
+                parent_tools,
+                worker_factory,
+            );
+            
+            // Create new registry with delegate enabled
+            ToolRegistry::new().with_delegate(Arc::new(delegate))
+        } else {
+            tool_registry
+        };
+        
+        let tool_descriptions: Vec<ToolDescription> = tool_registry.descriptions()
             .into_iter()
-            .map(|d| crate::agent::cognition::llm_engine::ToolDescription {
-                name: d.name.to_string(),
-                description: d.description.to_string(),
-                usage: d.usage.to_string(),
-            })
+            .map(|d| d.into())
             .collect();
         crate::info_log!("[FACTORY] Available tools: {:?}", tool_descriptions.iter().map(|d| &d.name).collect::<Vec<_>>());
         
         // Step 4: Create output channel for streaming events (shared between session and runtime)
         let (output_tx, _) = tokio::sync::broadcast::channel(100);
         
-        // Step 5: Create ContractRuntime with LLM client, tools, and output sender
-        let mut runtime = ContractRuntime::with_tools(llm_client.clone(), Arc::new(tool_registry))
-            .with_output_sender(output_tx.clone());
-        
-        // Step 4b: Attach terminal executor if provided
-        if let Some(ref terminal) = self.terminal {
-            crate::info_log!("[FACTORY] Attaching terminal executor to runtime");
-            runtime = runtime.with_terminal(Arc::clone(terminal));
-        }
-        
-        // Step 4c: Attach approval capability if provided
-        if let Some(ref approval) = self.approval {
-            crate::info_log!("[FACTORY] Attaching approval capability to runtime");
-            runtime = runtime.with_approval(Arc::clone(approval));
-        }
-        
-        // Step 5: Create kernel config from profile
-        let _kernel_config = config_to_kernel_config(&self.config, profile_name)?;
-        
         // Step 6: Create memory manager and provider (if enabled)
         use crate::config::agent::MemoryConfig;
+        use crate::agent::memory::AgentMemoryProvider;
         crate::info_log!("[FACTORY] features.memory = {}", self.config.features.memory);
         let memory_config = if self.config.features.memory {
             MemoryConfig {
@@ -172,20 +251,41 @@ impl AgentSessionFactory {
             None
         };
         
-        // Step 7: Create cognitive engine with dynamic tools
-        // NOTE: Memory is now handled at runtime layer via Intent::Remember
-        let engine = LLMBasedEngine::new()
-            .with_tool_descriptions(tool_descriptions);
+        // Create memory provider wrapper if manager exists
+        let memory_provider: Option<Arc<dyn crate::agent::memory::MemoryProvider>> = memory_manager
+            .as_ref()
+            .map(|mm| Arc::new(AgentMemoryProvider::new(Arc::clone(mm))) as Arc<dyn crate::agent::memory::MemoryProvider>);
         
-        // Step 8: Wrap engine in adapter to implement AgencyKernel trait
-        let kernel = CognitiveEngineAdapter::new(engine);
+        // Step 5: Create ContractRuntime with LLM client, tools, memory provider, and output sender
+        let mut runtime = self.create_runtime(llm_client.clone(), Arc::new(tool_registry), memory_provider)
+            .with_output_sender(output_tx.clone());
+        
+        // Step 4b: Attach terminal executor if provided
+        if let Some(ref terminal) = self.terminal {
+            crate::info_log!("[FACTORY] Attaching terminal executor to runtime");
+            runtime = runtime.with_terminal(Arc::clone(terminal));
+        }
+        
+        // Step 4c: Attach approval capability if provided
+        if let Some(ref approval) = self.approval {
+            crate::info_log!("[FACTORY] Attaching approval capability to runtime");
+            runtime = runtime.with_approval(Arc::clone(approval));
+        }
+        
+        // Step 7: Create kernel config from profile
+        let _kernel_config = config_to_kernel_config(&self.config, profile_name)?;
+        
+        // Step 8: Create planner directly with dynamic tools
+        // NOTE: Memory is now handled at runtime layer via Intent::Remember
+        let kernel = Planner::new()
+            .with_tool_descriptions(tool_descriptions);
         
         // Step 9: Create in-memory transport
         let transport = InMemoryTransport::new(100);
         
         // Step 10: Assemble the session with shared output channel and memory manager
         // CRITICAL: memory_manager is passed to session which owns it for the session lifetime
-        // The engine's MemoryProvider holds a Weak reference - this ensures the Arc stays alive
+        // The runtime's MemoryProvider holds a Weak reference - this ensures the Arc stays alive
         let session = AgencySession::new_with_memory(kernel, runtime, transport, output_tx, memory_manager);
         
         Ok(session)
@@ -196,7 +296,7 @@ impl AgentSessionFactory {
         &self,
     ) -> Result<
         AgencySession<
-            CognitiveEngineAdapter<LLMBasedEngine>,
+            Planner,
             ContractRuntime,
             InMemoryTransport,
         >,
@@ -211,13 +311,92 @@ impl AgentSessionFactory {
         &self,
     ) -> Result<
         AgencySession<
-            CognitiveEngineAdapter<LLMBasedEngine>,
+            Planner,
             ContractRuntime,
             InMemoryTransport,
         >,
         FactoryError,
     > {
         self.create_session("worker").await
+    }
+    
+    /// Create a worker session with specific configuration
+    ///
+    /// Applies worker-specific settings including:
+    /// - Tool restrictions (allowed_tools) - filters tool descriptions given to LLM
+    /// - Worker objective and instructions
+    /// - Terminal and approval capabilities from factory
+    pub async fn create_configured_worker_session(
+        &self,
+        worker_id: &str,
+        config: WorkerSessionConfig,
+    ) -> Result<
+        AgencySession<
+            Planner,
+            ContractRuntime,
+            InMemoryTransport,
+        >,
+        FactoryError,
+    > {
+        crate::info_log!("[FACTORY] Creating configured worker session for {} with {} allowed tools", 
+            worker_id, config.allowed_tools.len());
+        
+        // Step 1: Create LLM config from unified Config
+        let llm_config = config_to_llm_config(&self.config, "worker")?;
+        let llm_client = Arc::new(LlmClient::new(llm_config)?);
+        
+        // Step 2: Create tool registry with all tools
+        let tool_registry = ToolRegistry::new();
+        
+        // Step 3: Filter tool descriptions based on allowed_tools
+        let all_descriptions = tool_registry.descriptions();
+        let filtered_descriptions: Vec<ToolDescription> = if config.allowed_tools.is_empty() {
+            // No restrictions - use all tools
+            all_descriptions.into_iter().map(|d| d.into()).collect()
+        } else {
+            // Filter to only allowed tools
+            let allowed: std::collections::HashSet<String> = config.allowed_tools.iter().cloned().collect();
+            all_descriptions
+                .into_iter()
+                .filter(|d| allowed.iter().any(|a| a == d.name))
+                .map(|d| d.into())
+                .collect()
+        };
+        
+        crate::info_log!("[FACTORY] Worker {} allowed tools: {:?}", 
+            worker_id, filtered_descriptions.iter().map(|d| &d.name).collect::<Vec<_>>());
+        
+        // Step 4: Create output channel for streaming events
+        let (output_tx, _) = tokio::sync::broadcast::channel(100);
+        
+        // Step 5: Create ContractRuntime (workers don't use memory)
+        let mut runtime = self.create_runtime(llm_client.clone(), Arc::new(tool_registry), None)
+            .with_output_sender(output_tx.clone());
+        
+        // Step 6: Attach terminal executor if provided
+        if let Some(ref terminal) = self.terminal {
+            crate::info_log!("[FACTORY] Attaching terminal executor to worker runtime");
+            runtime = runtime.with_terminal(Arc::clone(terminal));
+        }
+        
+        // Step 7: Attach approval capability if provided
+        if let Some(ref approval) = self.approval {
+            crate::info_log!("[FACTORY] Attaching approval capability to worker runtime");
+            runtime = runtime.with_approval(Arc::clone(approval));
+        }
+        
+        // Step 8: Create kernel with filtered tool descriptions
+        let kernel = Planner::new()
+            .with_tool_descriptions(filtered_descriptions);
+        
+        // Step 9: Create transport
+        let transport = InMemoryTransport::new(100);
+        
+        // Step 10: Assemble session
+        let session = AgencySession::new_with_memory(kernel, runtime, transport, output_tx, None);
+        
+        crate::info_log!("[FACTORY] Worker session created for {}", worker_id);
+        Ok(session)
     }
     
     /// Get a reference to the config

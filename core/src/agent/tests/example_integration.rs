@@ -20,9 +20,9 @@ mod example {
     };
     use crate::agent::cognition::decision::{ToolCall, AgentExitReason, ApprovalRequest};
     use crate::agent::cognition::input::ApprovalOutcome;
-    use crate::agent::runtime::impls::SimpleToolExecutor;
-    use crate::agent::runtime::capability::ApprovalCapability;
-    use crate::agent::runtime::error::ApprovalError;
+    use crate::agent::runtime::capabilities::SimpleToolExecutor;
+    use crate::agent::runtime::core::ApprovalCapability;
+    use crate::agent::runtime::core::ApprovalError;
     use tokio::sync::mpsc;
     use futures::Stream;
 
@@ -97,8 +97,8 @@ mod example {
             Arc::new(MockLLM),
             Arc::new(SimpleToolExecutor::new()),
             Arc::new(MockApproval),
-            Arc::new(crate::agent::runtime::graph::StubWorkers),
-            Arc::new(crate::agent::runtime::graph::StubTelemetry),
+            Arc::new(crate::agent::runtime::stubs::StubWorkers),
+            Arc::new(crate::agent::runtime::stubs::StubTelemetry),
         );
         
         AgentRuntime::new(graph)

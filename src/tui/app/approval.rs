@@ -4,75 +4,98 @@
 //! Uses oneshot channels for request/response pattern.
 
 use async_trait::async_trait;
-use mylm_core::agent::runtime::{
-    capability::{ApprovalCapability, Capability},
-    context::RuntimeContext,
-    error::ApprovalError,
+use mylm_core::agent::runtime::core::{
+    ApprovalCapability, Capability, RuntimeContext, ApprovalError,
 };
 use mylm_core::agent::types::{
     intents::ApprovalRequest,
     events::ApprovalOutcome,
 };
+use tokio::sync::{mpsc, oneshot};
 use std::sync::Arc;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::Mutex;
 
-/// Pending approval request
+/// Pending approval request (sent to UI)
 #[derive(Debug)]
 pub struct PendingApproval {
     /// The approval request details
     pub request: ApprovalRequest,
-    /// Channel to send the response back
+    /// Channel sender for the response
     pub response_tx: oneshot::Sender<ApprovalOutcome>,
+}
+
+/// Internal storage for current pending approval
+#[derive(Debug, Clone)]
+struct CurrentPending {
+    /// The approval request details (stored for querying)
+    request: ApprovalRequest,
+    /// Whether a response has been sent
+    responded: bool,
 }
 
 /// TUI-based approval capability
 ///
-/// This capability stores pending approvals and waits for the UI
-/// to respond via the `ApprovalHandle`.
+/// This capability sends approval requests to the TUI via a channel
+/// and waits for the UI to respond via the `ApprovalHandle`.
+#[derive(Clone)]
 pub struct TuiApprovalCapability {
-    /// Current pending approval (if any)
-    current: Arc<Mutex<Option<PendingApproval>>>,
+    /// Sender for pending approvals to the UI
+    pending_tx: mpsc::Sender<PendingApproval>,
+    /// Current pending approval request (without sender - stored separately)
+    current: Arc<Mutex<Option<CurrentPending>>>,
     /// Auto-approve flag - when true, all approvals are auto-granted
     auto_approve: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl TuiApprovalCapability {
     /// Create a new TUI approval capability
-    pub fn new() -> Self {
-        Self {
-            current: Arc::new(Mutex::new(None)),
+    ///
+    /// Returns the capability and a receiver for pending approvals
+    pub fn new() -> (Self, mpsc::Receiver<PendingApproval>) {
+        let (pending_tx, pending_rx) = mpsc::channel(10);
+        let current = Arc::new(Mutex::new(None));
+        
+        (Self {
+            pending_tx,
+            current,
             auto_approve: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        }
+        }, pending_rx)
     }
-
+    
     /// Get the auto_approve flag for external toggling
     pub fn auto_approve(&self) -> Arc<std::sync::atomic::AtomicBool> {
         Arc::clone(&self.auto_approve)
     }
-
+    
     /// Respond to the current pending approval
     pub async fn respond(&self, outcome: ApprovalOutcome) -> Result<(), String> {
         let mut current = self.current.lock().await;
-
-        if let Some(pending) = current.take() {
-            pending
-                .response_tx
-                .send(outcome)
-                .map_err(|_| "Failed to send approval response - receiver dropped".to_string())?;
+        if let Some(ref mut pending) = *current {
+            if pending.responded {
+                return Err("Approval already responded to".to_string());
+            }
+            pending.responded = true;
+            // Note: The actual response is sent through the oneshot channel by the UI
+            // This method just marks it as responded in our tracking
             Ok(())
         } else {
             Err("No pending approval request".to_string())
         }
     }
-
+    
     /// Check if there's a pending approval
     pub async fn has_pending(&self) -> bool {
         self.current.lock().await.is_some()
     }
-
+    
     /// Get the current pending approval (without consuming it)
     pub async fn get_pending(&self) -> Option<ApprovalRequest> {
         self.current.lock().await.as_ref().map(|p| p.request.clone())
+    }
+    
+    /// Clear the current pending approval
+    pub async fn clear_pending(&self) {
+        *self.current.lock().await = None;
     }
 }
 
@@ -91,36 +114,42 @@ impl ApprovalCapability for TuiApprovalCapability {
     ) -> Result<ApprovalOutcome, ApprovalError> {
         // Check if auto-approve is enabled
         if self.auto_approve.load(std::sync::atomic::Ordering::SeqCst) {
-            mylm_core::info_log!(
-                "[TUI_APPROVAL] Auto-approve enabled, granting approval for '{}'",
-                req.tool
-            );
+            mylm_core::info_log!("[TUI_APPROVAL] Auto-approve enabled, granting approval for '{}'", req.tool);
             return Ok(ApprovalOutcome::Granted);
         }
-
+        
         // Create oneshot channel for response
-        let (response_tx, response_rx) = oneshot::channel();
-
-        // Create and store pending approval
+        let (tx, rx) = oneshot::channel();
+        
+        // Create pending approval with sender
         let pending = PendingApproval {
-            request: req,
-            response_tx,
+            request: req.clone(),
+            response_tx: tx,
         };
-
-        {
-            let mut current = self.current.lock().await;
-            *current = Some(pending);
+        
+        // Store request info in current (without sender)
+        *self.current.lock().await = Some(CurrentPending {
+            request: req,
+            responded: false,
+        });
+        
+        // Send to UI
+        if self.pending_tx.send(pending).await.is_err() {
+            self.clear_pending().await;
+            return Err(ApprovalError::new("Approval channel closed".to_string()));
         }
-
-        // Wait for user response via ApprovalHandle.respond()
-        match response_rx.await {
-            Ok(outcome) => Ok(outcome),
-            Err(_) => Err(ApprovalError::new("Approval response channel closed")),
+        
+        // Wait for response
+        match rx.await {
+            Ok(outcome) => {
+                self.clear_pending().await;
+                Ok(outcome)
+            }
+            Err(_) => {
+                self.clear_pending().await;
+                Err(ApprovalError::new("Approval response channel closed".to_string()))
+            }
         }
-    }
-
-    fn would_auto_approve(&self, _tool: &str, _args: &str) -> bool {
-        self.auto_approve.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -134,22 +163,17 @@ impl ApprovalHandle {
     pub fn new(capability: Arc<TuiApprovalCapability>) -> Self {
         Self { capability }
     }
-
-    /// Approve the pending request
-    pub async fn approve(&self) -> Result<(), String> {
-        self.capability.respond(ApprovalOutcome::Granted).await
+    
+    /// Get the underlying capability
+    pub fn capability(&self) -> &TuiApprovalCapability {
+        &self.capability
     }
-
-    /// Deny the pending request
-    pub async fn deny(&self, reason: Option<String>) -> Result<(), String> {
-        self.capability.respond(ApprovalOutcome::Denied { reason }).await
-    }
-
+    
     /// Check if there's a pending approval
     pub async fn has_pending(&self) -> bool {
         self.capability.has_pending().await
     }
-
+    
     /// Get pending approval details
     pub async fn get_pending(&self) -> Option<ApprovalRequest> {
         self.capability.get_pending().await

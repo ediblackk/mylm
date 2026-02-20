@@ -52,4 +52,18 @@ pub trait MemoryProvider: Send + Sync {
     /// 
     /// This should not block - the save happens asynchronously.
     fn remember(&self, content: &str);
+    
+    /// Build memory context from full conversation state
+    /// 
+    /// This receives the complete request context (history, scratchpad, system prompt)
+    /// and returns relevant memories to augment the prompt.
+    /// 
+    /// # Arguments
+    /// * `history` - Recent conversation messages (bounded window)
+    /// * `scratchpad` - Current working context/scratchpad
+    /// * `system_prompt` - Current system prompt being used
+    /// 
+    /// # Returns
+    /// Formatted memory context string, or empty string if no relevant memories
+    fn build_context(&self, history: &[crate::agent::types::intents::Message], scratchpad: &str, system_prompt: &str) -> String;
 }

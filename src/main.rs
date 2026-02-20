@@ -495,7 +495,7 @@ async fn setup_wizard(config: &mut Config) -> Result<()> {
 
 async fn run_tui_with_session(config: &Config) -> Result<tui::TuiResult> {
     
-    use mylm_core::agent::contract::Session;
+    use mylm_core::agent::runtime::Session;
     use tokio::sync::mpsc;
     
     mylm_core::info_log!("[MAIN] Starting TUI session (profile: {})", config.active_profile);
@@ -519,7 +519,7 @@ async fn run_tui_with_session(config: &Config) -> Result<tui::TuiResult> {
     };
     
     // Create job registry
-    let job_registry = tui::types::JobRegistry::new();
+    let job_registry = tui::app::types::JobRegistry::new();
     
     // Create App with PTY (but no session yet)
     let mut app = tui::app::App::new(
@@ -531,7 +531,7 @@ async fn run_tui_with_session(config: &Config) -> Result<tui::TuiResult> {
     app.pty_rx = Some(pty_rx);
     
     // Create approval capability for interactive tool approval
-    let (approval_capability, _approval_rx) = tui::approval::TuiApprovalCapability::new();
+    let (approval_capability, approval_rx) = tui::app::approval::TuiApprovalCapability::new();
     
     // Create terminal executor that uses the App's screen
     let app_weak = Arc::downgrade(&std::sync::Arc::new(std::sync::Mutex::new(())));
@@ -562,7 +562,7 @@ async fn run_tui_with_session(config: &Config) -> Result<tui::TuiResult> {
     let mut broadcast_rx = session.subscribe_output();
     
     // Create mpsc channel to bridge broadcast to unbounded for TUI
-    let (output_tx, output_rx) = mpsc::unbounded_channel::<mylm_core::agent::contract::session::OutputEvent>();
+    let (output_tx, output_rx) = mpsc::unbounded_channel::<mylm_core::agent::OutputEvent>();
     
     // Spawn bridge task to forward events from broadcast to mpsc
     tokio::spawn(async move {
@@ -572,7 +572,7 @@ async fn run_tui_with_session(config: &Config) -> Result<tui::TuiResult> {
             match broadcast_rx.recv().await {
                 Ok(event) => {
                     event_count += 1;
-                    use mylm_core::agent::contract::session::OutputEvent;
+                    use mylm_core::agent::OutputEvent;
                     if matches!(event, OutputEvent::ResponseChunk { .. }) {
                         chunk_count += 1;
                     } else {
@@ -603,7 +603,7 @@ async fn run_tui_with_session(config: &Config) -> Result<tui::TuiResult> {
     });
     
     // Run TUI
-    match tui::run_tui_session(app, output_rx, session_handle).await {
+    match tui::run_tui_session(app, output_rx, approval_rx, session_handle).await {
         Ok(result) => {
             mylm_core::debug_log!("[MAIN] TUI session ended: {:?}", result);
             Ok(result)
@@ -624,7 +624,7 @@ async fn quick_query(config: &Config, query: &str) -> Result<()> {
     
     // Create agent session factory
     use mylm_core::agent::AgentSessionFactory;
-    use mylm_core::agent::contract::Session as ContractSession;
+    use mylm_core::agent::runtime::Session as ContractSession;
     
     let factory = AgentSessionFactory::new(config.clone());
     
@@ -641,7 +641,7 @@ async fn quick_query(config: &Config, query: &str) -> Result<()> {
     let mut output_rx = session.subscribe_output();
     
     // Submit user input
-    use mylm_core::agent::contract::session::UserInput;
+    use mylm_core::agent::UserInput;
     if let Err(e) = session.submit_input(UserInput::Message(query.to_string())).await {
         println!("❌ Failed to submit input: {}", e);
         return Ok(());
@@ -657,7 +657,7 @@ async fn quick_query(config: &Config, query: &str) -> Result<()> {
     loop {
         match output_rx.try_recv() {
             Ok(event) => {
-                use mylm_core::agent::contract::session::OutputEvent;
+                use mylm_core::agent::OutputEvent;
                 match event {
                     OutputEvent::ResponseChunk { content } => {
                         print!("{}", content);

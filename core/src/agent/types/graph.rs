@@ -409,7 +409,7 @@ pub struct GraphStats {
 mod tests {
     use super::*;
     use super::Intent;
-    use crate::agent::contract::ExitReason;
+    use crate::agent::types::intents::ExitReason;
 
     #[test]
     fn test_empty_graph() {

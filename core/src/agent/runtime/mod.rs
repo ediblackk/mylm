@@ -1,24 +1,43 @@
-//! Capability Graph Runtime
+//! Runtime Layer
 //!
-//! Async, side-effect capable. No decision logic.
+//! Async capability execution with strict separation of concerns:
+//! - core: Fundamental types and traits (no async runtime deps)
+//! - executor: Decision interpretation
+//! - capabilities: Capability implementations
+//! - governance: Policy enforcement
+//! - session: Orchestration
+//! - stubs: Test utilities
 
-pub mod capability;
-pub mod context;
-pub mod graph;
-pub mod runtime;
-pub mod error;
-pub mod impls;
-pub mod tools;
-pub mod terminal;
+// Core types and traits - foundation
+pub mod core;
 
-/// Contract runtime implementation
-/// 
-/// Bridges the AgencyRuntime trait to existing V3 capabilities.
-pub mod contract_runtime;
+// Decision interpretation
+pub mod executor;
 
-pub use capability::*;
-pub use context::*;
-pub use graph::*;
-pub use runtime::*;
-pub use error::*;
-pub use contract_runtime::ContractRuntime;
+// Capability implementations
+pub mod capabilities;
+
+// Governance and policy enforcement
+pub mod governance;
+
+// Session orchestration
+pub mod session;
+
+// Test stubs
+pub mod stubs;
+
+// Re-exports for convenience
+pub use core::{
+    RuntimeContext, TraceId, RuntimeError,
+    LLMError, ToolError, ApprovalError, WorkerError,
+    Capability, LLMCapability, ToolCapability, ApprovalCapability,
+    WorkerCapability, TelemetryCapability, StreamChunk, WorkerSpawnHandle,
+    TerminalExecutor, DefaultTerminalExecutor, SharedTerminalExecutor, TerminalExecutorRef,
+};
+
+pub use executor::{AgentRuntime, CapabilityGraph};
+
+pub use session::{
+    Session, UserInput, OutputEvent, SessionStatus, SessionResult, SessionError,
+    ContractRuntime,
+};

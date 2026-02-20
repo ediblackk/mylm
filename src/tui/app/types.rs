@@ -6,7 +6,7 @@
 //!
 //! ## Architecture
 //!
-//! - **Agent/Business Logic Layer**: Types from mylm_core (Message, TokenUsage, etc.)
+//! - **Agent/Business Logic Layer**: Types from mylm_core (ChatMessage, TokenUsage, etc.)
 //! - **Connection/Networking Layer**: PTY management (PtyManager)
 //! - **TUI Layer**: UI-specific types (AppState, Focus, HelpSystem, TuiEvent)
 //! - **Shared Utilities**: StructuredScratchpad (shared between TUI and agent)
@@ -18,8 +18,8 @@
 // Chat/LLM types
 pub use mylm_core::provider::TokenUsage;
 
-// Use the real Message from mylm_core (with fallback to stub for compatibility)
-pub use mylm_core::provider::chat::Message;
+// Use the real ChatMessage from mylm_core (with fallback to stub for compatibility)
+pub use mylm_core::provider::chat::ChatMessage;
 
 // Memory types
 // pub use mylm_core::memory::graph::MemoryGraph;  // Currently unused
@@ -41,18 +41,18 @@ pub use mylm_core::provider::chat::Message;
 
 /// Enhanced chat message with timestamp and generation time metadata
 #[derive(Debug, Clone)]
-pub struct TimestampedMessage {
+pub struct TimestampedChatMessage {
     /// The underlying chat message
-    pub message: Message,
+    pub message: ChatMessage,
     /// Unix timestamp when the message was created (seconds since epoch)
     pub timestamp: i64,
     /// Generation time in milliseconds (for AI responses)
     pub generation_time_ms: Option<u64>,
 }
 
-impl TimestampedMessage {
+impl TimestampedChatMessage {
     /// Create a new timestamped message with current time
-    pub fn new(message: Message) -> Self {
+    pub fn new(message: ChatMessage) -> Self {
         Self {
             message,
             timestamp: chrono::Utc::now().timestamp(),
@@ -62,17 +62,17 @@ impl TimestampedMessage {
     
     /// Create a new user message with timestamp
     pub fn user(content: impl Into<String>) -> Self {
-        Self::new(Message::user(content))
+        Self::new(ChatMessage::user(content))
     }
     
     /// Create a new assistant message with timestamp
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self::new(Message::assistant(content))
+        Self::new(ChatMessage::assistant(content))
     }
     
     /// Create a new system message with timestamp
     pub fn system(content: impl Into<String>) -> Self {
-        Self::new(Message::system(content))
+        Self::new(ChatMessage::system(content))
     }
     
     /// Set the generation time
@@ -91,14 +91,14 @@ impl TimestampedMessage {
     }
 }
 
-impl From<Message> for TimestampedMessage {
-    fn from(message: Message) -> Self {
+impl From<ChatMessage> for TimestampedChatMessage {
+    fn from(message: ChatMessage) -> Self {
         Self::new(message)
     }
 }
 
-impl From<TimestampedMessage> for Message {
-    fn from(msg: TimestampedMessage) -> Self {
+impl From<TimestampedChatMessage> for ChatMessage {
+    fn from(msg: TimestampedChatMessage) -> Self {
         msg.message
     }
 }
@@ -185,7 +185,7 @@ pub enum ActionType {
 // ---------------------------------------------------------------------------
 
 // Session types (Session, SessionMetadata, SessionStats, SessionMonitor) are defined in session.rs
-// Re-exported at the top of this module via: pub use crate::tui::session::{Session, SessionMonitor};
+// Re-exported at the top of this module via: pub use crate::tui::app::session::{Session, SessionMonitor};
 
 // ---------------------------------------------------------------------------
 // Structured Scratchpad (Shared state between TUI and agent)
@@ -220,7 +220,6 @@ pub struct Job {
     pub error: Option<String>,
     pub metrics: JobMetrics,
     pub started_at: chrono::DateTime<chrono::Utc>,
-    pub context_window: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -253,119 +252,37 @@ impl Job {
 
     #[allow(dead_code)]
     pub fn context_window(&self) -> (usize, usize) {
-        (0, self.context_window)
+        (0, 8192) // Could use real context manager
     }
 }
 
 /// Job registry for background jobs
-#[derive(Debug, Clone)]
-pub struct JobRegistry {
-    jobs: std::sync::Arc<std::sync::Mutex<Vec<Job>>>,
-}
-
-impl Default for JobRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+#[derive(Debug, Clone, Default)]
+pub struct JobRegistry;
 
 impl JobRegistry {
     pub fn new() -> Self {
-        Self {
-            jobs: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-        }
+        Self
     }
 
     pub fn list_all_jobs(&self) -> Vec<Job> {
-        self.jobs.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        // Returns empty list until scheduler integration
+        Vec::new()
     }
 
     pub fn list_active_jobs(&self) -> Vec<Job> {
-        self.jobs.lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .filter(|j| matches!(j.status, JobStatus::Running))
-            .cloned()
-            .collect()
-    }
-    
-    pub fn add_job(&self, job: Job) {
-        self.jobs.lock().unwrap_or_else(|e| e.into_inner()).push(job);
-    }
-    
-    pub fn update_job_status(&self, job_id: &str, status: JobStatus) {
-        if let Ok(mut jobs) = self.jobs.lock() {
-            if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) {
-                job.status = status;
-            }
-        }
+        // Returns empty list until scheduler integration
+        Vec::new()
     }
 
-    pub fn update_job_error(&self, job_id: &str, error: String) {
-        if let Ok(mut jobs) = self.jobs.lock() {
-            if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) {
-                job.error = Some(error);
-            }
-        }
-    }
-    
-    pub fn add_job_action(&self, job_id: &str, action_type: ActionType, description: impl Into<String>, content: impl Into<String>) {
-        if let Ok(mut jobs) = self.jobs.lock() {
-            if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) {
-                job.action_log.push(ActionLogEntry {
-                    action_type,
-                    description: description.into(),
-                    content: content.into(),
-                    timestamp: chrono::Local::now(),
-                });
-            }
-        }
-    }
-    
-    pub fn update_job_output(&self, job_id: &str, output: impl Into<String>) {
-        if let Ok(mut jobs) = self.jobs.lock() {
-            if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) {
-                job.output = output.into();
-            }
-        }
-    }
-
-    pub fn cancel_job(&self, job_id: &str) -> bool {
-        self.update_job_status(job_id, JobStatus::Cancelled);
-        true
+    pub fn cancel_job(&self, _job_id: &str) -> bool {
+        // Stub implementation - no jobs to cancel
+        false
     }
 
     pub fn cancel_all_jobs(&self) -> usize {
-        let mut count = 0;
-        if let Ok(mut jobs) = self.jobs.lock() {
-            for job in jobs.iter_mut() {
-                if matches!(job.status, JobStatus::Running) {
-                    job.status = JobStatus::Cancelled;
-                    count += 1;
-                }
-            }
-        }
-        count
-    }
-    
-    pub fn update_job_metrics(&self, job_id: &str, tokens_used: usize, prompt_tokens: usize, completion_tokens: usize) {
-        if let Ok(mut jobs) = self.jobs.lock() {
-            if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) {
-                job.metrics.tokens_used += tokens_used;
-                job.metrics.prompt_tokens += prompt_tokens;
-                job.metrics.completion_tokens += completion_tokens;
-                job.metrics.total_tokens += prompt_tokens + completion_tokens;
-                job.metrics.request_count += 1;
-            }
-        }
-    }
-    
-    pub fn update_job_cost(&self, job_id: &str, cost: f64) {
-        if let Ok(mut jobs) = self.jobs.lock() {
-            if let Some(job) = jobs.iter_mut().find(|j| j.id == job_id) {
-                job.metrics.cost += cost;
-            }
-        }
+        // Stub implementation - no jobs to cancel
+        0
     }
 }
 
@@ -384,7 +301,7 @@ pub enum TuiEvent {
     /// PTY data received
     Pty(Vec<u8>),
     /// Agent response event
-    AgentResponse(#[allow(dead_code)] Message, #[allow(dead_code)] TokenUsage),
+    AgentResponse(#[allow(dead_code)] ChatMessage, #[allow(dead_code)] TokenUsage),
     /// Tool output event
     ToolOutput(#[allow(dead_code)] String),
     /// Tool error event
@@ -392,7 +309,7 @@ pub enum TuiEvent {
     /// Configuration update event
     ConfigUpdate(#[allow(dead_code)] String),
     /// Condensed history after memory management
-    CondensedHistory(#[allow(dead_code)] Vec<Message>),
+    CondensedHistory(#[allow(dead_code)] Vec<ChatMessage>),
     /// Status update from LLM client
     StatusUpdate(String),
 }

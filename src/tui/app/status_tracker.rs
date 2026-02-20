@@ -113,8 +113,8 @@ impl StatusTracker {
     }
 
     /// Process an output event and update status
-    pub fn on_event(&mut self, event: &mylm_core::agent::contract::session::OutputEvent) {
-        use mylm_core::agent::contract::session::OutputEvent;
+    pub fn on_event(&mut self, event: &mylm_core::agent::OutputEvent) {
+        use mylm_core::agent::OutputEvent;
 
         match event {
             OutputEvent::Thinking { .. } => {
@@ -165,10 +165,14 @@ impl StatusTracker {
             }
 
             OutputEvent::Error { message } => {
+                // Extract clean message for display, but keep full error for debugging
+                let display_message = extract_waf_message(message)
+                    .unwrap_or_else(|| message.clone());
+                
                 self.current_status = StatusInfo::Error {
-                    message: message.clone(),
+                    message: display_message,
                 };
-                self.last_error = Some(message.clone());
+                self.last_error = Some(message.clone()); // Keep full error for verbose mode
                 self.tool_start_time = None;
                 self.last_activity = Instant::now();
             }
@@ -228,11 +232,16 @@ impl StatusTracker {
                 self.last_activity = Instant::now();
             }
 
-            OutputEvent::WorkerStalled { reason, .. } => {
-                // Worker stalled - show error status (stall needs attention)
-                self.current_status = StatusInfo::Error {
-                    message: format!("Worker stalled: {}", reason),
+            OutputEvent::WorkerFailed { worker_id, error, is_stall } => {
+                let status = if *is_stall {
+                    format!("Worker {} stalled: {}", worker_id.0, error)
+                } else {
+                    format!("Worker {} failed: {}", worker_id.0, error)
                 };
+                
+                self.current_status = StatusInfo::Error { message: status };
+                self.last_error = Some(error.clone());
+                self.tool_start_time = None;
                 self.last_activity = Instant::now();
             }
 
@@ -250,12 +259,6 @@ impl StatusTracker {
                     "[STATUS_TRACKER] Context pruned: {} messages, ~{} tokens saved. {}",
                     message_count, tokens_saved, summary
                 );
-            }
-            
-            OutputEvent::Metrics { .. } => {
-                // Metrics event - just update activity timestamp
-                // Token usage is tracked separately by session_monitor
-                self.last_activity = Instant::now();
             }
         }
     }
@@ -305,10 +308,41 @@ impl Default for StatusTracker {
     }
 }
 
+/// Extract a clean error message from WAF/security block HTML responses.
+/// Returns `Some(clean_message)` if this is a WAF block, `None` otherwise.
+fn extract_waf_message(error: &str) -> Option<String> {
+    // Check if this is a WAF block response (Aliyun/Alibaba Cloud WAF)
+    if error.contains("block_message") || error.contains("Sorry, your request has been blocked") {
+        // Try to extract the English block message
+        if let Some(start) = error.find("Sorry, your request has been blocked") {
+            let slice = &error[start..];
+            // Find the end of the message (usually a quote or HTML tag)
+            let end = slice.find('"').unwrap_or(slice.len());
+            let msg = &slice[..end];
+            return Some(format!("{} (Error 405)", msg));
+        }
+        
+        // Try to extract Chinese message if present
+        if error.contains("很抱歉") && error.contains("访问被阻断") {
+            return Some("Request blocked by security filter (Error 405)".to_string());
+        }
+        
+        // Fallback generic message
+        return Some("Request blocked by security filter (Error 405)".to_string());
+    }
+    
+    // Check for other common WAF patterns
+    if error.contains("405 Method Not Allowed") && error.contains("blocked") {
+        return Some("Request blocked by security filter (Error 405)".to_string());
+    }
+    
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mylm_core::agent::contract::session::OutputEvent;
+    use mylm_core::agent::OutputEvent;
     use mylm_core::agent::types::ids::IntentId;
 
     #[test]

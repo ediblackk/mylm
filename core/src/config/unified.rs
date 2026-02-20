@@ -271,10 +271,10 @@ impl Config {
     /// Returns the approval policy that determines which tools require
     /// user approval before execution. Currently returns a default policy,
     /// but can be extended to read from profile configuration.
-    pub fn approval_policy(&self) -> crate::agent::contract::config::ApprovalPolicy {
+    pub fn approval_policy(&self) -> crate::agent::types::config::ApprovalPolicy {
         // For now, return the default approval policy
         // In the future, this can be loaded from profile configuration
-        crate::agent::contract::config::ApprovalPolicy::default()
+        crate::agent::types::config::ApprovalPolicy::default()
     }
 
     /// Resolve the active profile to get effective configuration

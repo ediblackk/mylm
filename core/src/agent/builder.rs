@@ -5,7 +5,7 @@
 //! # Example
 //! ```ignore
 //! use mylm_core::agent::AgentBuilder;
-//! use mylm_core::agent::runtime::impls::{ToolRegistry, LlmClientCapability};
+//! use mylm_core::agent::runtime::capabilities::{ToolRegistry, LlmClientCapability};
 //! use std::sync::Arc;
 //!
 //! # async fn example() {
@@ -15,25 +15,24 @@
 //!     .with_tools(ToolRegistry::new())
 //!     .with_terminal_approval()
 //!     .with_telemetry()
-//!     .build_with_llm_engine();
+//!     .build_with_planner();
 //! # }
 //! ```
 
 use crate::agent::{
     AgentRuntime, CapabilityGraph, Session, SessionConfig,
-    LLMBasedEngine, CognitiveEngine,
+    CognitiveEngine, LegacyPlanner,
 };
 use crate::agent::runtime::{
     LLMCapability, ToolCapability, ApprovalCapability, 
     WorkerCapability, TelemetryCapability,
 };
-use crate::agent::runtime::impls::{
+use crate::agent::runtime::capabilities::{
     LlmClientCapability, TerminalApprovalCapability,
     AutoApproveCapability, LocalWorkerCapability, ConsoleTelemetry,
-    WebSearchCapability, StubWebSearch, MemoryCapability,
-    AgentMemoryManager,
+    MemoryCapability, AgentMemoryManager,
 };
-use crate::agent::runtime::tools::ToolRegistry;
+use crate::agent::tools::{ToolRegistry, WebSearchTool, WebSearchConfig, SearchProvider};
 use crate::memory::store::VectorStore;
 use crate::provider::LlmClient;
 use std::sync::Arc;
@@ -133,14 +132,20 @@ impl AgentBuilder {
     /// Add web search
     pub fn with_web_search(mut self, api_key: impl Into<String>) -> Self {
         // Store as tool since web search is a tool
-        let web_search = Arc::new(WebSearchCapability::new(api_key));
+        let web_search = Arc::new(WebSearchTool::with_config(WebSearchConfig {
+            enabled: true,
+            api_key: Some(api_key.into()),
+            provider: SearchProvider::Kimi,
+        }));
         self.tools = Some(web_search as Arc<dyn ToolCapability>);
         self
     }
     
     /// Add stub web search (for testing)
+    /// 
+    /// Note: This now uses ToolRegistry which has built-in stub behaviors.
     pub fn with_stub_web_search(mut self) -> Self {
-        self.tools = Some(Arc::new(StubWebSearch));
+        self.tools = Some(Arc::new(ToolRegistry::new()));
         self
     }
     
@@ -176,14 +181,11 @@ impl AgentBuilder {
         self
     }
     
-    /// Add basic memory capability (in-memory only, no persistence)
-    /// 
-    /// For production use, prefer `with_memory_manager()` with a properly
-    /// initialized AgentMemoryManager that includes VectorStore persistence.
-    pub fn with_memory(mut self) -> Self {
-        let memory = Arc::new(MemoryCapability::new());
-        // Memory doubles as telemetry to record events
-        self.telemetry = Some(memory.clone() as Arc<dyn TelemetryCapability>);
+    /// Note: Use `with_memory_manager()` instead.
+    /// This method has been removed as MemoryCapability now requires
+    /// a properly initialized AgentMemoryManager.
+    #[deprecated(since = "0.2.0", note = "Use with_memory_manager() instead")]
+    pub fn with_memory(self) -> Self {
         self
     }
     
@@ -213,20 +215,21 @@ impl AgentBuilder {
         };
         
         let graph = CapabilityGraph::new(
-            self.llm.clone().unwrap_or_else(|| Arc::new(crate::agent::runtime::graph::StubLLM)),
+            self.llm.clone().unwrap_or_else(|| Arc::new(crate::agent::runtime::stubs::StubLLM)),
             tools,
             self.approval.clone().unwrap_or_else(|| Arc::new(AutoApproveCapability::new())),
-            self.workers.clone().unwrap_or_else(|| Arc::new(crate::agent::runtime::graph::StubWorkers)),
-            self.telemetry.clone().unwrap_or_else(|| Arc::new(crate::agent::runtime::graph::StubTelemetry)),
+            self.workers.clone().unwrap_or_else(|| Arc::new(crate::agent::runtime::stubs::StubWorkers)),
+            self.telemetry.clone().unwrap_or_else(|| Arc::new(crate::agent::runtime::stubs::StubTelemetry)),
         );
         
         AgentRuntime::new(graph)
     }
     
     /// Build a complete session with LLM-based engine
-    pub fn build_with_llm_engine(mut self) -> Session<LLMBasedEngine> {
+    #[deprecated(since = "0.2.0", note = "Use AgentSessionFactory instead")]
+    pub fn build_with_llm_engine(mut self) -> Session<LegacyPlanner> {
         let runtime = self.build_runtime();
-        let engine = LLMBasedEngine::new();
+        let engine = LegacyPlanner::new();
         
         Session::new(engine, runtime, self.config)
     }
@@ -249,7 +252,8 @@ pub mod presets {
     use super::*;
     
     /// Create a testing agent with all stubs
-    pub fn testing_agent() -> Session<LLMBasedEngine> {
+    #[allow(deprecated)]
+    pub fn testing_agent() -> Session<LegacyPlanner> {
         AgentBuilder::new()
             .with_auto_approve()
             .with_stub_web_search()
@@ -258,7 +262,8 @@ pub mod presets {
     }
     
     /// Create a terminal agent with full capabilities
-    pub fn terminal_agent(llm_client: Arc<LlmClient>) -> Session<LLMBasedEngine> {
+    #[allow(deprecated)]
+    pub fn terminal_agent(llm_client: Arc<LlmClient>) -> Session<LegacyPlanner> {
         AgentBuilder::new()
             .with_llm_client(llm_client)
             .with_tools(ToolRegistry::new())
@@ -270,7 +275,8 @@ pub mod presets {
     }
     
     /// Create a headless agent (auto-approve, no terminal)
-    pub fn headless_agent(llm_client: Arc<LlmClient>) -> Session<LLMBasedEngine> {
+    #[allow(deprecated)]
+    pub fn headless_agent(llm_client: Arc<LlmClient>) -> Session<LegacyPlanner> {
         AgentBuilder::new()
             .with_llm_client(llm_client)
             .with_tools(ToolRegistry::new())

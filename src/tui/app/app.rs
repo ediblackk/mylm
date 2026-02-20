@@ -8,9 +8,9 @@
 //! - `app/session.rs` - Session persistence
 
 use crate::tui::app::state::AppStateContainer;
-use crate::tui::types::{AppState, TuiEvent, TimestampedChatMessage};
+use crate::tui::app::types::{AppState, TuiEvent, TimestampedChatMessage};
 
-use mylm_core::agent::contract::session::UserInput;
+use mylm_core::agent::UserInput;
 use mylm_core::environment::ContextBuilder;
 use mylm_core::conversation::SmartPruning;
 use mylm_core::provider::chat::ChatMessage;

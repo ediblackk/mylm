@@ -5,12 +5,12 @@
 //! state_ui.rs and state_agent.rs in future iteration.
 
 // Re-export types from the types module (authoritative source)
-pub use crate::tui::types::{
+pub use crate::tui::app::types::{
     PtyManager, JobRegistry,
     StreamState, AppState, Focus,
     TimestampedChatMessage,
 };
-use mylm_core::agent::contract::session::{OutputEvent, UserInput};
+use mylm_core::agent::{OutputEvent, UserInput};
 use mylm_core::conversation::ContextManager;
 use mylm_core::memory::graph::MemoryGraph;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,8 +20,8 @@ use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
 // Import real Session types from session module
-use crate::tui::session::{Session, SessionMonitor};
-use crate::tui::approval::ApprovalHandle;
+use crate::tui::app::session::{Session, SessionMonitor};
+use crate::tui::app::approval::ApprovalHandle;
 
 // Stub types for items not yet in contract
 #[derive(Debug, Clone)]
@@ -150,6 +150,10 @@ pub struct AppStateContainer {
     #[allow(dead_code)]
     pub input_tx: Option<mpsc::Sender<UserInput>>,
     
+    // Approval receiver for pending approval requests from capability
+    #[allow(dead_code)]
+    pub approval_rx: Option<tokio::sync::mpsc::Receiver<crate::tui::app::approval::PendingApproval>>,
+    
     // PTY receiver for terminal output
     #[allow(dead_code)]
     pub pty_rx: Option<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>>,
@@ -244,6 +248,9 @@ pub struct AppStateContainer {
     /// Pending approval for tool execution (intent_id, tool_name, args)
     pub pending_approval: Option<(u64, String, String)>,
     
+    /// Full pending approval with response channel (from approval capability)
+    pub pending_approval_with_response: Option<crate::tui::app::approval::PendingApproval>,
+    
     /// Flag to request session save
     pub save_session_request: bool,
     
@@ -254,7 +261,7 @@ pub struct AppStateContainer {
     pub session_active: bool,
     
     /// Status tracker for deriving UI state from output events
-    pub status_tracker: crate::tui::status_tracker::StatusTracker,
+    pub status_tracker: crate::tui::app::status_tracker::StatusTracker,
 }
 
 impl AppStateContainer {
@@ -323,6 +330,7 @@ impl AppStateContainer {
             response_start_time: None,
 
             approval_handle: None,
+            approval_rx: None,
             interrupt_flag: Arc::new(AtomicBool::new(false)),
             verbose_mode,
             show_thoughts: true,
@@ -380,10 +388,11 @@ impl AppStateContainer {
             pty_rx: None,
             // Missing fields
             pending_approval: None,
+            pending_approval_with_response: None,
             save_session_request: false,
             stream_in_final: false,
             session_active: true,
-            status_tracker: crate::tui::status_tracker::StatusTracker::new(),
+            status_tracker: crate::tui::app::status_tracker::StatusTracker::new(),
             // Memory provider - currently initialized on-demand in event_loop.rs
             memory_provider: None,
             status_animation_frame: 0,

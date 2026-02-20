@@ -10,7 +10,7 @@
 use crate::config::{Config, ProviderType};
 use crate::provider::{LlmConfig, LlmProvider};
 use crate::agent::types::KernelConfig;
-use crate::agent::runtime::RuntimeConfig;
+use crate::agent::runtime::core::RuntimeConfig;
 
 /// Error type for config bridge operations
 #[derive(Debug, thiserror::Error)]
@@ -132,7 +132,7 @@ pub fn config_to_kernel_config(
             .unwrap_or_else(|| "You are a helpful AI assistant.".to_string()),
         include_tool_descriptions: true,
         include_examples: true,
-        tool_format: crate::agent::contract::config::ToolFormat::Json,
+        tool_format: crate::agent::types::config::ToolFormat::Json,
         max_context_length: profile.context_window,
     };
     

@@ -577,6 +577,31 @@ impl MemoryProvider for AgentMemoryProvider {
             }
         });
     }
+    
+    fn build_context(
+        &self, 
+        history: &[crate::agent::types::intents::Message], 
+        _scratchpad: &str, 
+        _system_prompt: &str
+    ) -> String {
+        // Derive query from recent user messages in history
+        let query = history
+            .iter()
+            .filter(|m| matches!(m.role, crate::agent::types::intents::Role::User))
+            .map(|m| m.content.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        
+        // Use existing get_context with the derived query
+        // Truncate to avoid overly long queries
+        let truncated_query = if query.len() > 500 {
+            &query[..500]
+        } else {
+            &query
+        };
+        
+        self.get_context(truncated_query)
+    }
 }
 
 

@@ -1,6 +1,6 @@
 //! Input handling - cursor movement, text editing, and selection
 use crate::tui::app::state::{AppStateContainer, Focus};
-use crate::tui::app::types::TimestampedMessage;
+use crate::tui::app::types::TimestampedChatMessage;
 use mylm_core::provider::TokenUsage;
 
 impl AppStateContainer {
@@ -377,7 +377,7 @@ impl AppStateContainer {
     #[allow(dead_code)]
     pub async fn start_streaming_final_answer(&mut self, _content: String, _usage: TokenUsage) {
         self.chat_history
-            .push(TimestampedMessage::assistant(String::new()));
+            .push(TimestampedChatMessage::assistant(String::new()));
 
         if !self.incognito {
             let session = self.build_current_session().await;
@@ -390,13 +390,13 @@ impl AppStateContainer {
 
     // History management
     #[allow(dead_code)]
-    pub fn set_history(&mut self, history: Vec<mylm_core::provider::chat::Message>) {
-        self.chat_history = history.into_iter().map(TimestampedMessage::from).collect();
+    pub fn set_history(&mut self, history: Vec<mylm_core::provider::chat::ChatMessage>) {
+        self.chat_history = history.into_iter().map(TimestampedChatMessage::from).collect();
     }
 
     #[allow(dead_code)]
     pub fn add_assistant_message(&mut self, content: String, usage: TokenUsage) {
-        self.chat_history.push(TimestampedMessage::assistant(content.clone()));
+        self.chat_history.push(TimestampedChatMessage::assistant(content.clone()));
 
         let input_price = self.input_price;
         let output_price = self.output_price;
@@ -404,7 +404,7 @@ impl AppStateContainer {
         self.session_monitor.add_usage(&usage, input_price, output_price);
         
         // Update context manager with new message for token tracking
-        let chat_msgs: Vec<mylm_core::provider::chat::Message> = self.chat_history.iter().map(|m| m.message.clone()).collect();
+        let chat_msgs: Vec<mylm_core::provider::chat::ChatMessage> = self.chat_history.iter().map(|m| m.message.clone()).collect();
         self.context_manager.set_history(&chat_msgs);
 
         if self.chat_auto_scroll {
@@ -414,10 +414,10 @@ impl AppStateContainer {
 
     #[allow(dead_code)]
     pub fn add_system_message(&mut self, content: &str) {
-        self.chat_history.push(TimestampedMessage::system(content.to_string()));
+        self.chat_history.push(TimestampedChatMessage::system(content.to_string()));
         
         // Update context manager with new message for token tracking
-        let chat_msgs: Vec<mylm_core::provider::chat::Message> = self.chat_history.iter().map(|m| m.message.clone()).collect();
+        let chat_msgs: Vec<mylm_core::provider::chat::ChatMessage> = self.chat_history.iter().map(|m| m.message.clone()).collect();
         self.context_manager.set_history(&chat_msgs);
 
         if self.chat_auto_scroll {
@@ -428,10 +428,10 @@ impl AppStateContainer {
     /// Add assistant message without token usage (for simple UI messages)
     #[allow(dead_code)]
     pub fn add_assistant_message_simple(&mut self, content: &str) {
-        self.chat_history.push(TimestampedMessage::assistant(content.to_string()));
+        self.chat_history.push(TimestampedChatMessage::assistant(content.to_string()));
         
         // Update context manager with new message for token tracking
-        let chat_msgs: Vec<mylm_core::provider::chat::Message> = self.chat_history.iter().map(|m| m.message.clone()).collect();
+        let chat_msgs: Vec<mylm_core::provider::chat::ChatMessage> = self.chat_history.iter().map(|m| m.message.clone()).collect();
         self.context_manager.set_history(&chat_msgs);
 
         if self.chat_auto_scroll {

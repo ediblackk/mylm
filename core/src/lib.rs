@@ -117,7 +117,7 @@ pub use agent::{
     TaskId, JobId, SessionId,
     TokenUsage, ToolResult, Approval,
     // Cognitive engines
-    LLMBasedEngine, ResponseParser,
+    Planner, ResponseParser,
     // Builder
     AgentBuilder, presets,
 };

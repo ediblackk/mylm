@@ -1389,9 +1389,9 @@ async fn handle_web_search_extra_params(config: &mut Config) -> Result<()> {
 
 /// Test web search API key by making a simple request
 async fn test_web_search_api_key(provider: &SearchProvider, api_key: &str) -> Result<()> {
-    use mylm_core::agent::runtime::tools::web_search::WebSearchTool;
-    use mylm_core::agent::runtime::tools::web_search::WebSearchConfig;
-    use mylm_core::agent::runtime::capability::ToolCapability;
+    use mylm_core::agent::tools::web_search::WebSearchTool;
+    use mylm_core::agent::tools::web_search::WebSearchConfig;
+    use mylm_core::agent::runtime::core::ToolCapability;
     use mylm_core::agent::types::intents::ToolCall;
     
     log::debug!("[CONFIG] Testing web search API key for provider {:?}", provider);
@@ -1400,15 +1400,15 @@ async fn test_web_search_api_key(provider: &SearchProvider, api_key: &str) -> Re
         enabled: true,
         api_key: Some(api_key.to_string()),
         provider: match provider {
-            SearchProvider::DuckDuckGo => mylm_core::agent::runtime::tools::web_search::SearchProvider::DuckDuckGo,
-            SearchProvider::Serpapi => mylm_core::agent::runtime::tools::web_search::SearchProvider::SerpApi,
-            SearchProvider::Brave => mylm_core::agent::runtime::tools::web_search::SearchProvider::Brave,
-            SearchProvider::Openai => mylm_core::agent::runtime::tools::web_search::SearchProvider::OpenAi,
-            SearchProvider::Exa => mylm_core::agent::runtime::tools::web_search::SearchProvider::Exa,
-            SearchProvider::Google => mylm_core::agent::runtime::tools::web_search::SearchProvider::Google,
-            SearchProvider::Tavily => mylm_core::agent::runtime::tools::web_search::SearchProvider::Tavily,
-            SearchProvider::Kimi => mylm_core::agent::runtime::tools::web_search::SearchProvider::DuckDuckGo, // Fallback
-            SearchProvider::Custom => mylm_core::agent::runtime::tools::web_search::SearchProvider::Custom,
+            SearchProvider::DuckDuckGo => mylm_core::agent::tools::web_search::SearchProvider::DuckDuckGo,
+            SearchProvider::Serpapi => mylm_core::agent::tools::web_search::SearchProvider::SerpApi,
+            SearchProvider::Brave => mylm_core::agent::tools::web_search::SearchProvider::Brave,
+            SearchProvider::Openai => mylm_core::agent::tools::web_search::SearchProvider::OpenAi,
+            SearchProvider::Exa => mylm_core::agent::tools::web_search::SearchProvider::Exa,
+            SearchProvider::Google => mylm_core::agent::tools::web_search::SearchProvider::Google,
+            SearchProvider::Tavily => mylm_core::agent::tools::web_search::SearchProvider::Tavily,
+            SearchProvider::Kimi => mylm_core::agent::tools::web_search::SearchProvider::DuckDuckGo, // Fallback
+            SearchProvider::Custom => mylm_core::agent::tools::web_search::SearchProvider::Custom,
         },
     };
     
@@ -1421,7 +1421,7 @@ async fn test_web_search_api_key(provider: &SearchProvider, api_key: &str) -> Re
     };
     
     // Create a dummy runtime context
-    let ctx = mylm_core::agent::runtime::context::RuntimeContext::default();
+    let ctx = mylm_core::agent::runtime::core::RuntimeContext::default();
     
     match tool.execute(&ctx, call).await {
         Ok(result) => {

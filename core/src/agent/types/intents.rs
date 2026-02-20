@@ -188,6 +188,8 @@ pub struct ToolDef {
     pub name: String,
     pub description: String,
     pub parameters: serde_json::Value,
+    /// Usage example for the tool (e.g., "read_file <path> or {\"path\": \"...\"}")
+    pub usage: Option<String>,
 }
 
 /// Tool schema for describing available tools (alias for ToolDef)

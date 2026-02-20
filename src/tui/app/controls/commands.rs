@@ -1,7 +1,7 @@
 //! Slash command handling for the terminal UI
 use crate::tui::app::state::AppStateContainer;
-use crate::tui::app::types::{TuiEvent, TimestampedMessage};
-use mylm_core::provider::chat::Message;
+use crate::tui::app::types::{TuiEvent, TimestampedChatMessage};
+use mylm_core::provider::chat::ChatMessage as Message;
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -25,7 +25,7 @@ impl AppStateContainer {
             "/pruned" => self.handle_pruned_command(),
             "/restore" => self.handle_restore_command(&parts),
             _ => {
-                self.chat_history.push(TimestampedMessage::assistant(format!(
+                self.chat_history.push(TimestampedChatMessage::assistant(format!(
                     "Unknown command: {}",
                     cmd
                 )));
@@ -113,7 +113,7 @@ impl AppStateContainer {
                 
                 // Create logs directory if needed
                 if let Err(e) = std::fs::create_dir_all(&logs_dir) {
-                    self.chat_history.push(TimestampedMessage::assistant(format!(
+                    self.chat_history.push(TimestampedChatMessage::assistant(format!(
                         "❌ Failed to create logs directory: {}",
                         e
                     )));
@@ -146,10 +146,10 @@ impl AppStateContainer {
                             filepath.display(),
                             prompt.len()
                         );
-                        self.chat_history.push(TimestampedMessage::assistant(message));
+                        self.chat_history.push(TimestampedChatMessage::assistant(message));
                     }
                     Err(e) => {
-                        self.chat_history.push(TimestampedMessage::assistant(format!(
+                        self.chat_history.push(TimestampedChatMessage::assistant(format!(
                             "❌ Failed to write prompt file: {}",
                             e
                         )));
@@ -157,7 +157,7 @@ impl AppStateContainer {
                 }
             }
             Err(e) => {
-                self.chat_history.push(TimestampedMessage::assistant(format!(
+                self.chat_history.push(TimestampedChatMessage::assistant(format!(
                     "❌ Failed to load system prompt: {}",
                     e
                 )));
@@ -181,7 +181,7 @@ impl AppStateContainer {
     fn handle_profile_command(&mut self, parts: &[&str], event_tx: UnboundedSender<TuiEvent>) {
         if parts.len() < 2 {
             let profiles: Vec<String> = self.config.profiles.keys().cloned().collect();
-            self.chat_history.push(TimestampedMessage::assistant(
+            self.chat_history.push(TimestampedChatMessage::assistant(
                 format!(
                     "Usage: /profile <name>\nAvailable profiles: {}",
                     profiles.join(", ")
@@ -193,12 +193,12 @@ impl AppStateContainer {
         if self.config.profiles.contains_key(name) {
             self.config.active_profile = name.to_string();
             let _ = event_tx.send(TuiEvent::ConfigUpdate(name.to_string()));
-            self.chat_history.push(TimestampedMessage::assistant(format!(
+            self.chat_history.push(TimestampedChatMessage::assistant(format!(
                 "Switched to profile: {}",
                 name
             )));
         } else {
-            self.chat_history.push(TimestampedMessage::assistant(format!(
+            self.chat_history.push(TimestampedChatMessage::assistant(format!(
                 "Profile '{}' not found",
                 name
             )));
@@ -207,7 +207,7 @@ impl AppStateContainer {
 
     fn handle_config_command(&mut self, parts: &[&str], event_tx: UnboundedSender<TuiEvent>) {
         if parts.len() < 3 {
-            self.chat_history.push(TimestampedMessage::assistant(
+            self.chat_history.push(TimestampedChatMessage::assistant(
                 "Usage: /config <key> <value>\nKeys: model, max_iterations".to_string(),
             ));
             return;
@@ -231,26 +231,26 @@ impl AppStateContainer {
                     }
                 } else {
                     self.chat_history
-                        .push(TimestampedMessage::assistant("max_iterations must be a number".to_string()));
+                        .push(TimestampedChatMessage::assistant("max_iterations must be a number".to_string()));
                 }
             }
             _ => {
                 self.chat_history
-                    .push(TimestampedMessage::assistant(format!("Unknown config key: {}", key)));
+                    .push(TimestampedChatMessage::assistant(format!("Unknown config key: {}", key)));
             }
         }
 
         if updated {
             let _ = event_tx.send(TuiEvent::ConfigUpdate(format!("{}={}", key, value)));
             self.chat_history
-                .push(TimestampedMessage::assistant(format!("Updated {} to {}", key, value)));
+                .push(TimestampedChatMessage::assistant(format!("Updated {} to {}", key, value)));
         }
     }
 
     fn handle_exec_command(&mut self, parts: &[&str], _event_tx: UnboundedSender<TuiEvent>) {
         if parts.len() < 2 {
             self.chat_history
-                .push(TimestampedMessage::assistant("Usage: /exec <command>".to_string()));
+                .push(TimestampedChatMessage::assistant("Usage: /exec <command>".to_string()));
             return;
         }
         let command = parts[1..].join(" ");
@@ -258,14 +258,14 @@ impl AppStateContainer {
         self.state = crate::tui::app::state::AppState::ExecutingTool(command.clone());
         
         // /exec not yet implemented in new architecture
-        self.chat_history.push(TimestampedMessage::assistant(
+        self.chat_history.push(TimestampedChatMessage::assistant(
             format!("/exec not yet implemented in new architecture. Command: {}", command)
         ));
         self.state = crate::tui::app::state::AppState::Idle;
     }
 
     fn handle_help_command(&mut self) {
-        self.chat_history.push(TimestampedMessage::assistant(
+        self.chat_history.push(TimestampedChatMessage::assistant(
             "Available commands:\n\
             /profile <name> - Switch profile\n\
             /model <name> - Set model for active profile\n\
@@ -296,7 +296,7 @@ impl AppStateContainer {
             let provider = &profile.provider;
             let model = profile.model.as_deref().unwrap_or("default");
 
-            self.chat_history.push(TimestampedMessage::assistant(format!(
+            self.chat_history.push(TimestampedChatMessage::assistant(format!(
                 "Current profile: {}\nProvider: {}\nModel: {}\n\nUsage: /model <model-name> to set model, or /model clear to use default.",
                 active_profile, provider, model
             )));
@@ -309,7 +309,7 @@ impl AppStateContainer {
             if let Some(profile) = self.config.profiles.get_mut(&self.config.active_profile) {
                 profile.model = None;
                 let _ = event_tx.send(TuiEvent::ConfigUpdate("model=clear".to_string()));
-                self.chat_history.push(TimestampedMessage::assistant(format!(
+                self.chat_history.push(TimestampedChatMessage::assistant(format!(
                     "Model cleared for profile '{}'. Using default.",
                     self.config.active_profile
                 )));
@@ -318,7 +318,7 @@ impl AppStateContainer {
             if let Some(profile) = self.config.profiles.get_mut(&self.config.active_profile) {
                 profile.model = Some(value.to_string());
                 let _ = event_tx.send(TuiEvent::ConfigUpdate(format!("model={}", value)));
-                self.chat_history.push(TimestampedMessage::assistant(format!(
+                self.chat_history.push(TimestampedChatMessage::assistant(format!(
                     "Model set to '{}' for profile '{}'",
                     value, self.config.active_profile
                 )));
@@ -330,7 +330,7 @@ impl AppStateContainer {
         self.verbose_mode = !self.verbose_mode;
         let status = if self.verbose_mode { "ON" } else { "OFF" };
         self.chat_history
-            .push(TimestampedMessage::assistant(format!("Verbose mode: {}", status)));
+            .push(TimestampedChatMessage::assistant(format!("Verbose mode: {}", status)));
     }
 
     fn handle_logs_command(&mut self, parts: &[&str]) {
@@ -339,7 +339,7 @@ impl AppStateContainer {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(20);
         // Logs not available in new architecture
-        self.chat_history.push(TimestampedMessage::assistant(format!(
+        self.chat_history.push(TimestampedChatMessage::assistant(format!(
             "Recent Logs (last {}):\nLogs not available in current architecture.",
             n
         )));
@@ -348,7 +348,7 @@ impl AppStateContainer {
     fn handle_pacore_command(&mut self, parts: &[&str]) {
         if parts.len() < 2 {
             let status = if self.pacore_enabled { "ON" } else { "OFF" };
-            self.chat_history.push(TimestampedMessage::assistant(format!(
+            self.chat_history.push(TimestampedChatMessage::assistant(format!(
                 "PaCoRe Status:\n  Enabled: {}\n  Rounds: {}\n\nCommands:\n  /pacore on - Enable PaCoRe\n  /pacore off - Disable PaCoRe\n  /pacore rounds <n,n> - Set rounds (e.g., '4,1')\n  /pacore status - Show this status\n  /pacore save - Save config to disk",
                 status, self.pacore_rounds
             )));
@@ -358,19 +358,19 @@ impl AppStateContainer {
         match subcmd {
             "on" => {
                 self.pacore_enabled = true;
-                self.chat_history.push(TimestampedMessage::assistant(
+                self.chat_history.push(TimestampedChatMessage::assistant(
                     "PaCoRe enabled. New messages will use parallel reasoning.".to_string(),
                 ));
             }
             "off" => {
                 self.pacore_enabled = false;
-                self.chat_history.push(TimestampedMessage::assistant(
+                self.chat_history.push(TimestampedChatMessage::assistant(
                     "PaCoRe disabled. Using standard agent loop.".to_string(),
                 ));
             }
             "rounds" => {
                 if parts.len() < 3 {
-                    self.chat_history.push(TimestampedMessage::assistant(
+                    self.chat_history.push(TimestampedChatMessage::assistant(
                         "Usage: /pacore rounds <comma-separated numbers> (e.g., 4,1)".to_string(),
                     ));
                 } else {
@@ -380,12 +380,12 @@ impl AppStateContainer {
                         self.pacore_rounds = rounds_clone.parse::<usize>().unwrap_or(3);
                         self.config.features.pacore.rounds = self.pacore_rounds;
                         let _ = self.config.save_default();
-                        self.chat_history.push(TimestampedMessage::assistant(format!(
+                        self.chat_history.push(TimestampedChatMessage::assistant(format!(
                             "PaCoRe rounds set to: {}",
                             rounds_clone
                         )));
                     } else {
-                        self.chat_history.push(TimestampedMessage::assistant(
+                        self.chat_history.push(TimestampedChatMessage::assistant(
                             "Invalid rounds format. Use comma-separated numbers (e.g., 4,1)"
                                 .to_string(),
                         ));
@@ -394,7 +394,7 @@ impl AppStateContainer {
             }
             "status" => {
                 let status = if self.pacore_enabled { "ON" } else { "OFF" };
-                self.chat_history.push(TimestampedMessage::assistant(format!(
+                self.chat_history.push(TimestampedChatMessage::assistant(format!(
                     "PaCoRe Status:\n  Enabled: {}\n  Rounds: {}",
                     status, self.pacore_rounds
                 )));
@@ -404,10 +404,10 @@ impl AppStateContainer {
                 match self.config.save_default() {
                     Ok(_) => {
                         self.chat_history
-                            .push(TimestampedMessage::assistant("PaCoRe configuration saved.".to_string()));
+                            .push(TimestampedChatMessage::assistant("PaCoRe configuration saved.".to_string()));
                     }
                     Err(e) => {
-                        self.chat_history.push(TimestampedMessage::assistant(format!(
+                        self.chat_history.push(TimestampedChatMessage::assistant(format!(
                             "Error saving config: {}",
                             e
                         )));
@@ -415,7 +415,7 @@ impl AppStateContainer {
                 }
             }
             _ => {
-                self.chat_history.push(TimestampedMessage::assistant(format!(
+                self.chat_history.push(TimestampedChatMessage::assistant(format!(
                     "Unknown pacore command: {}. Use 'on', 'off', 'rounds', 'status', or 'save'",
                     subcmd
                 )));
@@ -428,7 +428,7 @@ impl AppStateContainer {
             // List active jobs
             let jobs = self.job_registry.list_active_jobs();
             if jobs.is_empty() {
-                self.chat_history.push(TimestampedMessage::assistant(
+                self.chat_history.push(TimestampedChatMessage::assistant(
                     "No active jobs.\n\nUsage:\n  /jobs - List active jobs\n  /jobs cancel <id> - Cancel a job\n  /jobs cancel-all - Cancel all jobs\n  /jobs list - List all jobs".to_string()
                 ));
             } else {
@@ -451,7 +451,7 @@ impl AppStateContainer {
                     ));
                 }
                 msg.push_str("Use '/jobs cancel <id>' to cancel a specific job or '/jobs cancel-all' to cancel all.");
-                self.chat_history.push(TimestampedMessage::assistant(msg));
+                self.chat_history.push(TimestampedChatMessage::assistant(msg));
             }
             return;
         }
@@ -481,11 +481,11 @@ impl AppStateContainer {
                 if jobs.len() > 20 {
                     msg.push_str(&format!("\n... and {} more jobs", jobs.len() - 20));
                 }
-                self.chat_history.push(TimestampedMessage::assistant(msg));
+                self.chat_history.push(TimestampedChatMessage::assistant(msg));
             }
             "cancel" => {
                 if parts.len() < 3 {
-                    self.chat_history.push(TimestampedMessage::assistant(
+                    self.chat_history.push(TimestampedChatMessage::assistant(
                         "Usage: /jobs cancel <job-id>".to_string()
                     ));
                     return;
@@ -499,19 +499,19 @@ impl AppStateContainer {
                 
                 if let Some(job) = matched {
                     if self.job_registry.cancel_job(&job.id) {
-                        self.chat_history.push(TimestampedMessage::assistant(format!(
+                        self.chat_history.push(TimestampedChatMessage::assistant(format!(
                             "🛑 Job '{}' ({}) cancelled successfully.",
                             &job.id[..8.min(job.id.len())],
                             job.description
                         )));
                     } else {
-                        self.chat_history.push(TimestampedMessage::assistant(format!(
+                        self.chat_history.push(TimestampedChatMessage::assistant(format!(
                             "Job '{}' is not running and cannot be cancelled.",
                             &job.id[..8.min(job.id.len())]
                         )));
                     }
                 } else {
-                    self.chat_history.push(TimestampedMessage::assistant(format!(
+                    self.chat_history.push(TimestampedChatMessage::assistant(format!(
                         "Job '{}' not found. Use '/jobs list' to see available jobs.",
                         job_id
                     )));
@@ -519,13 +519,13 @@ impl AppStateContainer {
             }
             "cancel-all" => {
                 let cancelled = self.job_registry.cancel_all_jobs();
-                self.chat_history.push(TimestampedMessage::assistant(format!(
+                self.chat_history.push(TimestampedChatMessage::assistant(format!(
                     "🛑 Cancelled {} job(s).",
                     cancelled
                 )));
             }
             _ => {
-                self.chat_history.push(TimestampedMessage::assistant(format!(
+                self.chat_history.push(TimestampedChatMessage::assistant(format!(
                     "Unknown jobs command: {}. Use 'list', 'cancel <id>', or 'cancel-all'",
                     subcmd
                 )));
@@ -536,13 +536,13 @@ impl AppStateContainer {
     /// Handle /pruned command - show pruned message history
     fn handle_pruned_command(&mut self) {
         let output = self.context_manager.pruned_history().format_list();
-        self.chat_history.push(TimestampedMessage::assistant(output));
+        self.chat_history.push(TimestampedChatMessage::assistant(output));
     }
     
     /// Handle /restore command - restore a pruned segment
     fn handle_restore_command(&mut self, parts: &[&str]) {
         if parts.len() < 2 {
-            self.chat_history.push(TimestampedMessage::assistant(
+            self.chat_history.push(TimestampedChatMessage::assistant(
                 "Usage: /restore <segment-number>\nUse /pruned to see available segments.".to_string()
             ));
             return;
@@ -551,7 +551,7 @@ impl AppStateContainer {
         let segment_num = match parts[1].parse::<usize>() {
             Ok(n) if n > 0 => n - 1, // Convert to 0-indexed
             _ => {
-                self.chat_history.push(TimestampedMessage::assistant(
+                self.chat_history.push(TimestampedChatMessage::assistant(
                     "Invalid segment number. Use /pruned to see available segments.".to_string()
                 ));
                 return;
@@ -561,7 +561,7 @@ impl AppStateContainer {
         let segments: Vec<_> = self.context_manager.pruned_history().segments().iter().collect();
         
         if segment_num >= segments.len() {
-            self.chat_history.push(TimestampedMessage::assistant(format!(
+            self.chat_history.push(TimestampedChatMessage::assistant(format!(
                 "Segment {} not found. Use /pruned to see available segments ({} total).",
                 segment_num + 1,
                 segments.len()
@@ -587,14 +587,14 @@ impl AppStateContainer {
                     self.context_manager.add_message(role, &msg.content);
                 }
                 
-                self.chat_history.push(TimestampedMessage::assistant(format!(
+                self.chat_history.push(TimestampedChatMessage::assistant(format!(
                     "✅ Restored segment {} ({} messages).\n\nNote: Context size increased. Further pruning may occur if limits are exceeded.",
                     segment_num + 1,
                     message_count
                 )));
             }
             None => {
-                self.chat_history.push(TimestampedMessage::assistant(
+                self.chat_history.push(TimestampedChatMessage::assistant(
                     "Failed to restore segment. It may have been already restored or expired.".to_string()
                 ));
             }

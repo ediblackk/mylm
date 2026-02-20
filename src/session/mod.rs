@@ -7,10 +7,10 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-use mylm_core::agent::contract::Session;
+use mylm_core::agent::runtime::Session;
 use mylm_core::agent::factory::AgentSessionFactory;
-use mylm_core::agent::runtime::capability::ApprovalCapability;
-use mylm_core::agent::runtime::terminal::TerminalExecutor;
+use mylm_core::agent::runtime::core::ApprovalCapability;
+use mylm_core::agent::runtime::core::terminal::TerminalExecutor;
 use mylm_core::config::Config;
 
 use crate::tui::app;
@@ -109,7 +109,7 @@ pub async fn run_tui_with_session(config: &Config) -> Result<TuiResult> {
 
     // Create mpsc channel to bridge broadcast to unbounded for TUI
     let (output_tx, output_rx) = mpsc::unbounded_channel::<
-        mylm_core::agent::contract::session::OutputEvent,
+        mylm_core::agent::OutputEvent,
     >();
 
     // Spawn bridge task to forward events from broadcast to mpsc
@@ -120,7 +120,7 @@ pub async fn run_tui_with_session(config: &Config) -> Result<TuiResult> {
             match broadcast_rx.recv().await {
                 Ok(event) => {
                     event_count += 1;
-                    use mylm_core::agent::contract::session::OutputEvent;
+                    use mylm_core::agent::OutputEvent;
                     if matches!(event, OutputEvent::ResponseChunk { .. }) {
                         chunk_count += 1;
                     } else {

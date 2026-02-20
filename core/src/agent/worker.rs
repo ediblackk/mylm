@@ -1,16 +1,21 @@
 //! Worker System
 //!
 //! Workers are independent cognitive agents that run in separate tokio tasks.
-//! Each worker has its own Session with engine and runtime.
+//! Each worker has its own AgencySession with Planner kernel.
 
 use crate::agent::{
-    Session, SessionConfig, SessionInput,
     WorkerId,
-    runtime::AgentRuntime,
-    cognition::{LLMBasedEngine},
+    factory::{AgentSessionFactory, WorkerSessionConfig},
+    cognition::Planner,
 };
-use tokio::sync::{mpsc, oneshot};
+use crate::agent::runtime::session::{Session, UserInput, SessionResult, OutputEvent};
+use crate::agent::runtime::session::session::AgencySession;
+use crate::agent::runtime::ContractRuntime;
+use crate::agent::runtime::capabilities::InMemoryTransport;
+use tokio::sync::{oneshot, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use crate::config::Config;
 
 /// Worker handle - returned when spawning a worker
 pub struct WorkerHandle {
@@ -39,15 +44,14 @@ pub struct WorkerSpawnParams {
 
 /// Worker manager - handles spawning and monitoring workers
 pub struct WorkerManager {
-    runtime: AgentRuntime,
-    config: SessionConfig,
+    config: Config,
     next_id: AtomicU64,
 }
 
 impl WorkerManager {
-    pub fn new(runtime: AgentRuntime, config: SessionConfig) -> Self {
+    /// Create a new worker manager with the given config
+    pub fn new(config: Config) -> Self {
         Self { 
-            runtime, 
             config,
             next_id: AtomicU64::new(1),
         }
@@ -67,43 +71,118 @@ impl WorkerManager {
         // Create result channel
         let (result_tx, result_rx) = oneshot::channel();
         
-        // Create input channel for worker
-        let (input_tx, input_rx) = mpsc::channel(100);
+        // Build worker configuration
+        let worker_config = WorkerSessionConfig {
+            allowed_tools: vec![], // Default: no pre-approved tools
+            scratchpad: None,
+            output_tx: None,
+            objective: spec.objective.clone(),
+            instructions: None,
+            tags: None,
+        };
         
-        // Send initial objective as chat message
-        let objective_msg = SessionInput::Chat(spec.objective.clone());
-        input_tx.send(objective_msg).await
-            .map_err(|e| format!("Failed to send objective: {}", e))?;
-        
-        // Clone runtime for worker
-        let worker_runtime = self.runtime.clone();
-        let worker_config = self.config.clone();
+        // Clone config for the async task
+        let config = self.config.clone();
+        let worker_id_clone = worker_id.clone();
         
         // Spawn worker task
-        let worker_id_clone = worker_id.clone();
         tokio::spawn(async move {
-            // Create engine for worker
-            let engine = LLMBasedEngine::new()
-                .with_system_prompt(build_worker_prompt(&spec.objective));
+            // Create factory and session
+            let factory = AgentSessionFactory::new(config);
+            let session: Arc<RwLock<AgencySession<Planner, ContractRuntime, InMemoryTransport>>> = match factory.create_configured_worker_session(
+                &spec.id,
+                worker_config
+            ).await {
+                Ok(s) => Arc::new(RwLock::new(s)),
+                Err(e) => {
+                    let _ = result_tx.send(WorkerResult {
+                        worker_id: worker_id_clone,
+                        output: format!("Failed to create worker session: {}", e),
+                        success: false,
+                    });
+                    return;
+                }
+            };
             
-            // Create session
-            let mut session = Session::new(engine, worker_runtime, worker_config);
+            // Subscribe to output events BEFORE starting run
+            let mut output_rx = {
+                let sess = session.read().await;
+                sess.subscribe_output()
+            };
             
-            // Run session
-            let result = session.run(input_rx).await;
+            // Clone for the run task
+            let session_for_run = Arc::clone(&session);
+            
+            // Spawn the session run loop
+            let mut run_handle = tokio::spawn(async move {
+                let mut sess = session_for_run.write().await;
+                sess.run().await
+            });
+            
+            // Submit the objective as user input
+            let objective_input = UserInput::Message(spec.objective);
+            let submit_result = {
+                let sess = session.read().await;
+                sess.submit_input(objective_input).await
+            };
+            
+            if let Err(e) = submit_result {
+                crate::error_log!("[WORKER] Failed to submit objective: {}", e);
+            }
+            
+            // Collect output from output channel while waiting for completion
+            let mut output_buffer = Vec::new();
+            let mut success = false;
+            
+            // Process output events while session runs
+            loop {
+                tokio::select! {
+                    // Check for output events
+                    Ok(event) = output_rx.recv() => {
+                        match event {
+                            OutputEvent::ResponseChunk { content } => {
+                                output_buffer.push(content);
+                            }
+                            OutputEvent::ResponseComplete => {
+                                // Response is complete
+                            }
+                            OutputEvent::Halted { .. } => {
+                                success = true;
+                                break;
+                            }
+                            OutputEvent::Error { message } => {
+                                output_buffer.push(format!("Error: {}", message));
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    // Wait for session to complete
+                    run_result = &mut run_handle => {
+                        match run_result {
+                            Ok(Ok(SessionResult { completed_successfully, halt_reason, .. })) => {
+                                success = completed_successfully;
+                                if let Some(reason) = halt_reason {
+                                    output_buffer.push(format!("Halted: {}", reason));
+                                }
+                            }
+                            Ok(Err(e)) => {
+                                output_buffer.push(format!("Session error: {}", e));
+                            }
+                            Err(e) => {
+                                output_buffer.push(format!("Worker task panicked: {}", e));
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
             
             // Send result back to parent
-            let worker_result = match result {
-                Ok(output) => WorkerResult {
-                    worker_id: worker_id_clone,
-                    output,
-                    success: true,
-                },
-                Err(e) => WorkerResult {
-                    worker_id: worker_id_clone,
-                    output: format!("Worker failed: {}", e),
-                    success: false,
-                },
+            let worker_result = WorkerResult {
+                worker_id: worker_id_clone,
+                output: output_buffer.join(""),
+                success,
             };
             
             let _ = result_tx.send(worker_result);
@@ -184,65 +263,62 @@ Your objective: {}
 
 You have access to the same tools as the main agent (shell, read_file, write_file, etc.).
 Focus on completing your assigned task efficiently.
-When done, respond with <exit/> or provide a summary of what you accomplished.
+When done, respond with a summary of what you accomplished.
 
 Be concise and focused."#, objective)
 }
 
 /// Worker capability implementation
 pub struct WorkerCapabilityImpl {
-    manager: WorkerManager,
+    config: Config,
 }
 
 impl WorkerCapabilityImpl {
-    pub fn new(runtime: AgentRuntime, config: SessionConfig) -> Self {
-        Self {
-            manager: WorkerManager::new(runtime, config),
-        }
+    pub fn new(config: Config) -> Self {
+        Self { config }
     }
 }
 
-impl crate::agent::runtime::capability::Capability for WorkerCapabilityImpl {
+impl crate::agent::runtime::core::Capability for WorkerCapabilityImpl {
     fn name(&self) -> &'static str {
         "worker-manager"
     }
 }
 
 #[async_trait::async_trait]
-impl crate::agent::runtime::capability::WorkerCapability for WorkerCapabilityImpl {
+impl crate::agent::runtime::core::WorkerCapability for WorkerCapabilityImpl {
     async fn spawn(
         &self,
-        _ctx: &crate::agent::runtime::context::RuntimeContext,
+        _ctx: &crate::agent::runtime::core::RuntimeContext,
         spec: crate::agent::types::intents::WorkerSpec,
-    ) -> Result<crate::agent::runtime::capability::WorkerSpawnHandle, crate::agent::runtime::error::WorkerError> {
+    ) -> Result<crate::agent::runtime::core::WorkerSpawnHandle, crate::agent::runtime::core::WorkerError> {
         // Generate an ID for the worker
-        let worker_id = self.manager.generate_id();
+        let worker_id = WorkerId(self.config.active_profile.len() as u64 + 1); // Temporary ID generation
+        
+        let manager = WorkerManager::new(self.config.clone());
         let worker_spec = WorkerSpawnParams {
             id: worker_id.0.to_string(),
             objective: spec.objective,
             parent_trace_id: "parent".to_string(),
         };
         
-        self.manager.spawn(worker_spec).await
-            .map(|handle| crate::agent::runtime::capability::WorkerSpawnHandle {
+        manager.spawn(worker_spec).await
+            .map(|handle| crate::agent::runtime::core::WorkerSpawnHandle {
                 id: handle.id,
             })
-            .map_err(|e| crate::agent::runtime::error::WorkerError::new(e))
+            .map_err(|e| crate::agent::runtime::core::WorkerError::new(e))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::AgentBuilder;
+    use crate::config::Config;
     
     #[tokio::test]
     async fn test_worker_spawn() {
-        let runtime = AgentBuilder::new()
-            .with_auto_approve()
-            .build_runtime();
-        
-        let manager = WorkerManager::new(runtime, SessionConfig { max_steps: 10 });
+        let config = Config::load_or_default();
+        let manager = WorkerManager::new(config);
         
         let handle = manager.spawn(WorkerSpawnParams {
             id: "test-worker".to_string(),
@@ -271,11 +347,8 @@ mod tests {
     
     #[tokio::test]
     async fn test_simple_worker() {
-        let runtime = AgentBuilder::new()
-            .with_auto_approve()
-            .build_runtime();
-        
-        let manager = WorkerManager::new(runtime, SessionConfig { max_steps: 10 });
+        let config = Config::load_or_default();
+        let manager = WorkerManager::new(config);
         
         let handle = manager.spawn_simple(
             "simple-test".to_string(),
