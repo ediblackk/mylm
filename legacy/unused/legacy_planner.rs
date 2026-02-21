@@ -69,6 +69,7 @@ impl LLMBasedEngine {
                 name: desc.name.clone(),
                 description: desc.description.clone(),
                 parameters: serde_json::json!({}),
+                usage: Some(desc.usage.clone()),
             }
         }).collect()
     }
@@ -185,6 +186,8 @@ impl CognitiveEngine for LLMBasedEngine {
                     model: None,
                     response_format: None,
                     stream: false,
+                    retry_attempt: 0,
+                    extra_system_messages: Vec::new(),
                 });
                 
                 let next_state = state_with_message.increment_step();
@@ -279,6 +282,8 @@ impl CognitiveEngine for LLMBasedEngine {
                     model: None,
                     response_format: None,
                     stream: false,
+                    retry_attempt: 0,
+                    extra_system_messages: Vec::new(),
                 });
                 
                 let next_state = state_with_tool.increment_step();
@@ -314,6 +319,8 @@ impl CognitiveEngine for LLMBasedEngine {
                             model: None,
                             response_format: None,
                             stream: false,
+                            retry_attempt: 0,
+                            extra_system_messages: Vec::new(),
                         });
                         Ok(Transition::new(next_state, decision))
                     }
@@ -338,6 +345,8 @@ impl CognitiveEngine for LLMBasedEngine {
                     model: None,
                     response_format: None,
                     stream: false,
+                    retry_attempt: 0,
+                    extra_system_messages: Vec::new(),
                 });
                 
                 let next_state = state.clone().increment_step();

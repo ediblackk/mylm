@@ -71,6 +71,8 @@ pub struct WorkerSessionConfig {
     pub instructions: Option<String>,
     /// Tags for categorization
     pub tags: Option<Vec<String>>,
+    /// Commonbox for coordination (optional, enables commonboard tool)
+    pub commonbox: Option<Arc<Commonbox>>,
 }
 
 /// Error type for factory operations
@@ -180,10 +182,18 @@ impl AgentSessionFactory {
         // Step 2: Create LLM client
         let llm_client = Arc::new(LlmClient::new(llm_config)?);
         
-        // Step 3: Create ToolRegistry with all default tools
+        // Step 3: Create output channel for streaming events FIRST
+        // (needed for both runtime and delegate tool)
+        let (output_tx, _) = tokio::sync::broadcast::channel(100);
+        
+        // Step 4: Create ToolRegistry with all default tools
         let tool_registry = ToolRegistry::new();
         
-        // Step 3b: Add delegate tool if commonbox is configured (enables worker spawning)
+        // Step 4a: Add scratchpad tool for agent-local persistent notes
+        let scratchpad = crate::agent::tools::ScratchpadTool::new_standalone();
+        let tool_registry = tool_registry.with_scratchpad(scratchpad);
+        
+        // Step 4b: Add delegate tool if commonbox is configured (enables worker spawning)
         let tool_registry = if let Some(ref commonbox) = self.commonbox {
             crate::info_log!("[FACTORY] Enabling delegate tool for worker spawning");
             
@@ -196,16 +206,18 @@ impl AgentSessionFactory {
                 commonbox: None,
             };
             
-            // Create delegate tool - it will use the registry for parent tool lookup
+            // Create delegate tool with output sender for worker events
             let parent_tools: Arc<dyn crate::agent::runtime::core::ToolCapability> = Arc::new(tool_registry);
             let delegate = DelegateTool::new(
                 Arc::clone(commonbox),
                 parent_tools,
                 worker_factory,
-            );
+            ).with_output_sender(crate::agent::runtime::session::OutputSender::Broadcast(output_tx.clone()));
             
-            // Create new registry with delegate enabled
-            ToolRegistry::new().with_delegate(Arc::new(delegate))
+            // Create new registry with delegate and scratchpad enabled
+            ToolRegistry::new()
+                .with_scratchpad(crate::agent::tools::ScratchpadTool::new_standalone())
+                .with_delegate(Arc::new(delegate))
         } else {
             tool_registry
         };
@@ -216,10 +228,7 @@ impl AgentSessionFactory {
             .collect();
         crate::info_log!("[FACTORY] Available tools: {:?}", tool_descriptions.iter().map(|d| &d.name).collect::<Vec<_>>());
         
-        // Step 4: Create output channel for streaming events (shared between session and runtime)
-        let (output_tx, _) = tokio::sync::broadcast::channel(100);
-        
-        // Step 6: Create memory manager and provider (if enabled)
+        // Step 5: Create memory manager and provider (if enabled)
         use crate::config::agent::MemoryConfig;
         use crate::agent::memory::AgentMemoryProvider;
         crate::info_log!("[FACTORY] features.memory = {}", self.config.features.memory);
@@ -256,34 +265,34 @@ impl AgentSessionFactory {
             .as_ref()
             .map(|mm| Arc::new(AgentMemoryProvider::new(Arc::clone(mm))) as Arc<dyn crate::agent::memory::MemoryProvider>);
         
-        // Step 5: Create ContractRuntime with LLM client, tools, memory provider, and output sender
+        // Step 6: Create ContractRuntime with LLM client, tools, memory provider, and output sender
         let mut runtime = self.create_runtime(llm_client.clone(), Arc::new(tool_registry), memory_provider)
             .with_output_sender(output_tx.clone());
         
-        // Step 4b: Attach terminal executor if provided
+        // Step 7: Attach terminal executor if provided
         if let Some(ref terminal) = self.terminal {
             crate::info_log!("[FACTORY] Attaching terminal executor to runtime");
             runtime = runtime.with_terminal(Arc::clone(terminal));
         }
         
-        // Step 4c: Attach approval capability if provided
+        // Step 8: Attach approval capability if provided
         if let Some(ref approval) = self.approval {
             crate::info_log!("[FACTORY] Attaching approval capability to runtime");
             runtime = runtime.with_approval(Arc::clone(approval));
         }
         
-        // Step 7: Create kernel config from profile
+        // Step 9: Create kernel config from profile
         let _kernel_config = config_to_kernel_config(&self.config, profile_name)?;
         
-        // Step 8: Create planner directly with dynamic tools
+        // Step 10: Create planner directly with dynamic tools
         // NOTE: Memory is now handled at runtime layer via Intent::Remember
         let kernel = Planner::new()
             .with_tool_descriptions(tool_descriptions);
         
-        // Step 9: Create in-memory transport
+        // Step 11: Create in-memory transport
         let transport = InMemoryTransport::new(100);
         
-        // Step 10: Assemble the session with shared output channel and memory manager
+        // Step 12: Assemble the session with shared output channel and memory manager
         // CRITICAL: memory_manager is passed to session which owns it for the session lifetime
         // The runtime's MemoryProvider holds a Weak reference - this ensures the Arc stays alive
         let session = AgencySession::new_with_memory(kernel, runtime, transport, output_tx, memory_manager);
@@ -345,8 +354,20 @@ impl AgentSessionFactory {
         let llm_config = config_to_llm_config(&self.config, "worker")?;
         let llm_client = Arc::new(LlmClient::new(llm_config)?);
         
-        // Step 2: Create tool registry with all tools
-        let tool_registry = ToolRegistry::new();
+        // Step 2: Create tool registry with all tools + agent-local scratchpad + commonboard
+        let tool_registry = ToolRegistry::new()
+            .with_scratchpad(crate::agent::tools::ScratchpadTool::new_standalone());
+        
+        // Add commonboard if commonbox is available (for coordination)
+        // Note: Use config.commonbox (passed from parent) rather than self.commonbox
+        // Workers get commonbox for coordination but can't spawn more workers (factory has commonbox: None)
+        let commonbox_for_coordination = config.commonbox.as_ref().or(self.commonbox.as_ref());
+        let tool_registry = if let Some(commonbox) = commonbox_for_coordination {
+            let commonboard = crate::agent::tools::CommonboardTool::new(Arc::clone(commonbox));
+            tool_registry.with_commonboard(commonboard)
+        } else {
+            tool_registry
+        };
         
         // Step 3: Filter tool descriptions based on allowed_tools
         let all_descriptions = tool_registry.descriptions();
@@ -366,12 +387,14 @@ impl AgentSessionFactory {
         crate::info_log!("[FACTORY] Worker {} allowed tools: {:?}", 
             worker_id, filtered_descriptions.iter().map(|d| &d.name).collect::<Vec<_>>());
         
-        // Step 4: Create output channel for streaming events
-        let (output_tx, _) = tokio::sync::broadcast::channel(100);
+        // Step 4: Use provided output channel or create new one
+        // If config.output_tx is provided (mpsc from parent), use broadcast channel for session
+        // and bridge events to the mpsc channel
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(100);
         
         // Step 5: Create ContractRuntime (workers don't use memory)
         let mut runtime = self.create_runtime(llm_client.clone(), Arc::new(tool_registry), None)
-            .with_output_sender(output_tx.clone());
+            .with_output_sender(broadcast_tx.clone());
         
         // Step 6: Attach terminal executor if provided
         if let Some(ref terminal) = self.terminal {
@@ -386,14 +409,30 @@ impl AgentSessionFactory {
         }
         
         // Step 8: Create kernel with filtered tool descriptions
+        crate::info_log!("[FACTORY] Creating kernel with {} tool descriptions", filtered_descriptions.len());
         let kernel = Planner::new()
             .with_tool_descriptions(filtered_descriptions);
+        crate::info_log!("[FACTORY] Kernel created successfully");
         
         // Step 9: Create transport
         let transport = InMemoryTransport::new(100);
         
-        // Step 10: Assemble session
-        let session = AgencySession::new_with_memory(kernel, runtime, transport, output_tx, None);
+        // Step 10: Assemble session with broadcast channel
+        let session = AgencySession::new_with_memory(kernel, runtime, transport, broadcast_tx.clone(), None);
+        
+        // Step 11: If parent provided mpsc channel, spawn bridging task
+        if let Some(ref mpsc_tx) = config.output_tx {
+            crate::info_log!("[FACTORY] Bridging worker events to parent mpsc channel");
+            let mut broadcast_rx = broadcast_tx.subscribe();
+            let mpsc_tx = mpsc_tx.clone();
+            tokio::spawn(async move {
+                while let Ok(event) = broadcast_rx.recv().await {
+                    if mpsc_tx.send(event).await.is_err() {
+                        break; // Parent dropped receiver
+                    }
+                }
+            });
+        }
         
         crate::info_log!("[FACTORY] Worker session created for {}", worker_id);
         Ok(session)

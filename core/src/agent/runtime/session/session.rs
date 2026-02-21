@@ -163,16 +163,40 @@ pub enum OutputEvent {
     ApprovalRequested { intent_id: IntentId, tool: String, args: String },
     
     /// Worker spawned
-    WorkerSpawned { worker_id: crate::agent::types::events::WorkerId, objective: String },
+    WorkerSpawned { 
+        worker_id: crate::agent::types::events::WorkerId, 
+        job_id: crate::agent::commonbox::JobId,
+        objective: String,
+        agent_id: String, // worker config id like "file_lister"
+    },
     
     /// Worker completed
-    WorkerCompleted { worker_id: crate::agent::types::events::WorkerId },
+    WorkerCompleted { 
+        worker_id: crate::agent::types::events::WorkerId,
+        job_id: crate::agent::commonbox::JobId,
+    },
     
     /// Worker failed
     WorkerFailed { 
-        worker_id: crate::agent::types::events::WorkerId, 
+        worker_id: crate::agent::types::events::WorkerId,
+        job_id: crate::agent::commonbox::JobId,
         error: String,
         is_stall: bool,
+    },
+    
+    /// Worker tool executing (richer event for job tracking)
+    WorkerToolExecuting {
+        worker_id: crate::agent::types::events::WorkerId,
+        job_id: crate::agent::commonbox::JobId,
+        tool: String,
+        args: String,
+    },
+    
+    /// Worker tool completed (richer event for job tracking)
+    WorkerToolCompleted {
+        worker_id: crate::agent::types::events::WorkerId,
+        job_id: crate::agent::commonbox::JobId,
+        result: String,
     },
     
     /// Error occurred
@@ -572,8 +596,8 @@ where
         }
 
         loop {
-            crate::debug_log!("[SESSION] Loop iteration. consecutive_errors={}/{}", 
-                self.consecutive_errors, self.max_consecutive_errors);
+            // Loop iteration only logged at trace level to reduce noise
+            // Error count is logged when errors occur
             
             // Check for interrupt
             if self.is_interrupted() {
@@ -617,7 +641,6 @@ where
             }
 
             // Wait for either transport events or user input
-            crate::debug_log!("[SESSION] About to wait on select!");
             tokio::select! {
                 // Transport events
                 batch = self.transport.next_batch() => {
@@ -747,15 +770,18 @@ where
                                                 result: output,
                                             });
                                         }
-                                        Observation::WorkerSpawned { worker_id, .. } => {
+                                        Observation::WorkerSpawned { worker_id, job_id, objective, agent_id, .. } => {
                                             let _ = self.output_tx.send(OutputEvent::WorkerSpawned {
                                                 worker_id: *worker_id,
-                                                objective: "Worker spawned".to_string(),
+                                                job_id: *job_id,
+                                                objective: objective.clone(),
+                                                agent_id: agent_id.clone(),
                                             });
                                         }
-                                        Observation::WorkerCompleted { worker_id, .. } => {
+                                        Observation::WorkerCompleted { worker_id, job_id, .. } => {
                                             let _ = self.output_tx.send(OutputEvent::WorkerCompleted {
                                                 worker_id: *worker_id,
+                                                job_id: *job_id,
                                             });
                                         }
                                         Observation::LLMCompleted { .. } => {

@@ -43,8 +43,15 @@ impl LlmClientCapability {
     fn build_messages_from_context(&self, req: &LLMRequest) -> Vec<ChatMessage> {
         let mut messages = vec![];
         
-        // 1. Build system prompt with tools and memory
-        let mut system_prompt = req.context.system_prompt.clone();
+        // 1. Build system prompt with extra messages, tools and memory
+        let mut system_parts: Vec<String> = vec![];
+        
+        // Add extra system messages first (e.g., format correction)
+        for msg in &req.extra_system_messages {
+            if !msg.is_empty() {
+                system_parts.push(msg.clone());
+            }
+        }
         
         // Inject memory context if provider is available
         if let Some(ref provider) = self.memory_provider {
@@ -55,25 +62,33 @@ impl LlmClientCapability {
             );
             
             if !memory_context.is_empty() {
-                // Prepend memory context to system prompt
-                system_prompt = format!("{}\n\n{}", memory_context, system_prompt);
-                crate::debug_log!("[LLM_CAPABILITY] Injected {} chars of memory context", memory_context.len());
+                system_parts.push(memory_context);
             }
         }
         
+        // Add main system prompt
+        if !req.context.system_prompt.is_empty() {
+            system_parts.push(req.context.system_prompt.clone());
+        }
+        
+        // Add tools section
         if !req.context.available_tools.is_empty() {
-            system_prompt.push_str("\n\n=== AVAILABLE TOOLS ===\n");
+            let mut tools_section = "=== AVAILABLE TOOLS ===\n".to_string();
             for tool in &req.context.available_tools {
                 if let Some(usage) = &tool.usage {
-                    system_prompt.push_str(&format!("- {}: {} (Usage: {})\n", tool.name, tool.description, usage));
+                    tools_section.push_str(&format!("- {}: {} (Usage: {})\n", tool.name, tool.description, usage));
                 } else {
-                    system_prompt.push_str(&format!("- {}: {}\n", tool.name, tool.description));
+                    tools_section.push_str(&format!("- {}: {}\n", tool.name, tool.description));
                 }
             }
-            system_prompt.push_str("\nUse these tools with the Short-Key JSON format: {\"a\": \"tool_name\", \"i\": {...}}");
+            tools_section.push_str("\nUse these tools with the Short-Key JSON format: {\"a\": \"tool_name\", \"i\": {...}}");
+            system_parts.push(tools_section);
         }
-        if !system_prompt.is_empty() {
-            messages.push(ChatMessage::system(system_prompt));
+        
+        // Combine all system parts
+        if !system_parts.is_empty() {
+            let full_system_prompt = system_parts.join("\n\n");
+            messages.push(ChatMessage::system(full_system_prompt));
         }
         
         // 2. Add conversation history

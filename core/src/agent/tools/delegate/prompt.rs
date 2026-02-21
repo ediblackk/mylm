@@ -22,7 +22,7 @@ pub fn build_worker_prompt(
     // Build detailed tools info with examples
     let tools_list = config.tools.as_ref()
         .map(|t| t.join(", "))
-        .unwrap_or_else(|| "read_file, write_file, list_files, shell, scratchpad".to_string());
+        .unwrap_or_else(|| "read_file, write_file, list_files, shell, commonboard, scratchpad".to_string());
     
     let tools_info = build_tools_section(&tools_list);
 
@@ -49,15 +49,18 @@ Writing a file:
 {{{{"t":"Creating the new model file","a":"write_file","i":{{{{"path":"src/models/post.rs","content":"pub struct Post {{...}}"}}}}}}}}
 
 Checking coordination status:
-{{{{"t":"Checking what others are doing","a":"scratchpad","i":{{{{"action":"list"}}}}}}}}
+{{{{"t":"Checking what others are doing","a":"commonboard","i":{{{{"action":"query"}}}}}}}}
+
+Agent-local notes (private, survives pruning):
+{{{{"t":"Making a note for myself","a":"scratchpad","i":{{{{"action":"append","text":"Remember to refactor the helper function"}}}}}}}}
 
 Completing task:
 {{{{"t":"User model is now updated with all required fields","f":"Successfully added email field with validation to User struct. All tests pass."}}}}
 
 ## Critical Rules
-1. **ALWAYS** use the scratchpad for coordination before and during work
+1. **ALWAYS** use the commonboard for coordination before and during work
 2. **NEVER** work on files claimed by other workers
-3. **ALWAYS** claim files before modifying them
+3. **ALWAYS** claim files before modifying them (via commonboard)
 4. Use tools to complete tasks - don't just describe what you would do
 5. Respond ONLY with Short-Key JSON format
 6. No clarifying questions - just execute your objective
@@ -69,7 +72,8 @@ Completing task:
 - Your tags for coordination: [{}]
 - You can only use the tools listed above
 - Some shell commands require main agent approval (this is automatic)
-- Check the scratchpad regularly to see what others are doing
+- Check the commonboard regularly to see what others are doing
+- Use scratchpad ONLY for your own private notes (not coordination)
 "#,
         config.id,
         config.objective,
@@ -82,38 +86,44 @@ Completing task:
     )
 }
 
-fn format_coordination_protocol(tags_str: &str) -> String {
-    format!(r#"
+fn format_coordination_protocol(_tags_str: &str) -> String {
+    r#"
 
 ## Coordination Protocol (REQUIRED)
 
-You share a scratchpad with other workers. You MUST use the scratchpad tool to coordinate:
+You MUST use the commonboard tool to coordinate with other workers:
 
 ### Before Starting Work:
 ```json
-{{"t":"Checking scratchpad for conflicts","a":"scratchpad","i":{{"action":"list"}}}}
+{{"t":"Checking commonboard for conflicts","a":"commonboard","i":{{"action":"query"}}}}
 ```
 
 ### Claiming Files (prevent conflicts):
 ```json
-{{"t":"Claiming file for editing","a":"scratchpad","i":{{"action":"append","text":"CLAIM: src/models/user.rs - Updating User struct","tags":["{}","claim"],"persistent":true}}}}
+{{"t":"Claiming file for editing","a":"commonboard","i":{{"action":"claim","resource":"src/models/user.rs"}}}}
+```
+
+### Checking if Resource is Available:
+```json
+{{"t":"Checking if file is available","a":"commonboard","i":{{"action":"check","resource":"src/models/user.rs"}}}}
 ```
 
 ### Reporting Progress:
 ```json
-{{"t":"Updated User struct successfully","a":"scratchpad","i":{{"action":"append","text":"PROGRESS: Added email field to User struct","tags":["{}"]}}}}
+{{"t":"Updated User struct successfully","a":"commonboard","i":{{"action":"progress","message":"Added email field to User struct"}}}}
 ```
 
 ### Completing Task:
 ```json
-{{"t":"Task completed","a":"scratchpad","i":{{"action":"append","text":"COMPLETE: User model updated with email field and validation","tags":["{}","complete"],"persistent":true}}}}
+{{"t":"Task completed","a":"commonboard","i":{{"action":"complete","summary":"User model updated with email field and validation"}}}}
 ```
 
 ### Respecting Others:
-- Check the scratchpad BEFORE working on any file
+- Check the commonboard BEFORE working on any file
 - If another worker has CLAIMED a file, wait for them to COMPLETE
 - Do not modify files claimed by other workers
-"#, tags_str, tags_str, tags_str)
+- Use scratchpad ONLY for your own private notes, never for coordination
+"#.to_string()
 }
 
 fn build_tools_section(tools_list: &str) -> String {
@@ -144,9 +154,17 @@ You have access to: {}
 {{"t":"Running tests","a":"shell","i":{{"command":"cargo test --lib models::"}}}}
 ```
 
-**scratchpad** - Coordination (REQUIRED):
+**commonboard** - Coordination (REQUIRED):
 ```json
-{{"t":"Checking current status","a":"scratchpad","i":{{"action":"list"}}}}
+{{"t":"Checking coordination status","a":"commonboard","i":{{"action":"query"}}}}
+{{"t":"Claiming a file","a":"commonboard","i":{{"action":"claim","resource":"src/main.rs"}}}}
+{{"t":"Reporting progress","a":"commonboard","i":{{"action":"progress","message":"50% done"}}}}
+{{"t":"Marking complete","a":"commonboard","i":{{"action":"complete","summary":"Task finished successfully"}}}}
+```
+
+**scratchpad** - Private notes (optional, survives pruning):
+```json
+{{"t":"Making a private note","a":"scratchpad","i":{{"action":"append","text":"Remember to check edge cases"}}}}
 ```
 
 ### Shell Command Escalation:

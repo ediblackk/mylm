@@ -33,11 +33,15 @@ pub enum Observation {
     WorkerSpawned {
         intent_id: IntentId,
         worker_id: WorkerId,
+        job_id: crate::agent::commonbox::JobId,
+        objective: String,
+        agent_id: String,
     },
 
     /// A worker completed its task
     WorkerCompleted {
         worker_id: WorkerId,
+        job_id: crate::agent::commonbox::JobId,
         result: Result<String, WorkerError>,
         usage: TokenUsage,
     },

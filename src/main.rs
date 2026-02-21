@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use mylm_core::config::Config;
+use mylm_core::agent::commonbox::Commonbox;
 
 mod hub;
 mod tui;
@@ -540,11 +541,15 @@ async fn run_tui_with_session(config: &Config) -> Result<tui::TuiResult> {
     // For now, use default terminal executor (commands run via std::process::Command)
     // The terminal context is collected separately via app.get_screen()
     
-    // Create agent session factory with approval
+    // Create commonbox for worker spawning (enables delegate tool)
+    let commonbox = Arc::new(Commonbox::new());
+    
+    // Create agent session factory with approval and commonbox
     let factory = tui::agent_setup::create_session_factory(
         config,
         None, // Use default terminal executor for now
         Some(Arc::new(approval_capability)),
+        Some(commonbox), // Enable worker spawning
     );
     
     // Create session for default profile
@@ -622,11 +627,13 @@ async fn run_tui_with_session(config: &Config) -> Result<tui::TuiResult> {
 async fn quick_query(config: &Config, query: &str) -> Result<()> {
     println!("\n⚡ Quick Query: {}", query);
     
-    // Create agent session factory
+    // Create agent session factory with commonbox (enables delegate tool)
     use mylm_core::agent::AgentSessionFactory;
     use mylm_core::agent::runtime::Session as ContractSession;
     
-    let factory = AgentSessionFactory::new(config.clone());
+    let commonbox = Arc::new(Commonbox::new());
+    let factory = AgentSessionFactory::new(config.clone())
+        .with_commonbox(commonbox);
     
     // Create session for default profile
     let mut session = match factory.create_default_session().await {

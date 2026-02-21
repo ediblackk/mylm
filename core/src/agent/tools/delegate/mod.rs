@@ -22,7 +22,7 @@ use crate::agent::commonbox::Commonbox;
 use crate::agent::types::intents::ToolCall;
 use crate::agent::types::events::ToolResult;
 use crate::agent::runtime::session::OutputSender;
-use crate::agent::tools::scratchpad::create_shared_scratchpad;
+
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -205,23 +205,6 @@ impl ToolCapability for DelegateTool {
             }
         }
         
-        // Create shared scratchpad
-        let scratchpad = create_shared_scratchpad();
-        
-        // Initialize with shared context
-        {
-            let mut sp = scratchpad.write().await;
-            let ctx = args.shared_context.clone().unwrap_or_default();
-            let worker_list: Vec<_> = args.workers.iter().map(|w| &w.id).collect();
-            sp.append(
-                format!("COORDINATION STARTED\nContext: {}\nWorkers: {:?}", ctx, worker_list),
-                None,
-                vec!["coordination".to_string()],
-                true,
-                None,
-            );
-        }
-        
         // Shared job ID mapping
         let id_to_job: Arc<RwLock<HashMap<String, crate::agent::commonbox::JobId>>> = Arc::new(RwLock::new(HashMap::new()));
         
@@ -233,7 +216,6 @@ impl ToolCapability for DelegateTool {
             match spawn_worker(
                 config,
                 &args.shared_context,
-                scratchpad.clone(),
                 index,
                 id_to_job.clone(),
                 self.commonbox.clone(),
@@ -259,7 +241,7 @@ impl ToolCapability for DelegateTool {
         let result = serde_json::json!({
             "message": format!("Spawned {} workers", spawned.len()),
             "workers": worker_infos,
-            "scratchpad_ready": true,
+            "commonboard_ready": true,
         });
         
         if !errors.is_empty() {

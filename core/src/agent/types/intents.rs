@@ -86,6 +86,10 @@ pub struct LLMRequest {
     pub response_format: Option<ResponseFormat>,
     /// Whether to enable streaming
     pub stream: bool,
+    /// Retry attempt counter (0 = first attempt)
+    pub retry_attempt: u32,
+    /// Extra system messages to prepend (for format correction, etc.)
+    pub extra_system_messages: Vec<String>,
 }
 
 impl LLMRequest {
@@ -98,6 +102,8 @@ impl LLMRequest {
             model: None,
             response_format: None,
             stream: false,
+            retry_attempt: 0,
+            extra_system_messages: Vec::new(),
         }
     }
 

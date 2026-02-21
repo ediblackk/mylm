@@ -382,6 +382,8 @@ pub enum CommonboxError {
     DependencyNotFound,
     /// Circular dependency
     CircularDependency,
+    /// Resource already claimed by another agent
+    ResourceAlreadyClaimed,
 }
 
 impl std::fmt::Display for CommonboxError {
@@ -398,11 +400,93 @@ impl std::fmt::Display for CommonboxError {
             }
             CommonboxError::DependencyNotFound => write!(f, "Dependency not found"),
             CommonboxError::CircularDependency => write!(f, "Circular dependency detected"),
+            CommonboxError::ResourceAlreadyClaimed => write!(f, "Resource already claimed by another agent"),
         }
     }
 }
 
 impl std::error::Error for CommonboxError {}
+
+/// Coordination entry for the commonboard
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoordinationEntry {
+    /// Entry ID
+    pub id: Uuid,
+    /// Agent that created this entry
+    pub agent_id: AgentId,
+    /// Entry type: claim, progress, complete, signal
+    pub entry_type: String,
+    /// Resource being claimed (for claims) or message content
+    pub content: String,
+    /// Timestamp
+    pub timestamp: DateTime<Utc>,
+    /// Optional tags
+    pub tags: Vec<String>,
+}
+
+/// Coordination board for inter-agent communication
+#[derive(Debug, Clone, Default)]
+pub struct CoordinationBoard {
+    /// All coordination entries
+    entries: Vec<CoordinationEntry>,
+}
+
+impl CoordinationBoard {
+    /// Add a new entry
+    pub fn add(&mut self, entry: CoordinationEntry) {
+        self.entries.push(entry);
+    }
+
+    /// Get all entries
+    pub fn list(&self) -> &[CoordinationEntry] {
+        &self.entries
+    }
+
+    /// Find claims for a specific resource
+    pub fn find_claims(&self, resource: &str) -> Vec<&CoordinationEntry> {
+        self.entries
+            .iter()
+            .filter(|e| e.entry_type == "claim" && e.content.contains(resource))
+            .collect()
+    }
+
+    /// Find entries by agent
+    pub fn find_by_agent(&self, agent_id: &AgentId) -> Vec<&CoordinationEntry> {
+        self.entries
+            .iter()
+            .filter(|e| &e.agent_id == agent_id)
+            .collect()
+    }
+
+    /// Clear completed entries older than threshold
+    pub fn cleanup_completed(&mut self, older_than: DateTime<Utc>) {
+        self.entries.retain(|e| {
+            !(e.entry_type == "complete" && e.timestamp < older_than)
+        });
+    }
+
+    /// Format as LLM-readable string
+    pub fn format_for_llm(&self) -> String {
+        if self.entries.is_empty() {
+            return "No coordination entries.".to_string();
+        }
+
+        let lines: Vec<String> = self
+            .entries
+            .iter()
+            .map(|e| {
+                format!(
+                    "[{}] {}: {}",
+                    e.entry_type.to_uppercase(),
+                    e.agent_id.short_name(),
+                    e.content
+                )
+            })
+            .collect();
+
+        lines.join("\n")
+    }
+}
 
 /// Internal state protected by single RwLock.
 #[derive(Debug)]
@@ -413,6 +497,8 @@ struct CommonboxState {
     jobs: HashMap<JobId, Job>,
     /// Agent to current job mapping
     agent_to_job: HashMap<AgentId, JobId>,
+    /// Coordination board for inter-agent communication
+    coordination: CoordinationBoard,
     /// Cached LLM snapshot (regenerated on every write)
     llm_snapshot: String,
 }
@@ -424,6 +510,7 @@ impl CommonboxState {
             entries: HashMap::new(),
             jobs: HashMap::new(),
             agent_to_job: HashMap::new(),
+            coordination: CoordinationBoard::default(),
             llm_snapshot: String::new(),
         }
     }
@@ -1151,6 +1238,124 @@ impl Commonbox {
             .values()
             .filter(|job| job.status.is_active())
             .count()
+    }
+
+    // =========================================================================
+    // Coordination Board (Commonboard)
+    // =========================================================================
+
+    /// Add a coordination entry to the commonboard.
+    pub async fn add_coordination_entry(
+        &self,
+        agent_id: AgentId,
+        entry_type: impl Into<String>,
+        content: impl Into<String>,
+        tags: Vec<String>,
+    ) {
+        let entry = CoordinationEntry {
+            id: Uuid::new_v4(),
+            agent_id,
+            entry_type: entry_type.into(),
+            content: content.into(),
+            timestamp: Utc::now(),
+            tags,
+        };
+
+        self.with_state(|state| {
+            state.coordination.add(entry);
+        })
+        .await;
+    }
+
+    /// Claim a resource on the commonboard.
+    pub async fn claim_resource(
+        &self,
+        agent_id: AgentId,
+        resource: impl Into<String>,
+    ) -> Result<(), CommonboxError> {
+        let resource = resource.into();
+        
+        // Check if already claimed
+        let already_claimed = self.with_state(|state| {
+            !state.coordination.find_claims(&resource).is_empty()
+        }).await;
+
+        if already_claimed {
+            return Err(CommonboxError::ResourceAlreadyClaimed);
+        }
+
+        self.add_coordination_entry(
+            agent_id,
+            "claim",
+            resource,
+            vec!["claim".to_string()],
+        ).await;
+
+        Ok(())
+    }
+
+    /// Report progress on the commonboard.
+    pub async fn report_progress(
+        &self,
+        agent_id: AgentId,
+        message: impl Into<String>,
+    ) {
+        self.add_coordination_entry(
+            agent_id,
+            "progress",
+            message,
+            vec!["progress".to_string()],
+        ).await;
+    }
+
+    /// Mark completion on the commonboard.
+    pub async fn mark_complete(
+        &self,
+        agent_id: AgentId,
+        summary: impl Into<String>,
+    ) {
+        self.add_coordination_entry(
+            agent_id,
+            "complete",
+            summary,
+            vec!["complete".to_string()],
+        ).await;
+    }
+
+    /// List all coordination entries.
+    pub async fn list_coordination(&self) -> Vec<CoordinationEntry> {
+        self.state
+            .read()
+            .await
+            .coordination
+            .list()
+            .to_vec()
+    }
+
+    /// Get coordination board formatted for LLM consumption.
+    pub async fn get_coordination_snapshot(&self) -> String {
+        self.state
+            .read()
+            .await
+            .coordination
+            .format_for_llm()
+    }
+
+    /// Check if a resource is claimed.
+    pub async fn is_resource_claimed(&self, resource: &str) -> Option<AgentId> {
+        self.with_state(|state| {
+            state.coordination
+                .find_claims(resource)
+                .first()
+                .map(|e| e.agent_id.clone())
+        }).await
+    }
+
+    /// Cleanup old completed entries.
+    pub async fn cleanup_coordination(&self, older_than: DateTime<Utc>) {
+        self.with_state(|state| {
+            state.coordination.cleanup_completed(older_than);
+        }).await;
     }
 }
 

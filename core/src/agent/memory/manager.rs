@@ -517,16 +517,6 @@ impl MemoryProvider for AgentMemoryProvider {
         crate::debug_log!("[MEMORY_PROVIDER] Hot memories: {}, Semantic matches: {}", 
             hot_memories.len(), semantic_memories.len());
         
-        // Log what we found (at debug level)
-        for (i, mem) in hot_memories.iter().enumerate() {
-            crate::debug_log!("[MEMORY_PROVIDER] Hot[{}]: [{}] {}...", 
-                i, mem.r#type, &mem.content[..mem.content.len().min(60)]);
-        }
-        for (i, mem) in semantic_memories.iter().enumerate() {
-            crate::debug_log!("[MEMORY_PROVIDER] Semantic[{}]: [{}] {}...", 
-                i, mem.r#type, &mem.content[..mem.content.len().min(60)]);
-        }
-        
         // Combine and deduplicate (by memory ID)
         let mut combined: std::collections::HashMap<i64, Memory> = std::collections::HashMap::new();
         

@@ -179,6 +179,9 @@ async fn handle_agent_event(
                 final_answer
             } else if !thought.is_empty() {
                 format!("💭 {}...", thought)
+            } else if app.verbose_mode && !app.current_response.trim().is_empty() {
+                // In verbose mode, show raw content when parsing fails
+                format!("⚠️ [raw] {}\n", app.current_response.trim())
             } else {
                 // Still accumulating, show spinner-like indicator
                 "🤔 Thinking ...".to_string()
@@ -193,7 +196,7 @@ async fn handle_agent_event(
         OutputEvent::ResponseComplete => {
             mylm_core::info_log!("[AGENT_EVENT] Response complete");
             
-            // Calculate and store generation time
+            // Normal completion - calculate generation time and update context
             if let Some(start_time) = app.response_start_time.take() {
                 let generation_time_ms = start_time.elapsed().as_millis() as u64;
                 if let Some(last) = app.chat_history.last_mut() {
@@ -246,30 +249,95 @@ async fn handle_agent_event(
             )));
         }
         
-        OutputEvent::WorkerSpawned { worker_id, objective } => {
-            mylm_core::info_log!("[AGENT_EVENT] Worker spawned: {} - {}", worker_id.0, objective);
+        OutputEvent::WorkerSpawned { worker_id, job_id, objective, agent_id } => {
+            mylm_core::info_log!("[AGENT_EVENT] Worker spawned: {} (job={}) - {}", worker_id.0, job_id, objective);
+            
+            // Add to chat history
             app.chat_history.push(TimestampedChatMessage::assistant(format!(
                 "🚀 Started worker {}: {}",
                 worker_id.0, objective
             )));
+            
+            // Add to job registry with authoritative data from Core
+            let job = crate::tui::app::types::Job {
+                id: worker_id.0.to_string(),
+                job_id: job_id.to_string(),
+                agent_id,
+                status: crate::tui::app::types::JobStatus::Running,
+                description: objective.clone(),
+                tool_name: "worker".to_string(),
+                action_log: Vec::new(),
+                output: String::new(),
+                error: None,
+                metrics: crate::tui::app::types::JobMetrics::default(),
+                started_at: chrono::Utc::now(),
+            };
+            app.job_registry.add_job(job);
         }
         
-        OutputEvent::WorkerCompleted { worker_id } => {
-            mylm_core::info_log!("[AGENT_EVENT] Worker completed: {}", worker_id.0);
+        OutputEvent::WorkerCompleted { worker_id, job_id } => {
+            mylm_core::info_log!("[AGENT_EVENT] Worker completed: {} (job={})", worker_id.0, job_id);
+            
+            // Update chat history
             app.chat_history.push(TimestampedChatMessage::assistant(format!(
                 "✅ Worker {} completed",
                 worker_id.0
             )));
+            
+            // Update job registry
+            if let Some(job) = app.job_registry.get_job_mut(&worker_id.0.to_string()) {
+                job.status = crate::tui::app::types::JobStatus::Completed;
+            }
         }
         
-        OutputEvent::WorkerFailed { worker_id, error, is_stall } => {
-            mylm_core::error_log!("[AGENT_EVENT] Worker {} failed (stall={}): {}", worker_id.0, is_stall, error);
+        OutputEvent::WorkerFailed { worker_id, job_id, error, is_stall } => {
+            mylm_core::error_log!("[AGENT_EVENT] Worker {} failed (job={}, stall={}): {}", worker_id.0, job_id, is_stall, error);
+            
+            // Update chat history
             let emoji = if is_stall { "⚠️" } else { "❌" };
             let status = if is_stall { "stalled" } else { "failed" };
             app.chat_history.push(TimestampedChatMessage::assistant(format!(
                 "{} Worker {} {}: {}",
                 emoji, worker_id.0, status, error
             )));
+            
+            // Update job registry
+            if let Some(job) = app.job_registry.get_job_mut(&worker_id.0.to_string()) {
+                job.status = if is_stall {
+                    crate::tui::app::types::JobStatus::Stalled
+                } else {
+                    crate::tui::app::types::JobStatus::Failed
+                };
+                job.error = Some(error.clone());
+            }
+        }
+        
+        OutputEvent::WorkerToolExecuting { worker_id, job_id, tool, args } => {
+            mylm_core::debug_log!("[AGENT_EVENT] Worker {} executing tool {} (job={})", worker_id.0, tool, job_id);
+            
+            // Update job registry with action log entry
+            if let Some(job) = app.job_registry.get_job_mut(&worker_id.0.to_string()) {
+                job.action_log.push(crate::tui::app::types::ActionLogEntry {
+                    action_type: crate::tui::app::types::ActionType::ToolCall,
+                    description: format!("Executing: {}", tool),
+                    content: args.clone(),
+                    timestamp: chrono::Local::now(),
+                });
+            }
+        }
+        
+        OutputEvent::WorkerToolCompleted { worker_id, job_id, result } => {
+            mylm_core::debug_log!("[AGENT_EVENT] Worker {} completed tool (job={})", worker_id.0, job_id);
+            
+            // Update job registry with action log entry
+            if let Some(job) = app.job_registry.get_job_mut(&worker_id.0.to_string()) {
+                job.action_log.push(crate::tui::app::types::ActionLogEntry {
+                    action_type: crate::tui::app::types::ActionType::ToolResult,
+                    description: "Tool completed".to_string(),
+                    content: result.clone(),
+                    timestamp: chrono::Local::now(),
+                });
+            }
         }
         
         OutputEvent::Error { message } => {

@@ -12,6 +12,7 @@ pub mod memory;
 pub mod delegate;
 pub mod scratchpad;
 pub mod worker_shell;
+pub mod commonboard;
 
 pub use shell::ShellTool;
 pub use fs::{ReadFileTool, WriteFileTool};
@@ -22,6 +23,7 @@ pub use memory::MemoryTool;
 pub use delegate::DelegateTool;
 pub use scratchpad::{ScratchpadTool, create_shared_scratchpad, SharedScratchpad};
 pub use worker_shell::{WorkerShellTool, WorkerShellPermissions, EscalationRequest, EscalationResponse};
+pub use commonboard::CommonboardTool;
 
 use std::sync::Arc;
 use crate::agent::runtime::core::{Capability, ToolCapability, RuntimeContext, ToolError};
@@ -44,6 +46,10 @@ pub struct ToolRegistry {
     terminal: Arc<dyn TerminalExecutor>,
     /// Delegate tool for spawning workers (optional, requires initialization)
     delegate: Option<Arc<DelegateTool>>,
+    /// Scratchpad tool for agent-local persistent notes (optional)
+    scratchpad: Option<ScratchpadTool>,
+    /// Commonboard tool for inter-agent coordination (optional)
+    commonboard: Option<CommonboardTool>,
 }
 
 impl ToolRegistry {
@@ -52,6 +58,8 @@ impl ToolRegistry {
     /// Uses a default terminal executor (std::process::Command).
     /// Use `with_terminal()` to provide a custom terminal executor (e.g., PTY-based).
     /// Use `with_delegate()` to enable worker spawning.
+    /// Use `with_scratchpad()` to add agent-local persistent notes.
+    /// Use `with_commonboard()` to enable inter-agent coordination.
     pub fn new() -> Self {
         Self {
             shell: ShellTool::new(),
@@ -65,12 +73,26 @@ impl ToolRegistry {
             memory: None,
             terminal: Arc::new(DefaultTerminalExecutor::new()),
             delegate: None,
+            scratchpad: None,
+            commonboard: None,
         }
     }
     
     /// Enable delegate tool for spawning workers
     pub fn with_delegate(mut self, delegate: Arc<DelegateTool>) -> Self {
         self.delegate = Some(delegate);
+        self
+    }
+    
+    /// Enable scratchpad tool for agent-local persistent notes
+    pub fn with_scratchpad(mut self, scratchpad: ScratchpadTool) -> Self {
+        self.scratchpad = Some(scratchpad);
+        self
+    }
+    
+    /// Enable commonboard tool for inter-agent coordination
+    pub fn with_commonboard(mut self, commonboard: CommonboardTool) -> Self {
+        self.commonboard = Some(commonboard);
         self
     }
     
@@ -107,6 +129,8 @@ impl ToolRegistry {
             "web_search" => Some(&self.web_search),
             "memory" => self.memory.as_ref().map(|m| m as &dyn ToolCapability),
             "delegate" => self.delegate.as_ref().map(|d| d.as_ref() as &dyn ToolCapability),
+            "scratchpad" => self.scratchpad.as_ref().map(|s| s as &dyn ToolCapability),
+            "commonboard" => self.commonboard.as_ref().map(|c| c as &dyn ToolCapability),
             _ => None,
         }
     }
@@ -134,6 +158,12 @@ impl ToolRegistry {
         if self.delegate.is_some() {
             tools.push("delegate".to_string());
         }
+        if self.scratchpad.is_some() {
+            tools.push("scratchpad".to_string());
+        }
+        if self.commonboard.is_some() {
+            tools.push("commonboard".to_string());
+        }
         tools
     }
 
@@ -143,42 +173,42 @@ impl ToolRegistry {
             ToolDescription {
                 name: "shell",
                 description: "Execute shell commands",
-                usage: "shell <command> or {\"command\": \"<cmd>\"}",
+                usage: "{\"a\": \"shell\", \"i\": {\"command\": \"<cmd>\"}}",
             },
             ToolDescription {
                 name: "read_file",
                 description: "Read file contents",
-                usage: "read_file <path>",
+                usage: "{\"a\": \"read_file\", \"i\": {\"path\": \"<path>\"}}",
             },
             ToolDescription {
                 name: "write_file",
                 description: "Write content to file",
-                usage: "write_file <path> <content> or {\"path\": \"<path>\", \"content\": \"<content>\"}",
+                usage: "{\"a\": \"write_file\", \"i\": {\"path\": \"<path>\", \"content\": \"<content>\"}}",
             },
             ToolDescription {
                 name: "list_files",
                 description: "List directory contents",
-                usage: "list_files <path> or {\"path\": \"<path>\"}",
+                usage: "{\"a\": \"list_files\", \"i\": {\"path\": \"<path>\"}}",
             },
             ToolDescription {
                 name: "git_status",
                 description: "Show git working tree status",
-                usage: "git_status",
+                usage: "{\"a\": \"git_status\"}",
             },
             ToolDescription {
                 name: "git_log",
                 description: "Show git commit history",
-                usage: "git_log or {\"limit\": 10}",
+                usage: "{\"a\": \"git_log\", \"i\": {\"limit\": 10}}",
             },
             ToolDescription {
                 name: "git_diff",
                 description: "Show git changes",
-                usage: "git_diff or {\"path\": \"<file>\"}",
+                usage: "{\"a\": \"git_diff\", \"i\": {\"path\": \"<file>\"}}",
             },
             ToolDescription {
                 name: "web_search",
                 description: "Search the web for information",
-                usage: "web_search <query> or {\"query\": \"<search>\"}",
+                usage: "{\"a\": \"web_search\", \"i\": {\"query\": \"<search>\"}}",
             },
         ];
         
@@ -186,7 +216,7 @@ impl ToolRegistry {
             descriptions.push(ToolDescription {
                 name: "memory",
                 description: "Store or search long-term memories",
-                usage: "memory(add: <content>) or memory(search: <query>)",
+                usage: "{\"a\": \"memory\", \"i\": {\"action\": \"add\", \"content\": \"<content>\"}} or {\"a\": \"memory\", \"i\": {\"action\": \"search\", \"query\": \"<query>\"}}",
             });
         }
         
@@ -194,7 +224,23 @@ impl ToolRegistry {
             descriptions.push(ToolDescription {
                 name: "delegate",
                 description: "Spawn specialized worker agents for parallel tasks",
-                usage: "delegate {\"workers\": [{\"id\": \"worker1\", \"objective\": \"Task description\"}]}",
+                usage: "{\"a\": \"delegate\", \"i\": {\"workers\": [{\"id\": \"worker1\", \"objective\": \"Task description\"}]}}",
+            });
+        }
+        
+        if self.scratchpad.is_some() {
+            descriptions.push(ToolDescription {
+                name: "scratchpad",
+                description: "Agent-local persistent notes (survives pruning)",
+                usage: "{\"a\": \"scratchpad\", \"i\": {\"action\": \"append\", \"text\": \"note\"}} or {\"a\": \"scratchpad\", \"i\": {\"action\": \"list\"}}",
+            });
+        }
+        
+        if self.commonboard.is_some() {
+            descriptions.push(ToolDescription {
+                name: "commonboard",
+                description: "Inter-agent coordination (claims, progress, completion)",
+                usage: "{\"a\": \"commonboard\", \"i\": {\"action\": \"claim\", \"resource\": \"file.rs\"}} or {\"a\": \"commonboard\", \"i\": {\"action\": \"query\"}}",
             });
         }
         

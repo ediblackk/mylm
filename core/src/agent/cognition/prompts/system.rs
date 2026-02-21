@@ -11,7 +11,11 @@ pub fn build_system_prompt() -> String {
 
 Current Date and Time: {date_time}
 
-Response Format (Short-Key JSON - ALWAYS use this format):
+Response Format (Short-Key JSON - MANDATORY):
+
+⚠️ CRITICAL: You MUST use JSON format ONLY. NEVER use XML, HTML, or markdown tool call syntax.
+❌ WRONG: <tool_call><function=shell>...</function></tool_call>
+✅ CORRECT: {{"t": "...", "a": "shell", "i": {{"command": "..."}}}}
 
 1. For tool calls:
    {{"t": "your reasoning", "a": "tool_name", "i": {{"arg": "value"}}}}
@@ -31,6 +35,9 @@ Field meanings:
 
 Rules:
 - ALWAYS respond with valid JSON
+- NEVER wrap responses in XML tags like <tool_call> or <function>
+- NEVER use markdown code blocks unless wrapping valid JSON
+- NEVER deviate from the Short-Key JSON format
 - Use "f" to respond to the user
 - Use "a" + "i" when calling tools
 - Use "r" anytime you learn something worth remembering (user preferences, facts, context)

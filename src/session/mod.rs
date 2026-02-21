@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 
 use mylm_core::agent::runtime::Session;
 use mylm_core::agent::factory::AgentSessionFactory;
+use mylm_core::agent::commonbox::Commonbox;
 use mylm_core::agent::runtime::core::ApprovalCapability;
 use mylm_core::agent::runtime::core::terminal::TerminalExecutor;
 use mylm_core::config::Config;
@@ -18,12 +19,14 @@ use crate::tui::TuiResult;
 
 /// Create AgentSessionFactory from config
 ///
-/// Optionally provide custom terminal executor and approval capability.
+/// Optionally provide custom terminal executor, approval capability, and commonbox.
 /// If approval is None, auto-approve is used (suitable for non-interactive use).
+/// If commonbox is provided, the delegate tool will be enabled for worker spawning.
 fn create_session_factory(
     config: &Config,
     terminal: Option<Arc<dyn TerminalExecutor>>,
     approval: Option<Arc<dyn ApprovalCapability>>,
+    commonbox: Option<Arc<Commonbox>>,
 ) -> AgentSessionFactory {
     let mut factory = AgentSessionFactory::new(config.clone());
 
@@ -33,6 +36,10 @@ fn create_session_factory(
 
     if let Some(approval) = approval {
         factory = factory.with_approval(approval);
+    }
+
+    if let Some(commonbox) = commonbox {
+        factory = factory.with_commonbox(commonbox);
     }
 
     factory
@@ -63,6 +70,9 @@ pub async fn run_tui_with_session(config: &Config) -> Result<TuiResult> {
     // Create job registry
     let job_registry = app::JobRegistry::new();
 
+    // Create commonbox for worker spawning (enables delegate tool)
+    let commonbox = Arc::new(Commonbox::new());
+
     // Create approval capability for interactive tool approval
     let approval_capability = app::TuiApprovalCapability::new();
     let auto_approve = approval_capability.auto_approve();
@@ -86,11 +96,12 @@ pub async fn run_tui_with_session(config: &Config) -> Result<TuiResult> {
     // For now, use default terminal executor (commands run via std::process::Command)
     // The terminal context is collected separately via app.get_screen()
 
-    // Create agent session factory with approval
+    // Create agent session factory with approval and commonbox (enables delegate tool)
     let factory = create_session_factory(
         config,
         None, // Use default terminal executor for now
         Some(approval_arc),
+        Some(commonbox), // Enable worker spawning
     );
 
     // Create session for default profile

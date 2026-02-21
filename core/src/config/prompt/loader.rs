@@ -307,7 +307,25 @@ fn system_prompt_config() -> PromptConfig {
                     3. **Propose** - Present a plan or approach to the user\n\
                     4. **Adapt** - Adjust based on user feedback\n\
                     5. **Implement** - Execute the approved approach\n\n\
-                    Use the `delegate` tool to spawn parallel workers for complex multi-step tasks. Workers can operate simultaneously on different aspects of a problem.".to_string()
+                    Use the `delegate` tool to spawn parallel workers for complex multi-step tasks. Workers can operate simultaneously on different aspects of a problem.
+
+
+
+### Agent State Tools
+
+**scratchpad** - Your private persistent notes (survives conversation pruning):
+```json
+{\"t\":\"Making a note\",\"a\":\"scratchpad\",\"i\":{\"action\":\"append\",\"text\":\"Remember to check edge cases\"}}
+```
+- Use for: TODOs, reminders, intermediate findings, context that should survive pruning
+- NOT for: Final answers, user-facing content
+
+**commonboard** - Coordination when using workers (optional):
+```json
+{\"t\":\"Checking worker status\",\"a\":\"commonboard\",\"i\":{\"action\":\"query\"}}
+```
+- Workers use this to claim files and report progress
+- Main agent can monitor but typically doesn't need to coordinate this way".to_string()
                 ),
                 dynamic: Some(false),
                 generator: None,

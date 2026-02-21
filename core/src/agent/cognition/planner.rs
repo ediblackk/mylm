@@ -108,8 +108,8 @@ impl Planner {
             KernelEvent::UserMessage { content } => {
                 self.handle_user_message(content, graph)
             }
-            KernelEvent::LLMCompleted { response, .. } => {
-                self.handle_llm_response(&response.content, graph)
+            KernelEvent::LLMCompleted { intent_id, response } => {
+                self.handle_llm_response(&response.content, *intent_id, graph)
             }
             KernelEvent::ToolCompleted { tool, result, .. } => {
                 self.handle_tool_result(tool, result, graph)
@@ -155,6 +155,9 @@ impl Planner {
         
         let llm_intent_id = self.next_intent_id();
         crate::info_log!("[PLANNER] Adding LLM intent {} to graph for tool result interpretation", llm_intent_id.0);
+        // Track this as a new LLM request (retry count = 0)
+        self.state.llm_retry_counts.insert(llm_intent_id, 0);
+        
         graph.add(IntentNode::new(
             llm_intent_id,
             Intent::RequestLLM(LLMRequest {
@@ -164,6 +167,8 @@ impl Planner {
                 model: None,
                 response_format: None,
                 stream: false,
+                retry_attempt: 0,
+                extra_system_messages: Vec::new(),
             }),
         ));
         crate::info_log!("[PLANNER] Graph now has {} nodes, step_count={}", graph.len(), self.state.step_count);
@@ -171,19 +176,83 @@ impl Planner {
         Ok(())
     }
     
+    /// Maximum retry attempts for format correction
+    const MAX_FORMAT_RETRIES: u32 = 2;
+
     /// Handle LLM response - parse and act
-    fn handle_llm_response(&mut self, content: &str, graph: &mut IntentGraph) -> Result<(), KernelError> {
+    /// 
+    /// Implements format validation and retry logic:
+    /// 1. Parse response BEFORE adding to history
+    /// 2. If valid JSON format: add to history and proceed
+    /// 3. If XML/invalid and retries left: emit retry intent with corrective message
+    /// 4. If max retries reached: emit error response
+    fn handle_llm_response(&mut self, content: &str, intent_id: IntentId, graph: &mut IntentGraph) -> Result<(), KernelError> {
         if self.check_limits(graph)? {
             return Ok(());
         }
+
+        // Check for XML format (common LLM error)
+        let contains_xml = content.contains("<tool_call") 
+            || content.contains("<function=")
+            || content.contains("<parameter=");
         
-        // Add assistant message to history
+        // Try to parse the response
+        let parse_result = self.parser.parse_to_response(content);
+        let is_valid = !contains_xml && parse_result.is_ok();
+
+        // Get retry count for this request chain
+        let retry_count = self.state.llm_retry_counts.get(&intent_id).copied().unwrap_or(0);
+
+        if !is_valid && retry_count < Self::MAX_FORMAT_RETRIES {
+            // Format invalid - trigger retry WITHOUT adding to history
+            crate::warn_log!("[PLANNER] LLM output invalid format (XML={}, retry={}/{}), requesting retry", 
+                contains_xml, retry_count + 1, Self::MAX_FORMAT_RETRIES);
+
+            // Build corrective system message
+            let correction = if contains_xml {
+                "⚠️ CORRECTION: You output XML format. Use ONLY Short-Key JSON like: {\"t\": \"reasoning\", \"a\": \"tool\", \"i\": {...}}. NEVER use <tool_call> tags."
+            } else {
+                "⚠️ CORRECTION: Your response was not valid Short-Key JSON. Use ONLY JSON format like: {\"t\": \"reasoning\", \"f\": \"response\"}"
+            };
+
+            // Create retry request with same context but extra system message
+            let retry_context = self.build_context("Please provide your response in the correct Short-Key JSON format.");
+            
+            // Increment retry count for tracking
+            let new_intent_id = self.next_intent_id();
+            self.state.llm_retry_counts.insert(new_intent_id, retry_count + 1);
+
+            // Build retry request with corrective message
+            let retry_request = LLMRequest {
+                context: retry_context,
+                max_tokens: None,
+                temperature: Some(0.7), // Slightly lower temp for more deterministic output
+                model: None,
+                response_format: None,
+                stream: false, // Don't stream retries
+                retry_attempt: retry_count + 1,
+                extra_system_messages: vec![correction.to_string()],
+            };
+
+            graph.add(IntentNode::new(
+                new_intent_id,
+                Intent::RequestLLM(retry_request),
+            ));
+
+            crate::info_log!("[PLANNER] Added retry intent {} with corrective message", new_intent_id.0);
+            return Ok(());
+        }
+
+        // Add assistant message to history (only for valid responses or after max retries)
         self.state.history.push(Message {
             role: Role::Assistant,
             content: content.to_string(),
         });
+
+        // Clean up retry tracking for this intent
+        self.state.llm_retry_counts.remove(&intent_id);
         
-        match self.parser.parse_to_response(content) {
+        match parse_result {
             Ok(ParsedResponse::ToolCalls(calls)) => {
                 if let Some(call) = calls.into_iter().next() {
                     let args_str = call.arguments.to_string();
@@ -322,6 +391,9 @@ impl Planner {
         let llm_intent_id = self.next_intent_id();
         crate::info_log!("[PLANNER] Adding LLM intent {} (step_count={}) to graph for tool result interpretation", llm_intent_id.0, self.state.step_count);
         
+        // Track this as a new LLM request (retry count = 0)
+        self.state.llm_retry_counts.insert(llm_intent_id, 0);
+        
         graph.add(IntentNode::new(
             llm_intent_id,
             Intent::RequestLLM(LLMRequest {
@@ -331,6 +403,8 @@ impl Planner {
                 model: None,
                 response_format: None,
                 stream: false,
+                retry_attempt: 0,
+                extra_system_messages: Vec::new(),
             }),
         ));
         
@@ -373,8 +447,12 @@ impl Planner {
                 let scratchpad = "Tool execution was denied by user. What should I do instead?";
                 let context = self.build_context(scratchpad);
                 
+                let llm_intent_id = self.next_intent_id();
+                // Track this as a new LLM request (retry count = 0)
+                self.state.llm_retry_counts.insert(llm_intent_id, 0);
+                
                 graph.add(IntentNode::new(
-                    self.next_intent_id(),
+                    llm_intent_id,
                     Intent::RequestLLM(LLMRequest {
                         context,
                         max_tokens: None,
@@ -382,6 +460,8 @@ impl Planner {
                         model: None,
                         response_format: None,
                         stream: false,
+                        retry_attempt: 0,
+                        extra_system_messages: Vec::new(),
                     }),
                 ));
             }
@@ -409,8 +489,12 @@ impl Planner {
         let scratchpad = format!("{}\n\nWhat should I do next?", output);
         let context = self.build_context(&scratchpad);
         
+        let llm_intent_id = self.next_intent_id();
+        // Track this as a new LLM request (retry count = 0)
+        self.state.llm_retry_counts.insert(llm_intent_id, 0);
+        
         graph.add(IntentNode::new(
-            self.next_intent_id(),
+            llm_intent_id,
             Intent::RequestLLM(LLMRequest {
                 context,
                 max_tokens: None,
@@ -418,6 +502,8 @@ impl Planner {
                 model: None,
                 response_format: None,
                 stream: false,
+                retry_attempt: 0,
+                extra_system_messages: Vec::new(),
             }),
         ));
         

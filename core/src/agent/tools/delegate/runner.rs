@@ -17,10 +17,10 @@
 
 use super::types::{SpawnedWorker, WorkerConfig};
 use super::filter::WorkerEventFilter;
-use super::creator::{create_worker_session, WorkerCreationContext, emit_worker_spawned_event, initialize_scratchpad_entry};
+use super::creator::{create_worker_session, WorkerCreationContext, emit_worker_spawned_event};
 use crate::agent::commonbox::{Commonbox, JobId, CommonboxEvent};
 use crate::agent::runtime::session::{Session, UserInput, OutputEvent};
-use crate::agent::tools::scratchpad::SharedScratchpad;
+
 use crate::agent::types::events::WorkerId;
 use crate::agent::runtime::session::OutputSender;
 
@@ -34,12 +34,11 @@ use tokio::time::timeout;
 /// 
 /// This function ORCHESTRATES worker spawning:
 /// 1. Calls creator to CREATE the worker session
-/// 2. Sets up coordination state (id mapping, scratchpad)
+/// 2. Sets up coordination state (id mapping)
 /// 3. Spawns the coordination task (run_worker_session)
 pub async fn spawn_worker(
     config: &WorkerConfig,
     shared_context: &Option<String>,
-    scratchpad: SharedScratchpad,
     worker_index: usize,
     id_to_job: Arc<RwLock<HashMap<String, JobId>>>,
     commonbox: Arc<Commonbox>,
@@ -63,7 +62,7 @@ pub async fn spawn_worker(
     } = create_worker_session(config, shared_context, &creation_ctx).await?;
     
     // Step 2: COORDINATION - Set up tracking and state
-    emit_worker_spawned_event(&output_tx, worker_id, config.objective.clone());
+    emit_worker_spawned_event(&output_tx, worker_id, job_id, config.objective.clone(), config.id.clone());
     
     // Add to id mapping for dependency resolution
     {
@@ -74,14 +73,10 @@ pub async fn spawn_worker(
     // Update job status
     commonbox.update_job_status_message(&job_id, "Waiting for dependencies...").await;
     
-    // Initialize scratchpad with worker entry
-    initialize_scratchpad_entry(&scratchpad, config).await;
-    
     // Step 3: COORDINATION - Clone values for async block
     let config_clone = config.clone();
     let shared_ctx = shared_context.clone();
     let commonbox_clone = commonbox.clone();
-    let scratchpad_clone = scratchpad.clone();
     let id_to_job_clone = id_to_job.clone();
     let parent_output_tx = output_tx.clone();
     
@@ -94,7 +89,6 @@ pub async fn spawn_worker(
             job_id,
             worker_id,
             commonbox_clone,
-            scratchpad_clone,
             session,
             id_to_job_clone,
             worker_output_rx,
@@ -126,7 +120,6 @@ pub async fn run_worker_session(
     job_id: JobId,
     worker_id: WorkerId,
     commonbox: Arc<Commonbox>,
-    scratchpad: SharedScratchpad,
     mut session: crate::agent::runtime::session::AgencySession<
         crate::agent::cognition::Planner,
         crate::agent::runtime::session::ContractRuntime,
@@ -189,16 +182,18 @@ pub async fn run_worker_session(
     let input_tx = session.input_sender();
     
     let objective_msg = format!(
-        "Your objective: {}\n\nShared context: {}\n\nBegin working on your task. Remember to use the scratchpad for coordination.",
+        "Your objective: {}\n\nShared context: {}\n\nBegin working on your task. Remember to use the commonboard tool for coordination.",
         config.objective,
         shared_context.unwrap_or_default()
     );
     
+    crate::info_log!("Worker [{}] sending objective message ({} bytes)...", config.id, objective_msg.len());
     if let Err(e) = input_tx.send(UserInput::Message(objective_msg)).await {
         crate::error_log!("Worker [{}] failed to send objective: {}", config.id, e);
         let _ = commonbox.fail_job(&job_id, "Failed to initialize").await;
         return;
     }
+    crate::info_log!("Worker [{}] objective message sent successfully", config.id);
     
     // CRITICAL: Use numeric worker_id (e.g., 1000) not config.id (e.g., "log_reader")
     // so TUI can match forwarded events to the correct job
@@ -228,6 +223,17 @@ pub async fn run_worker_session(
         while let Some(event) = worker_output_rx.recv().await {
             total_received += 1;
             
+            // Log event types we're receiving (for debugging)
+            match &event {
+                OutputEvent::ToolExecuting { tool, .. } => {
+                    crate::info_log!("[WORKER FORWARD] Received ToolExecuting: tool={}", tool);
+                }
+                OutputEvent::ToolCompleted { .. } => {
+                    crate::info_log!("[WORKER FORWARD] Received ToolCompleted");
+                }
+                _ => {}
+            }
+            
             // Apply selection filter
             let decision = filter.filter(event);
             
@@ -236,8 +242,27 @@ pub async fn run_worker_session(
                     total_forwarded += 1;
                     
                     if let Some(ref tx) = parent_output_tx_clone {
-                        // Add worker ID prefix to content where appropriate
+                        // Transform events to include worker context for job tracking
                         let forwarded_event = match event {
+                            // Transform ToolExecuting to WorkerToolExecuting with job_id
+                            OutputEvent::ToolExecuting { intent_id: _, tool, args } => {
+                                crate::info_log!("[WORKER FORWARD] Transforming ToolExecuting -> WorkerToolExecuting: tool={}", tool);
+                                OutputEvent::WorkerToolExecuting {
+                                    worker_id,
+                                    job_id,
+                                    tool,
+                                    args,
+                                }
+                            }
+                            // Transform ToolCompleted to WorkerToolCompleted with job_id
+                            OutputEvent::ToolCompleted { intent_id: _, result } => {
+                                crate::info_log!("[WORKER FORWARD] Transforming ToolCompleted -> WorkerToolCompleted: result_len={}", result.len());
+                                OutputEvent::WorkerToolCompleted {
+                                    worker_id,
+                                    job_id,
+                                    result,
+                                }
+                            }
                             // Prefix ResponseChunk with worker ID for display
                             OutputEvent::ResponseChunk { content } => {
                                 OutputEvent::ResponseChunk {
@@ -253,6 +278,16 @@ pub async fn run_worker_session(
                             // Pass through all other events unchanged (semantics preserved)
                             other => other,
                         };
+                        
+                        match &forwarded_event {
+                            OutputEvent::WorkerToolExecuting { tool, .. } => {
+                                crate::info_log!("[WORKER FORWARD] Sending WorkerToolExecuting: tool={}", tool);
+                            }
+                            OutputEvent::WorkerToolCompleted { .. } => {
+                                crate::info_log!("[WORKER FORWARD] Sending WorkerToolCompleted");
+                            }
+                            _ => {}
+                        }
                         
                         if let Err(e) = tx.send(forwarded_event) {
                             crate::error_log!("[WORKER FORWARD] Failed to forward event: {}", e);
@@ -284,8 +319,11 @@ pub async fn run_worker_session(
     });
     
     // Run session using the Session trait with timeout
-    crate::info_log!("Worker [{}] running session", config.id);
+    crate::info_log!("Worker [{}] about to call session.run()", config.id);
     commonbox.update_job_status_message(&job_id, "Running cognitive loop...").await;
+    
+    // DEBUG: Check if session has proper setup
+    crate::info_log!("Worker [{}] session input sender obtained, objective sent", config.id);
     
     const DEFAULT_WORKER_TIMEOUT_SECS: u64 = 300; // 5 minutes
     let timeout_duration = Duration::from_secs(
@@ -295,18 +333,6 @@ pub async fn run_worker_session(
     match timeout(timeout_duration, session.run()).await {
         Ok(result) => {
             crate::info_log!("Worker [{}] completed initial task", config.id);
-            
-            // Write completion to scratchpad
-            {
-                let mut sp = scratchpad.write().await;
-                sp.append(
-                    format!("WORKER IDLE [{}]: Initial task complete - {:?}", config.id, result),
-                    None,
-                    config.tags.clone(),
-                    true,
-                    Some(config.id.clone()),
-                );
-            }
             
             // Transition to Idle state (waiting for routed queries)
             if let Err(e) = commonbox.idle_job(&job_id).await {
@@ -327,18 +353,6 @@ pub async fn run_worker_session(
                 action_count += 1;
                 if action_count > MAX_ACTIONS {
                     crate::warn_log!("Worker [{}] hit action limit, stalling", config.id);
-                    
-                    // Write stall to scratchpad
-                    {
-                        let mut sp = scratchpad.write().await;
-                        sp.append(
-                            format!("WORKER STALLED [{}]: Action limit exceeded", config.id),
-                            None,
-                            vec!["stall".to_string()],
-                            true,
-                            Some(config.id.clone()),
-                        );
-                    }
                     
                     // Transition to Stalled state
                     if let Err(e) = commonbox.stall_job(&job_id, "Action limit exceeded").await {
@@ -377,18 +391,6 @@ pub async fn run_worker_session(
                     if let Err(e) = commonbox.wake_worker(&job_id).await {
                         crate::error_log!("Worker [{}] failed to wake: {}", config.id, e);
                         continue;
-                    }
-                    
-                    // Write query to scratchpad
-                    {
-                        let mut sp = scratchpad.write().await;
-                        sp.append(
-                            format!("WORKER QUERY [{}]: {}", config.id, query.query),
-                            None,
-                            config.tags.clone(),
-                            true,
-                            Some(config.id.clone()),
-                        );
                     }
                     
                     // TODO: Proper query routing not yet implemented.
@@ -434,6 +436,7 @@ pub async fn run_worker_session(
                 crate::info_log!("[WORKER] Emitting WorkerCompleted event for worker {}", worker_id.0);
                 if let Err(e) = tx.send(OutputEvent::WorkerCompleted {
                     worker_id,
+                    job_id,
                 }) {
                     crate::error_log!("[WORKER] Failed to emit WorkerCompleted: {}", e);
                 }
@@ -475,23 +478,12 @@ pub async fn run_worker_session(
             if let Some(ref tx) = parent_output_tx {
                 let _ = tx.send(OutputEvent::WorkerFailed {
                     worker_id,
+                    job_id,
                     error: format!("Worker {} failed: {}", config.id, e),
                     is_stall,
                 });
             }
             crate::error_log!("Worker [{}] session error: {}", config.id, e);
-            
-            // Write failure to scratchpad
-            {
-                let mut sp = scratchpad.write().await;
-                sp.append(
-                    format!("WORKER FAILED [{}]: {}", config.id, e),
-                    None,
-                    vec!["error".to_string()],
-                    true,
-                    Some(config.id.clone()),
-                );
-            }
             
             let _ = commonbox.fail_job(&job_id, &format!("Session error: {}", e)).await;
         }
@@ -504,21 +496,10 @@ pub async fn run_worker_session(
             if let Some(ref tx) = parent_output_tx {
                 let _ = tx.send(OutputEvent::WorkerFailed {
                     worker_id,
+                    job_id,
                     error: error_msg.clone(),
                     is_stall: true, // Timeout is potentially recoverable
                 });
-            }
-            
-            // Write timeout to scratchpad
-            {
-                let mut sp = scratchpad.write().await;
-                sp.append(
-                    format!("WORKER TIMEOUT [{}]: {}", config.id, error_msg),
-                    None,
-                    vec!["timeout".to_string(), "stall".to_string()],
-                    true,
-                    Some(config.id.clone()),
-                );
             }
             
             // Mark job as stalled (not failed) for potential retry

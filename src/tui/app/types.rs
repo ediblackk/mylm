@@ -208,10 +208,18 @@ impl StructuredScratchpad {
 // ---------------------------------------------------------------------------
 
 /// Job entry for background jobs display
+/// 
+/// Note: This is a TUI projection of Core's Commonbox Job data.
+/// The Core owns the authoritative state; this struct mirrors it for display.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Job {
+    /// TUI-facing numeric ID (e.g., "1000")
     pub id: String,
+    /// Core's UUID job ID (authoritative)
+    pub job_id: String,
+    /// Worker agent ID (e.g., "file_lister")
+    pub agent_id: String,
     pub status: JobStatus,
     pub description: String,
     pub tool_name: String,
@@ -258,31 +266,65 @@ impl Job {
 
 /// Job registry for background jobs
 #[derive(Debug, Clone, Default)]
-pub struct JobRegistry;
+pub struct JobRegistry {
+    jobs: std::collections::HashMap<String, Job>,
+}
 
 impl JobRegistry {
     pub fn new() -> Self {
-        Self
+        Self {
+            jobs: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Add or update a job in the registry
+    pub fn add_job(&mut self, job: Job) {
+        self.jobs.insert(job.id.clone(), job);
+    }
+
+    /// Get a mutable reference to a job
+    pub fn get_job_mut(&mut self, job_id: &str) -> Option<&mut Job> {
+        self.jobs.get_mut(job_id)
+    }
+
+    /// Get a job by ID
+    pub fn get_job(&self, job_id: &str) -> Option<&Job> {
+        self.jobs.get(job_id)
     }
 
     pub fn list_all_jobs(&self) -> Vec<Job> {
-        // Returns empty list until scheduler integration
-        Vec::new()
+        let mut jobs: Vec<Job> = self.jobs.values().cloned().collect();
+        // Sort by start time (most recent first)
+        jobs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        jobs
     }
 
     pub fn list_active_jobs(&self) -> Vec<Job> {
-        // Returns empty list until scheduler integration
-        Vec::new()
+        self.jobs
+            .values()
+            .filter(|j| matches!(j.status, JobStatus::Running | JobStatus::TimeoutPending))
+            .cloned()
+            .collect()
     }
 
-    pub fn cancel_job(&self, _job_id: &str) -> bool {
-        // Stub implementation - no jobs to cancel
-        false
+    pub fn cancel_job(&mut self, job_id: &str) -> bool {
+        if let Some(job) = self.jobs.get_mut(job_id) {
+            job.status = JobStatus::Cancelled;
+            true
+        } else {
+            false
+        }
     }
 
-    pub fn cancel_all_jobs(&self) -> usize {
-        // Stub implementation - no jobs to cancel
-        0
+    pub fn cancel_all_jobs(&mut self) -> usize {
+        let mut count = 0;
+        for job in self.jobs.values_mut() {
+            if matches!(job.status, JobStatus::Running | JobStatus::TimeoutPending) {
+                job.status = JobStatus::Cancelled;
+                count += 1;
+            }
+        }
+        count
     }
 }
 

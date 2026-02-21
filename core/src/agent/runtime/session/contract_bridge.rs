@@ -430,9 +430,14 @@ impl ContractRuntime {
                     objective: spec.objective.clone(),
                 });
                 
+                // Note: job_id and objective come from delegate tool's direct OutputEvent emission
+                // This Observation is for the contract bridge path which doesn't have Commonbox access
                 Ok(Observation::WorkerSpawned {
                     intent_id,
                     worker_id: handle.id,
+                    job_id: crate::agent::commonbox::JobId::new(), // Placeholder - real job_id comes from delegate
+                    objective: spec.objective.clone(),
+                    agent_id: handle.id.0.to_string(), // Use numeric worker ID as agent_id
                 })
             }
             Intent::EmitResponse(text) => {

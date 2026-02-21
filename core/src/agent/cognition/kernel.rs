@@ -13,6 +13,7 @@ use crate::agent::types::config::KernelConfig;
 use crate::agent::types::error::{AgentError, ContractError};
 use crate::agent::types::intents::{Intent, ExitReason};
 use crate::agent::types::events::KernelEvent;
+use std::collections::HashMap;
 
 
 // Re-use Message type from intents
@@ -191,6 +192,9 @@ pub struct AgentState {
 
     /// Monotonic intent sequence counter (unique ID generator)
     pub intent_seq: u64,
+
+    /// Track LLM request retry attempts: intent_id -> retry_count
+    pub llm_retry_counts: HashMap<IntentId, u32>,
 }
 
 impl AgentState {
@@ -207,6 +211,7 @@ impl AgentState {
             token_usage: TokenUsage::default(),
             pending_approvals: Vec::new(),
             intent_seq: 0,
+            llm_retry_counts: HashMap::new(),
         }
     }
 

@@ -84,11 +84,12 @@ pub async fn create_worker_session(
     let pre_approved_tools = config.tools.clone().unwrap_or_default();
     let worker_config = crate::agent::factory::WorkerSessionConfig {
         allowed_tools: pre_approved_tools,
-        scratchpad: None, // Will be set by runner if needed
+        scratchpad: None, // Workers have their own agent-local scratchpad
         output_tx: Some(worker_output_tx),
         objective: config.objective.clone(),
         instructions: config.instructions.clone(),
         tags: Some(config.tags.clone()),
+        commonbox: Some(ctx.commonbox.clone()), // Share commonbox for coordination (commonboard tool)
     };
     
     // 4. Create session via Factory (the actual CREATION)
@@ -118,27 +119,18 @@ pub async fn create_worker_session(
 pub fn emit_worker_spawned_event(
     output_tx: &Option<crate::agent::runtime::session::OutputSender>,
     worker_id: WorkerId,
+    job_id: crate::agent::commonbox::JobId,
     objective: String,
+    agent_id: String,
 ) {
     if let Some(ref tx) = output_tx {
         let _ = tx.send(OutputEvent::WorkerSpawned {
             worker_id,
+            job_id,
             objective,
+            agent_id,
         });
     }
 }
 
-/// Initialize scratchpad entry for worker
-pub async fn initialize_scratchpad_entry(
-    scratchpad: &crate::agent::tools::scratchpad::SharedScratchpad,
-    config: &WorkerConfig,
-) {
-    let mut sp = scratchpad.write().await;
-    sp.append(
-        format!("WORKER REGISTERED [{}]: {}", config.id, config.objective),
-        None,
-        config.tags.clone(),
-        true,
-        Some(config.id.clone()),
-    );
-}
+

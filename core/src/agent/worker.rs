@@ -79,6 +79,7 @@ impl WorkerManager {
             objective: spec.objective.clone(),
             instructions: None,
             tags: None,
+            commonbox: None, // Legacy worker doesn't use commonbox
         };
         
         // Clone config for the async task

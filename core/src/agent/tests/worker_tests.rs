@@ -219,6 +219,7 @@ mod tests {
             instructions: None,
             tags: None,
             scratchpad: None,
+            commonbox: None,
         };
         
         // Create configured session
@@ -290,6 +291,7 @@ mod tests {
             instructions: None,
             tags: None,
             scratchpad: None,
+            commonbox: None,
         };
         
         let session = factory
@@ -431,6 +433,7 @@ mod tests {
             instructions: None,
             tags: None,
             scratchpad: None,
+            commonbox: None,
         };
         
         let session = factory

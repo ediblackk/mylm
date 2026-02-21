@@ -882,8 +882,12 @@ impl LlmClient {
         
         // Log streaming request details
         crate::info_log!("[LLM_CLIENT] LLM request: model={}, messages={}", self.config.model, request.messages.len());
-        for (i, msg) in request.messages.iter().enumerate() {
-            crate::debug_log!("[LLM_CLIENT] Message {}: role={:?}, content_len={}", i, msg.role, msg.content.len());
+        // Only log first 3 messages to reduce noise (system + recent context)
+        for (i, msg) in request.messages.iter().take(3).enumerate() {
+            crate::debug_log!("[LLM_CLIENT] Msg {}: role={:?}, len={}", i, msg.role, msg.content.len());
+        }
+        if request.messages.len() > 3 {
+            crate::debug_log!("[LLM_CLIENT] ... and {} more messages", request.messages.len() - 3);
         }
 
         // Serialize body for logging and request
@@ -893,14 +897,11 @@ impl LlmClient {
                 String::new()
             });
         
-        // Log body size and preview (first 1000 chars)
+        // Log body size and preview (first 200 chars to reduce noise)
         if !body_json.is_empty() {
-            crate::info_log!("[LLM_CLIENT] Streaming request body size: {} bytes", body_json.len());
-            if body_json.len() < 1000 {
-                crate::debug_log!("[LLM_CLIENT] Streaming request body: {}", body_json);
-            } else {
-                crate::debug_log!("[LLM_CLIENT] Streaming request body preview: {}...", &body_json[..1000.min(body_json.len())]);
-            }
+            crate::info_log!("[LLM_CLIENT] Request: {} bytes, {} messages", body_json.len(), request.messages.len());
+            let preview_len = 200.min(body_json.len());
+            crate::debug_log!("[LLM_CLIENT] Body preview: {}...", &body_json[..preview_len]);
         }
 
         // Request logging disabled for normal operation

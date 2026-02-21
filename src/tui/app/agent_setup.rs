@@ -4,6 +4,7 @@
 //! using the new AgentSessionFactory and contract-based architecture.
 
 use mylm_core::agent::factory::AgentSessionFactory;
+use mylm_core::agent::commonbox::Commonbox;
 use mylm_core::agent::runtime::core::ApprovalCapability;
 use mylm_core::agent::runtime::core::terminal::TerminalExecutor;
 use mylm_core::config::Config;
@@ -11,12 +12,14 @@ use std::sync::Arc;
 
 /// Create AgentSessionFactory from config
 /// 
-/// Optionally provide custom terminal executor and approval capability.
+/// Optionally provide custom terminal executor, approval capability, and commonbox.
 /// If approval is None, auto-approve is used (suitable for non-interactive use).
+/// If commonbox is provided, the delegate tool will be enabled for worker spawning.
 pub fn create_session_factory(
     config: &Config,
     terminal: Option<Arc<dyn TerminalExecutor>>,
     approval: Option<Arc<dyn ApprovalCapability>>,
+    commonbox: Option<Arc<Commonbox>>,
 ) -> AgentSessionFactory {
     let mut factory = AgentSessionFactory::new(config.clone());
     
@@ -26,6 +29,10 @@ pub fn create_session_factory(
     
     if let Some(approval) = approval {
         factory = factory.with_approval(approval);
+    }
+    
+    if let Some(commonbox) = commonbox {
+        factory = factory.with_commonbox(commonbox);
     }
     
     factory

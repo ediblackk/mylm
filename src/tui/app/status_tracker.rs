@@ -232,7 +232,7 @@ impl StatusTracker {
                 self.last_activity = Instant::now();
             }
 
-            OutputEvent::WorkerFailed { worker_id, error, is_stall } => {
+            OutputEvent::WorkerFailed { worker_id, error, is_stall, .. } => {
                 let status = if *is_stall {
                     format!("Worker {} stalled: {}", worker_id.0, error)
                 } else {
@@ -259,6 +259,20 @@ impl StatusTracker {
                     "[STATUS_TRACKER] Context pruned: {} messages, ~{} tokens saved. {}",
                     message_count, tokens_saved, summary
                 );
+            }
+            
+            OutputEvent::WorkerToolExecuting { tool, .. } => {
+                // Worker executing a tool - show in status
+                self.current_status = StatusInfo::Executing {
+                    tool: format!("worker:{}", tool),
+                    args: String::new(),
+                };
+                self.last_activity = Instant::now();
+            }
+            
+            OutputEvent::WorkerToolCompleted { .. } => {
+                // Worker tool completed - just update activity
+                self.last_activity = Instant::now();
             }
         }
     }
