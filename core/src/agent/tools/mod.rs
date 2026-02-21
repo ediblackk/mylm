@@ -223,8 +223,8 @@ impl ToolRegistry {
         if self.delegate.is_some() {
             descriptions.push(ToolDescription {
                 name: "delegate",
-                description: "Spawn specialized worker agents for parallel tasks",
-                usage: "{\"a\": \"delegate\", \"i\": {\"workers\": [{\"id\": \"worker1\", \"objective\": \"Task description\"}]}}",
+                description: "Spawn specialized worker agents for parallel tasks. Use allowed_commands/forbidden_commands to control shell access",
+                usage: r#"{"a": "delegate", "i": {"workers": [{"id": "worker1", "objective": "List files", "tools": ["shell"], "allowed_commands": ["ls -la", "ls -l *"], "forbidden_commands": ["rm *", "sudo *"]}]}}"#,
             });
         }
         

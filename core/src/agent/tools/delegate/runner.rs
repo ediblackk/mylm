@@ -18,11 +18,11 @@
 use super::types::{SpawnedWorker, WorkerConfig};
 use super::filter::WorkerEventFilter;
 use super::creator::{create_worker_session, WorkerCreationContext, emit_worker_spawned_event};
-use crate::agent::commonbox::{Commonbox, JobId, CommonboxEvent};
-use crate::agent::runtime::session::{Session, UserInput, OutputEvent};
+use crate::agent::runtime::orchestrator::commonbox::{Commonbox, JobId, CommonboxEvent};
+use crate::agent::runtime::orchestrator::{Session, UserInput, OutputEvent};
 
 use crate::agent::types::events::WorkerId;
-use crate::agent::runtime::session::OutputSender;
+use crate::agent::runtime::orchestrator::OutputSender;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -80,6 +80,8 @@ pub async fn spawn_worker(
     let id_to_job_clone = id_to_job.clone();
     let parent_output_tx = output_tx.clone();
     
+    crate::info_log!("[RUNNER] Spawning worker [{}] with session at {:p}", config.id, &session);
+    
     // Step 4: COORDINATION - Spawn the runner task
     // The runner task handles: dependency wait, session run, idle loop, cleanup
     let handle = tokio::spawn(async move {
@@ -120,9 +122,9 @@ pub async fn run_worker_session(
     job_id: JobId,
     worker_id: WorkerId,
     commonbox: Arc<Commonbox>,
-    mut session: crate::agent::runtime::session::AgencySession<
+    mut session: crate::agent::runtime::orchestrator::AgencySession<
         crate::agent::cognition::Planner,
-        crate::agent::runtime::session::ContractRuntime,
+        crate::agent::runtime::orchestrator::ContractRuntime,
         crate::agent::runtime::capabilities::InMemoryTransport,
     >,
     id_to_job: Arc<RwLock<HashMap<String, JobId>>>,
@@ -263,12 +265,9 @@ pub async fn run_worker_session(
                                     result,
                                 }
                             }
-                            // Prefix ResponseChunk with worker ID for display
-                            OutputEvent::ResponseChunk { content } => {
-                                OutputEvent::ResponseChunk {
-                                    content: format!("[Worker {}] {}", worker_id_numeric, content),
-                                }
-                            }
+                            // ResponseChunk: pass through unchanged (worker context is implicit)
+                            // Adding prefix here causes spam: "[Worker 1000]" appears throughout text
+                            chunk @ OutputEvent::ResponseChunk { .. } => chunk,
                             // Prefix Error with worker ID for context
                             OutputEvent::Error { message } => {
                                 OutputEvent::Error {
@@ -319,7 +318,7 @@ pub async fn run_worker_session(
     });
     
     // Run session using the Session trait with timeout
-    crate::info_log!("Worker [{}] about to call session.run()", config.id);
+    crate::info_log!("Worker [{}] about to call session.run(), session at {:p}, transport instance_id: {}", config.id, &session, session.transport_instance_id());
     commonbox.update_job_status_message(&job_id, "Running cognitive loop...").await;
     
     // DEBUG: Check if session has proper setup
@@ -408,7 +407,7 @@ pub async fn run_worker_session(
                     let _ = commonbox.submit_query_result(
                         &job_id,
                         query.id,
-                        crate::agent::commonbox::JobResult(serde_json::json!(response))
+                        crate::agent::runtime::orchestrator::commonbox::JobResult(serde_json::json!(response))
                     ).await;
                     
                     // Transition back to idle
@@ -425,7 +424,7 @@ pub async fn run_worker_session(
                 "output": format!("{:?}", result),
             });
             
-            if let Err(e) = commonbox.complete_job(&job_id, crate::agent::commonbox::JobResult(result_json)).await {
+            if let Err(e) = commonbox.complete_job(&job_id, crate::agent::runtime::orchestrator::commonbox::JobResult(result_json)).await {
                 crate::error_log!("Worker [{}] failed to complete job in commonbox: {}", config.id, e);
             } else {
                 crate::info_log!("Worker [{}] completed successfully and job marked complete in commonbox", config.id);

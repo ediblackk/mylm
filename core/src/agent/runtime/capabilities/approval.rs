@@ -109,3 +109,93 @@ impl ApprovalCapability for AutoApproveCapability {
         Ok(ApprovalOutcome::Granted)
     }
 }
+
+/// Worker restricted approval - auto-approves based on allowed/forbidden patterns
+/// 
+/// - Commands matching `allowed_commands` → Auto-approved
+/// - Commands matching `forbidden_commands` → Auto-denied  
+/// - Everything else → Auto-denied (escalation to parent can be added later)
+pub struct WorkerRestrictedApprovalCapability {
+    allowed_patterns: Vec<String>,
+    forbidden_patterns: Vec<String>,
+}
+
+impl WorkerRestrictedApprovalCapability {
+    pub fn new(allowed: Vec<String>, forbidden: Vec<String>) -> Self {
+        Self {
+            allowed_patterns: allowed,
+            forbidden_patterns: forbidden,
+        }
+    }
+
+    /// Check if command matches any pattern (supports * wildcards)
+    fn matches_pattern(&self, command: &str, pattern: &str) -> bool {
+        if pattern.contains('*') {
+            // Convert glob pattern to regex-like matching
+            let regex_pattern = pattern
+                .replace(".", "\\.")
+                .replace("*", ".*");
+            if let Ok(regex) = regex::Regex::new(&format!("^{}$", regex_pattern)) {
+                return regex.is_match(command);
+            }
+        }
+        // Exact match or simple contains check
+        command.contains(pattern.trim_end_matches('*').trim_start_matches('*'))
+    }
+
+    /// Check if command should be auto-approved
+    fn is_allowed(&self, tool: &str, args: &str) -> bool {
+        let command = format!("{} {}", tool, args);
+        
+        // First check forbidden - these always deny
+        for pattern in &self.forbidden_patterns {
+            if self.matches_pattern(&command, pattern) {
+                return false;
+            }
+        }
+        
+        // Then check allowed
+        for pattern in &self.allowed_patterns {
+            if self.matches_pattern(&command, pattern) {
+                return true;
+            }
+        }
+        
+        // Default: not allowed
+        false
+    }
+}
+
+impl Capability for WorkerRestrictedApprovalCapability {
+    fn name(&self) -> &'static str {
+        "worker-restricted-approval"
+    }
+}
+
+#[async_trait::async_trait]
+impl ApprovalCapability for WorkerRestrictedApprovalCapability {
+    async fn request(
+        &self,
+        _ctx: &RuntimeContext,
+        req: ApprovalRequest,
+    ) -> Result<ApprovalOutcome, ApprovalError> {
+        if self.is_allowed(&req.tool, &req.args) {
+            crate::info_log!(
+                "[WORKER_APPROVAL] Auto-approved: {} {} (matched allowed pattern)",
+                req.tool, req.args
+            );
+            Ok(ApprovalOutcome::Granted)
+        } else {
+            crate::info_log!(
+                "[WORKER_APPROVAL] Auto-denied: {} {} (no matching allowed pattern)",
+                req.tool, req.args
+            );
+            Ok(ApprovalOutcome::Denied {
+                reason: Some(format!(
+                    "Command '{}' not in worker's allowed commands list. Allowed: {:?}",
+                    req.tool, self.allowed_patterns
+                )),
+            })
+        }
+    }
+}

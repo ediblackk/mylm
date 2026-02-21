@@ -18,10 +18,10 @@ pub use prompt::build_worker_prompt;
 use crate::agent::runtime::core::{Capability, ToolCapability};
 use crate::agent::runtime::core::RuntimeContext;
 use crate::agent::runtime::core::ToolError;
-use crate::agent::commonbox::Commonbox;
+use crate::agent::runtime::orchestrator::commonbox::Commonbox;
 use crate::agent::types::intents::ToolCall;
 use crate::agent::types::events::ToolResult;
-use crate::agent::runtime::session::OutputSender;
+use crate::agent::runtime::orchestrator::OutputSender;
 
 
 use std::collections::HashMap;
@@ -137,7 +137,29 @@ impl ToolCapability for DelegateTool {
             Ok(a) => a,
             Err(e) => {
                 let error_msg = format!(
-                    "Invalid delegate arguments: {}.\n\nExpected format:\n{{\n  \"shared_context\": \"Optional context for all workers\",\n  \"workers\": [\n    {{\n      \"id\": \"worker1\",\n      \"objective\": \"Task description\",\n      \"tools\": [\"read_file\", \"write_file\"],\n      \"tags\": [\"tag1\"]\n    }}\n  ]\n}}\n\nReceived: {}",
+                    r#"Invalid delegate arguments: {}.
+
+Expected format:
+{{
+  "shared_context": "Optional context for all workers",
+  "workers": [
+    {{
+      "id": "worker1",
+      "objective": "Task description",
+      "tools": ["read_file", "shell"],
+      "allowed_commands": ["ls -la", "cat *", "cargo check"],
+      "forbidden_commands": ["rm -rf *", "sudo *"],
+      "tags": ["tag1"]
+    }}
+  ]
+}}
+
+Field descriptions:
+  - tools: List of tools the worker can use (shell, read_file, etc.)
+  - allowed_commands: Shell command patterns worker can execute without approval (* wildcard supported)
+  - forbidden_commands: Shell command patterns that are always blocked
+
+Received: {}"#,
                     e, call.arguments
                 );
                 return Ok(ToolResult::Error {
@@ -206,7 +228,7 @@ impl ToolCapability for DelegateTool {
         }
         
         // Shared job ID mapping
-        let id_to_job: Arc<RwLock<HashMap<String, crate::agent::commonbox::JobId>>> = Arc::new(RwLock::new(HashMap::new()));
+        let id_to_job: Arc<RwLock<HashMap<String, crate::agent::runtime::orchestrator::commonbox::JobId>>> = Arc::new(RwLock::new(HashMap::new()));
         
         // Spawn all workers
         let mut spawned = Vec::new();
@@ -264,7 +286,7 @@ impl ToolCapability for DelegateTool {
 mod tests {
     use super::*;
     use crate::agent::tools::ToolRegistry;
-    use crate::agent::commonbox::Commonbox;
+    use crate::agent::runtime::orchestrator::commonbox::Commonbox;
 
     #[tokio::test]
     async fn test_delegate_tool_creation() {

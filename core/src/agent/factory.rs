@@ -9,15 +9,15 @@ use crate::config::{Config, BridgeError, config_to_llm_config, config_to_kernel_
 use crate::provider::LlmClient;
 use crate::agent::{
     // Session types
-    runtime::session::session::AgencySession,
-    runtime::session::ContractRuntime,
+    runtime::orchestrator::orchestrator::AgencySession,
+    runtime::orchestrator::ContractRuntime,
     runtime::capabilities::InMemoryTransport,
     tools::{ToolRegistry, DelegateTool},
     runtime::core::terminal::TerminalExecutor,
     runtime::core::ApprovalCapability,
     runtime::core::LLMCapability,
     // Coordination
-    commonbox::Commonbox,
+    runtime::orchestrator::commonbox::Commonbox,
     // Cognition
     cognition::Planner,
     cognition::prompts::system::ToolDescription,
@@ -61,10 +61,14 @@ pub struct AgentSessionFactory {
 pub struct WorkerSessionConfig {
     /// Pre-approved tools for this worker
     pub allowed_tools: Vec<String>,
+    /// Auto-approved command patterns (e.g., ["ls -la", "cargo check *"])
+    pub allowed_commands: Vec<String>,
+    /// Forbidden command patterns (e.g., ["rm -rf *", "sudo *"])
+    pub forbidden_commands: Vec<String>,
     /// Initial scratchpad content
     pub scratchpad: Option<String>,
     /// Output channel for worker events
-    pub output_tx: Option<tokio::sync::mpsc::Sender<crate::agent::runtime::session::OutputEvent>>,
+    pub output_tx: Option<tokio::sync::mpsc::Sender<crate::agent::runtime::orchestrator::OutputEvent>>,
     /// Worker's objective
     pub objective: String,
     /// Instructions for the worker
@@ -212,7 +216,7 @@ impl AgentSessionFactory {
                 Arc::clone(commonbox),
                 parent_tools,
                 worker_factory,
-            ).with_output_sender(crate::agent::runtime::session::OutputSender::Broadcast(output_tx.clone()));
+            ).with_output_sender(crate::agent::runtime::orchestrator::OutputSender::Broadcast(output_tx.clone()));
             
             // Create new registry with delegate and scratchpad enabled
             ToolRegistry::new()
@@ -402,11 +406,20 @@ impl AgentSessionFactory {
             runtime = runtime.with_terminal(Arc::clone(terminal));
         }
         
-        // Step 7: Attach approval capability if provided
-        if let Some(ref approval) = self.approval {
-            crate::info_log!("[FACTORY] Attaching approval capability to worker runtime");
-            runtime = runtime.with_approval(Arc::clone(approval));
-        }
+        // Step 7: Workers use restricted approval based on allowed/forbidden command patterns
+        // Commands matching allowed_commands → auto-approved
+        // Commands matching forbidden_commands → auto-denied
+        // Everything else → auto-denied (escalation to parent can be added later)
+        crate::info_log!(
+            "[FACTORY] Attaching restricted approval to worker: allowed={:?}, forbidden={:?}",
+            config.allowed_commands, config.forbidden_commands
+        );
+        runtime = runtime.with_approval(Arc::new(
+            crate::agent::runtime::capabilities::WorkerRestrictedApprovalCapability::new(
+                config.allowed_commands.clone(),
+                config.forbidden_commands.clone(),
+            )
+        ));
         
         // Step 8: Create kernel with filtered tool descriptions
         crate::info_log!("[FACTORY] Creating kernel with {} tool descriptions", filtered_descriptions.len());
@@ -416,9 +429,11 @@ impl AgentSessionFactory {
         
         // Step 9: Create transport
         let transport = InMemoryTransport::new(100);
+        crate::info_log!("[FACTORY] Created transport at {:p}, passing to session", &transport);
         
         // Step 10: Assemble session with broadcast channel
         let session = AgencySession::new_with_memory(kernel, runtime, transport, broadcast_tx.clone(), None);
+        crate::info_log!("[FACTORY] Session created at {:p}", &session);
         
         // Step 11: If parent provided mpsc channel, spawn bridging task
         if let Some(ref mpsc_tx) = config.output_tx {

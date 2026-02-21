@@ -69,10 +69,11 @@ use async_trait::async_trait;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Duration;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicU64;
 
 use crate::agent::cognition::kernel::{AgencyKernel};
 use crate::agent::runtime::core::{RuntimeError, AgencyRuntimeError, AgencyRuntime};
-use crate::agent::runtime::session::transport::EventTransport;
+use crate::agent::runtime::orchestrator::transport::EventTransport;
 use crate::agent::types::graph::IntentGraph;
 use crate::agent::types::ids::IntentId;
 use crate::agent::types::intents::Intent;
@@ -165,7 +166,7 @@ pub enum OutputEvent {
     /// Worker spawned
     WorkerSpawned { 
         worker_id: crate::agent::types::events::WorkerId, 
-        job_id: crate::agent::commonbox::JobId,
+        job_id: crate::agent::runtime::orchestrator::commonbox::JobId,
         objective: String,
         agent_id: String, // worker config id like "file_lister"
     },
@@ -173,13 +174,13 @@ pub enum OutputEvent {
     /// Worker completed
     WorkerCompleted { 
         worker_id: crate::agent::types::events::WorkerId,
-        job_id: crate::agent::commonbox::JobId,
+        job_id: crate::agent::runtime::orchestrator::commonbox::JobId,
     },
     
     /// Worker failed
     WorkerFailed { 
         worker_id: crate::agent::types::events::WorkerId,
-        job_id: crate::agent::commonbox::JobId,
+        job_id: crate::agent::runtime::orchestrator::commonbox::JobId,
         error: String,
         is_stall: bool,
     },
@@ -187,7 +188,7 @@ pub enum OutputEvent {
     /// Worker tool executing (richer event for job tracking)
     WorkerToolExecuting {
         worker_id: crate::agent::types::events::WorkerId,
-        job_id: crate::agent::commonbox::JobId,
+        job_id: crate::agent::runtime::orchestrator::commonbox::JobId,
         tool: String,
         args: String,
     },
@@ -195,7 +196,7 @@ pub enum OutputEvent {
     /// Worker tool completed (richer event for job tracking)
     WorkerToolCompleted {
         worker_id: crate::agent::types::events::WorkerId,
-        job_id: crate::agent::commonbox::JobId,
+        job_id: crate::agent::runtime::orchestrator::commonbox::JobId,
         result: String,
     },
     
@@ -247,7 +248,7 @@ pub struct SessionStatus {
 pub enum SessionError {
     Kernel(crate::agent::cognition::kernel::KernelError),
     Runtime(crate::agent::runtime::core::AgencyRuntimeError),
-    Transport(crate::agent::runtime::session::transport::TransportError),
+    Transport(crate::agent::runtime::orchestrator::transport::TransportError),
     Interrupted,
     Internal(String),
 }
@@ -285,7 +286,7 @@ where
     intent_results: HashMap<IntentId, Observation>,
     
     // Event sequencing (for envelope generation, not intent IDs)
-    next_event_id: u64,
+    next_event_id: AtomicU64,
     
     // Distributed execution tracking (Leader only)
     in_flight: HashSet<IntentId>,
@@ -308,6 +309,10 @@ where
     // The session owns this, engine's MemoryProvider holds Weak reference
     #[allow(dead_code)]
     memory_manager: Option<std::sync::Arc<crate::agent::memory::AgentMemoryManager>>,
+    
+    // INVARIANT: Transport identity check - ensures transport is never swapped
+    #[allow(dead_code)]
+    transport_instance_id: u64,
 }
 
 impl<K, R, T> AgencySession<K, R, T>
@@ -339,6 +344,8 @@ where
         memory_manager: Option<std::sync::Arc<crate::agent::memory::AgentMemoryManager>>,
     ) -> Self {
         let (input_tx, input_rx) = mpsc::channel(100);
+        let transport_instance_id = transport.instance_id();
+        crate::info_log!("[SESSION] Creating session with transport instance_id: {}", transport_instance_id);
         
         Self {
             kernel,
@@ -347,7 +354,7 @@ where
             pending_graph: None,
             completed_intents: HashSet::new(),
             intent_results: HashMap::new(),
-            next_event_id: 1,
+            next_event_id: AtomicU64::new(1),
             in_flight: HashSet::new(),
             output_tx,
             input_rx,
@@ -356,6 +363,7 @@ where
             consecutive_errors: 0,
             max_consecutive_errors: 3,
             memory_manager,
+            transport_instance_id,
         }
     }
 
@@ -365,16 +373,30 @@ where
     pub fn input_sender(&self) -> mpsc::Sender<UserInput> {
         self.input_tx.clone()
     }
+    
+    /// Get the transport instance ID for debugging
+    /// 
+    /// Used to verify transport identity across session moves
+    pub fn transport_instance_id(&self) -> u64 {
+        self.transport.instance_id()
+    }
 
     /// Generate next event ID
-    fn next_event_id(&mut self) -> EventId {
-        let id = EventId::new(self.next_event_id);
-        self.next_event_id += 1;
-        id
+    fn next_event_id(&self) -> EventId {
+        let id = self.next_event_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        EventId::new(id)
     }
 
     /// Publish an event to the transport
     async fn publish_event(&mut self, event: KernelEvent) -> Result<(), SessionError> {
+        // INVARIANT: Verify transport has not been swapped
+        let current_instance_id = self.transport.instance_id();
+        assert_eq!(
+            current_instance_id, self.transport_instance_id,
+            "TRANSPORT INVARIANT VIOLATED in publish_event: Session created with transport instance_id: {}, but publishing via transport instance_id: {}",
+            self.transport_instance_id, current_instance_id
+        );
+        
         let envelope = KernelEventEnvelope::new(
             self.next_event_id(),
             crate::agent::types::ids::NodeId::new(0), // Local node
@@ -560,7 +582,16 @@ where
     T: EventTransport + 'static,
 {
     async fn run(&mut self) -> Result<SessionResult, SessionError> {
-        crate::info_log!("[SESSION] Session started");
+        crate::info_log!("[SESSION] Session started, transport instance_id: {}", self.transport.instance_id());
+        
+        // INVARIANT: Verify transport has not been swapped
+        let current_instance_id = self.transport.instance_id();
+        assert_eq!(
+            current_instance_id, self.transport_instance_id,
+            "TRANSPORT INVARIANT VIOLATED: Session created with transport instance_id: {}, but run() sees transport instance_id: {}",
+            self.transport_instance_id, current_instance_id
+        );
+        crate::info_log!("[SESSION] Transport identity verified: instance_id {}", current_instance_id);
         
         // Initial state check - if we already have a pending graph, execute it
         if self.pending_graph.is_some() {
@@ -876,16 +907,17 @@ where
 
     async fn submit_input(&self, input: UserInput) -> Result<(), SessionError> {
         crate::info_log!("[SESSION] submit_input called with: {:?}", std::mem::discriminant(&input));
-        match self.input_tx.send(input).await {
-            Ok(_) => {
-                crate::info_log!("[SESSION] submit_input: message sent successfully");
-                Ok(())
-            }
-            Err(_e) => {
-                crate::error_log!("[SESSION] submit_input: failed to send - channel closed");
-                Err(SessionError::Internal("Input channel closed".to_string()))
-            }
+        
+        // Handle interrupt immediately
+        if matches!(input, UserInput::Interrupt) {
+            self.interrupt().await;
+            return Ok(());
         }
+        
+        // Send UserInput directly to the input channel
+        // The main run() loop will receive it and convert to events
+        self.input_tx.send(input).await
+            .map_err(|_| SessionError::Internal("Input channel closed".to_string()))
     }
 
     fn subscribe_output(&self) -> broadcast::Receiver<OutputEvent> {

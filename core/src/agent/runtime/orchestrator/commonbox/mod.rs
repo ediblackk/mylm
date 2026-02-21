@@ -29,534 +29,28 @@
 //! The LLM snapshot is regenerated on **every state mutation** via `with_state()`.
 //! This ensures consistency between machine state and LLM-visible state.
 
+pub mod agent;
+pub mod coordination;
+pub mod error;
+pub mod event;
+pub mod id;
+pub mod job;
+pub mod state;
+
+// Re-exports for convenience
+pub use agent::{AgentStatus, CommonboxEntry, EntryUpdate};
+pub use coordination::{CoordinationBoard, CoordinationEntry};
+pub use error::CommonboxError;
+pub use event::CommonboxEvent;
+pub use id::JobId;
+pub use job::{Job, JobResult, JobStatus, RoutedQuery};
+pub use state::CommonboxState;
+
 use crate::agent::identity::AgentId;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
-
-/// Unique job identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct JobId(pub Uuid);
-
-impl JobId {
-    /// Generate a new unique job ID.
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-}
-
-impl Default for JobId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl std::fmt::Display for JobId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Short format: first 8 chars of UUID
-        write!(f, "{}", self.0.to_string().split('-').next().unwrap_or(""))
-    }
-}
-
-/// Agent status in the lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AgentStatus {
-    /// Agent is idle, waiting for work
-    Idle,
-    /// Agent is actively processing
-    Processing,
-    /// Agent has stalled (needs Main resolution)
-    Stalled,
-    /// Agent has completed its task
-    Completed,
-    /// Agent has failed
-    Failed,
-}
-
-impl AgentStatus {
-    /// Get abbreviated form for LLM snapshot.
-    pub fn abbrev(&self) -> &'static str {
-        match self {
-            AgentStatus::Idle => "Idle",
-            AgentStatus::Processing => "Processing",
-            AgentStatus::Stalled => "Stalled",
-            AgentStatus::Completed => "Completed",
-            AgentStatus::Failed => "Failed",
-        }
-    }
-
-    /// Check if this is a terminal state.
-    pub fn is_terminal(&self) -> bool {
-        matches!(self, AgentStatus::Completed | AgentStatus::Failed)
-    }
-}
-
-/// Entry in the Commonbox for a single agent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommonboxEntry {
-    /// The agent's unique identifier
-    pub agent_id: AgentId,
-    /// Current status in lifecycle
-    pub status: AgentStatus,
-    /// Current context token count (raw)
-    pub ctx_tokens: usize,
-    /// Current step count
-    pub step_count: usize,
-    /// Maximum allowed steps before stall
-    pub max_steps: usize,
-    /// Semantic comment for LLM
-    pub comment: String,
-    /// Last update timestamp
-    pub last_updated: DateTime<Utc>,
-}
-
-impl CommonboxEntry {
-    /// Create a new entry for an agent.
-    pub fn new(agent_id: AgentId) -> Self {
-        Self {
-            agent_id,
-            status: AgentStatus::Idle,
-            ctx_tokens: 0,
-            step_count: 0,
-            max_steps: 20, // Default from plan
-            comment: "Initialized".to_string(),
-            last_updated: Utc::now(),
-        }
-    }
-
-    /// Apply updates to this entry.
-    pub fn apply(&mut self, updates: EntryUpdate) {
-        if let Some(status) = updates.status {
-            self.status = status;
-        }
-        if let Some(ctx_tokens) = updates.ctx_tokens {
-            self.ctx_tokens = ctx_tokens;
-        }
-        if let Some(step_count) = updates.step_count {
-            self.step_count = step_count;
-        }
-        if let Some(max_steps) = updates.max_steps {
-            self.max_steps = max_steps;
-        }
-        if let Some(comment) = updates.comment {
-            self.comment = comment;
-        }
-    }
-}
-
-/// Updates to apply to a CommonboxEntry.
-#[derive(Debug, Clone)]
-pub struct EntryUpdate {
-    pub agent_id: AgentId,
-    pub status: Option<AgentStatus>,
-    pub ctx_tokens: Option<usize>,
-    pub step_count: Option<usize>,
-    pub max_steps: Option<usize>,
-    pub comment: Option<String>,
-}
-
-impl Default for EntryUpdate {
-    fn default() -> Self {
-        // Note: agent_id must be set explicitly via for_agent()
-        Self {
-            agent_id: AgentId::main(), // Placeholder, should be overridden
-            status: None,
-            ctx_tokens: None,
-            step_count: None,
-            max_steps: None,
-            comment: None,
-        }
-    }
-}
-
-impl EntryUpdate {
-    /// Create an update for the given agent.
-    pub fn for_agent(agent_id: AgentId) -> Self {
-        Self {
-            agent_id,
-            ..Default::default()
-        }
-    }
-
-    /// Set status.
-    pub fn with_status(mut self, status: AgentStatus) -> Self {
-        self.status = Some(status);
-        self
-    }
-
-    /// Set context tokens.
-    pub fn with_ctx_tokens(mut self, tokens: usize) -> Self {
-        self.ctx_tokens = Some(tokens);
-        self
-    }
-
-    /// Set step count.
-    pub fn with_step_count(mut self, count: usize) -> Self {
-        self.step_count = Some(count);
-        self
-    }
-
-    /// Set max steps.
-    pub fn with_max_steps(mut self, max: usize) -> Self {
-        self.max_steps = Some(max);
-        self
-    }
-
-    /// Set comment.
-    pub fn with_comment(mut self, comment: impl Into<String>) -> Self {
-        self.comment = Some(comment.into());
-        self
-    }
-}
-
-/// Typed job result for type safety.
-///
-/// Wraps serde_json::Value with a named boundary for future tightening.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JobResult(pub serde_json::Value);
-
-impl JobResult {
-    /// Create from any serializable type.
-    pub fn new<T: Serialize>(value: T) -> Result<Self, serde_json::Error> {
-        Ok(Self(serde_json::to_value(value)?))
-    }
-
-    /// Get as string if it's a string value.
-    pub fn as_str(&self) -> Option<&str> {
-        self.0.as_str()
-    }
-
-    /// Extract to a typed value.
-    pub fn extract<T: for<'de> Deserialize<'de>>(&self) -> Result<T, serde_json::Error> {
-        serde_json::from_value(self.0.clone())
-    }
-
-    /// Get inner Value.
-    pub fn inner(&self) -> &serde_json::Value {
-        &self.0
-    }
-}
-
-impl From<serde_json::Value> for JobResult {
-    fn from(value: serde_json::Value) -> Self {
-        Self(value)
-    }
-}
-
-/// Job status in lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum JobStatus {
-    Pending,
-    Running,
-    /// Worker completed initial task, waiting for routed queries
-    Idle,
-    Completed,
-    Failed,
-    Stalled,
-    Cancelled,
-}
-
-impl JobStatus {
-    /// Check if terminal (completed, failed, stalled, or cancelled).
-    pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            JobStatus::Completed | JobStatus::Failed | JobStatus::Stalled | JobStatus::Cancelled
-        )
-    }
-
-    /// Check if active (not terminal).
-    pub fn is_active(&self) -> bool {
-        !self.is_terminal()
-    }
-}
-
-/// A query routed from Main to an idle worker.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoutedQuery {
-    /// Unique ID for this query
-    pub id: String,
-    /// The query content
-    pub query: String,
-    /// Context/context for the query
-    pub context: Option<String>,
-    /// When the query was sent
-    pub sent_at: DateTime<Utc>,
-}
-
-impl RoutedQuery {
-    /// Create a new routed query.
-    pub fn new(query: impl Into<String>) -> Self {
-        Self {
-            id: Uuid::new_v4().to_string(),
-            query: query.into(),
-            context: None,
-            sent_at: Utc::now(),
-        }
-    }
-
-    /// Add context to the query.
-    pub fn with_context(mut self, context: impl Into<String>) -> Self {
-        self.context = Some(context.into());
-        self
-    }
-}
-
-/// A job tracked in the Commonbox.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Job {
-    /// Unique job ID
-    pub id: JobId,
-    /// Agent executing this job
-    pub agent_id: AgentId,
-    /// Human-readable description
-    pub description: String,
-    /// Current status
-    pub status: JobStatus,
-    /// When created
-    pub created_at: DateTime<Utc>,
-    /// When started (if started)
-    pub started_at: Option<DateTime<Utc>>,
-    /// When completed (if completed)
-    pub completed_at: Option<DateTime<Utc>>,
-    /// Job result (if completed)
-    pub result: Option<JobResult>,
-    /// Error message (if failed)
-    pub error: Option<String>,
-    /// Status message for progress reporting
-    pub status_message: Option<String>,
-    /// Dependencies that must complete first
-    pub dependencies: Vec<JobId>,
-    /// Jobs waiting on this one
-    pub dependents: Vec<JobId>,
-    /// Pending routed queries (for idle workers)
-    pub pending_queries: Vec<RoutedQuery>,
-}
-
-/// Events broadcast by Commonbox.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CommonboxEvent {
-    /// Agent entry was created
-    AgentRegistered { agent_id: AgentId },
-    /// Agent entry was updated
-    AgentUpdated { agent_id: AgentId },
-    /// Job was created
-    JobCreated { job_id: JobId, agent_id: AgentId },
-    /// Job started running
-    JobStarted { job_id: JobId },
-    /// Job completed initial task, now idle (waiting for routed queries)
-    JobIdle { job_id: JobId },
-    /// Job completed successfully
-    JobCompleted { job_id: JobId, result: JobResult },
-    /// Job failed
-    JobFailed { job_id: JobId, error: String },
-    /// Job stalled (needs Main resolution)
-    JobStalled { job_id: JobId, reason: String },
-    /// Job was cancelled
-    JobCancelled { job_id: JobId },
-    /// Dependency completed (for waiting jobs)
-    DependencyCompleted { job_id: JobId, dependency_id: JobId },
-    /// Query routed to a worker
-    QueryRouted { job_id: JobId, query_id: String },
-    /// Query result from a worker
-    QueryResult { job_id: JobId, query_id: String, result: JobResult },
-}
-
-/// Errors from Commonbox operations.
-#[derive(Debug, Clone, PartialEq)]
-pub enum CommonboxError {
-    /// Permission denied (trying to update another agent's entry)
-    PermissionDenied,
-    /// Agent not found
-    AgentNotFound,
-    /// Job not found
-    JobNotFound,
-    /// Invalid state transition
-    InvalidTransition { from: JobStatus, to: JobStatus },
-    /// Invalid state for operation
-    InvalidState { state: String, operation: String },
-    /// Dependency not found
-    DependencyNotFound,
-    /// Circular dependency
-    CircularDependency,
-    /// Resource already claimed by another agent
-    ResourceAlreadyClaimed,
-}
-
-impl std::fmt::Display for CommonboxError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CommonboxError::PermissionDenied => write!(f, "Permission denied"),
-            CommonboxError::AgentNotFound => write!(f, "Agent not found"),
-            CommonboxError::JobNotFound => write!(f, "Job not found"),
-            CommonboxError::InvalidTransition { from, to } => {
-                write!(f, "Invalid transition from {:?} to {:?}", from, to)
-            }
-            CommonboxError::InvalidState { state, operation } => {
-                write!(f, "Invalid state {} for operation {}", state, operation)
-            }
-            CommonboxError::DependencyNotFound => write!(f, "Dependency not found"),
-            CommonboxError::CircularDependency => write!(f, "Circular dependency detected"),
-            CommonboxError::ResourceAlreadyClaimed => write!(f, "Resource already claimed by another agent"),
-        }
-    }
-}
-
-impl std::error::Error for CommonboxError {}
-
-/// Coordination entry for the commonboard
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CoordinationEntry {
-    /// Entry ID
-    pub id: Uuid,
-    /// Agent that created this entry
-    pub agent_id: AgentId,
-    /// Entry type: claim, progress, complete, signal
-    pub entry_type: String,
-    /// Resource being claimed (for claims) or message content
-    pub content: String,
-    /// Timestamp
-    pub timestamp: DateTime<Utc>,
-    /// Optional tags
-    pub tags: Vec<String>,
-}
-
-/// Coordination board for inter-agent communication
-#[derive(Debug, Clone, Default)]
-pub struct CoordinationBoard {
-    /// All coordination entries
-    entries: Vec<CoordinationEntry>,
-}
-
-impl CoordinationBoard {
-    /// Add a new entry
-    pub fn add(&mut self, entry: CoordinationEntry) {
-        self.entries.push(entry);
-    }
-
-    /// Get all entries
-    pub fn list(&self) -> &[CoordinationEntry] {
-        &self.entries
-    }
-
-    /// Find claims for a specific resource
-    pub fn find_claims(&self, resource: &str) -> Vec<&CoordinationEntry> {
-        self.entries
-            .iter()
-            .filter(|e| e.entry_type == "claim" && e.content.contains(resource))
-            .collect()
-    }
-
-    /// Find entries by agent
-    pub fn find_by_agent(&self, agent_id: &AgentId) -> Vec<&CoordinationEntry> {
-        self.entries
-            .iter()
-            .filter(|e| &e.agent_id == agent_id)
-            .collect()
-    }
-
-    /// Clear completed entries older than threshold
-    pub fn cleanup_completed(&mut self, older_than: DateTime<Utc>) {
-        self.entries.retain(|e| {
-            !(e.entry_type == "complete" && e.timestamp < older_than)
-        });
-    }
-
-    /// Format as LLM-readable string
-    pub fn format_for_llm(&self) -> String {
-        if self.entries.is_empty() {
-            return "No coordination entries.".to_string();
-        }
-
-        let lines: Vec<String> = self
-            .entries
-            .iter()
-            .map(|e| {
-                format!(
-                    "[{}] {}: {}",
-                    e.entry_type.to_uppercase(),
-                    e.agent_id.short_name(),
-                    e.content
-                )
-            })
-            .collect();
-
-        lines.join("\n")
-    }
-}
-
-/// Internal state protected by single RwLock.
-#[derive(Debug)]
-struct CommonboxState {
-    /// Agent entries
-    entries: HashMap<AgentId, CommonboxEntry>,
-    /// Job tracking
-    jobs: HashMap<JobId, Job>,
-    /// Agent to current job mapping
-    agent_to_job: HashMap<AgentId, JobId>,
-    /// Coordination board for inter-agent communication
-    coordination: CoordinationBoard,
-    /// Cached LLM snapshot (regenerated on every write)
-    llm_snapshot: String,
-}
-
-impl CommonboxState {
-    /// Create empty state.
-    fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-            jobs: HashMap::new(),
-            agent_to_job: HashMap::new(),
-            coordination: CoordinationBoard::default(),
-            llm_snapshot: String::new(),
-        }
-    }
-
-    /// Regenerate semantic snapshot for LLM consumption.
-    ///
-    /// Format per entry: "{short_name} {s:status,h:health,cm:comment}"
-    fn regenerate_snapshot(&mut self) {
-        let mut lines: Vec<String> = Vec::new();
-
-        // Sort by agent type for deterministic output
-        let mut agents: Vec<_> = self.entries.iter().collect();
-        agents.sort_by_key(|(id, _)| {
-            if id.is_main() {
-                (0, id.instance_id.clone())
-            } else {
-                (1, id.instance_id.clone())
-            }
-        });
-
-        for (agent_id, entry) in agents {
-            let health = Self::classify_health(entry);
-            let line = format!(
-                "{} {{s:{},h:{},cm:{}}}",
-                agent_id.short_name(),
-                entry.status.abbrev(),
-                health,
-                entry.comment
-            );
-            lines.push(line);
-        }
-
-        self.llm_snapshot = lines.join("\n");
-    }
-
-    /// Classify agent health based on metrics.
-    fn classify_health(entry: &CommonboxEntry) -> &'static str {
-        if entry.step_count >= entry.max_steps {
-            "stalled"
-        } else if entry.ctx_tokens > 15000 {
-            "heavy"
-        } else {
-            "good"
-        }
-    }
-}
 
 /// Unified agent state container.
 ///
@@ -783,8 +277,9 @@ impl Commonbox {
             if let Some(job) = state.jobs.get_mut(job_id) {
                 job.status_message = Some(message);
             }
-        }).await;
-        
+        })
+        .await;
+
         // Note: No event for status message updates to avoid spam
     }
 
@@ -1274,52 +769,44 @@ impl Commonbox {
         resource: impl Into<String>,
     ) -> Result<(), CommonboxError> {
         let resource = resource.into();
-        
+
         // Check if already claimed
-        let already_claimed = self.with_state(|state| {
-            !state.coordination.find_claims(&resource).is_empty()
-        }).await;
+        let already_claimed = self
+            .with_state(|state| {
+                !state.coordination.find_claims(&resource).is_empty()
+            })
+            .await;
 
         if already_claimed {
             return Err(CommonboxError::ResourceAlreadyClaimed);
         }
 
-        self.add_coordination_entry(
-            agent_id,
-            "claim",
-            resource,
-            vec!["claim".to_string()],
-        ).await;
+        self.add_coordination_entry(agent_id, "claim", resource, vec!["claim".to_string()])
+            .await;
 
         Ok(())
     }
 
     /// Report progress on the commonboard.
-    pub async fn report_progress(
-        &self,
-        agent_id: AgentId,
-        message: impl Into<String>,
-    ) {
+    pub async fn report_progress(&self, agent_id: AgentId, message: impl Into<String>) {
         self.add_coordination_entry(
             agent_id,
             "progress",
             message,
             vec!["progress".to_string()],
-        ).await;
+        )
+        .await;
     }
 
     /// Mark completion on the commonboard.
-    pub async fn mark_complete(
-        &self,
-        agent_id: AgentId,
-        summary: impl Into<String>,
-    ) {
+    pub async fn mark_complete(&self, agent_id: AgentId, summary: impl Into<String>) {
         self.add_coordination_entry(
             agent_id,
             "complete",
             summary,
             vec!["complete".to_string()],
-        ).await;
+        )
+        .await;
     }
 
     /// List all coordination entries.
@@ -1334,28 +821,73 @@ impl Commonbox {
 
     /// Get coordination board formatted for LLM consumption.
     pub async fn get_coordination_snapshot(&self) -> String {
-        self.state
-            .read()
-            .await
-            .coordination
-            .format_for_llm()
+        self.state.read().await.coordination.format_for_llm()
     }
 
     /// Check if a resource is claimed.
     pub async fn is_resource_claimed(&self, resource: &str) -> Option<AgentId> {
         self.with_state(|state| {
-            state.coordination
+            state
+                .coordination
                 .find_claims(resource)
                 .first()
                 .map(|e| e.agent_id.clone())
-        }).await
+        })
+        .await
+    }
+
+    /// Release a resource claim.
+    ///
+    /// Only the agent that claimed the resource can release it.
+    pub async fn release_resource(
+        &self,
+        agent_id: &AgentId,
+        resource: impl Into<String>,
+    ) -> Result<(), CommonboxError> {
+        let resource = resource.into();
+
+        self.with_state(|state| {
+            // Find and remove the claim
+            match state.coordination.remove_claim(&resource) {
+                Some(entry) => {
+                    // Verify this agent owns the claim
+                    if &entry.agent_id != agent_id {
+                        // Put it back - wrong agent
+                        state.coordination.add(entry);
+                        Err(CommonboxError::PermissionDenied)
+                    } else {
+                        Ok(())
+                    }
+                }
+                None => Err(CommonboxError::InvalidState {
+                    state: "not_claimed".to_string(),
+                    operation: "release_resource".to_string(),
+                }),
+            }
+        })
+        .await
+    }
+
+    /// List all active resource claims.
+    pub async fn list_claims(&self) -> Vec<(String, AgentId)> {
+        self.with_state(|state| {
+            state
+                .coordination
+                .list()
+                .iter()
+                .filter(|e| e.entry_type == "claim")
+                .map(|e| (e.content.clone(), e.agent_id.clone()))
+                .collect()
+        })
+        .await
     }
 
     /// Cleanup old completed entries.
     pub async fn cleanup_coordination(&self, older_than: DateTime<Utc>) {
         self.with_state(|state| {
             state.coordination.cleanup_completed(older_than);
-        }).await;
+        })
+        .await;
     }
 }
 
@@ -1368,13 +900,6 @@ impl Default for Commonbox {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_job_id_display() {
-        let job_id = JobId::new();
-        let display = format!("{}", job_id);
-        assert_eq!(display.len(), 8); // First 8 chars of UUID
-    }
 
     #[tokio::test]
     async fn test_register_agent() {
@@ -1547,37 +1072,14 @@ mod tests {
         assert!(snapshot.contains("s:Processing"));
 
         // Should have health classifications
-        assert!(snapshot.contains("h:good") || snapshot.contains("h:stalled") || snapshot.contains("h:heavy"));
+        assert!(
+            snapshot.contains("h:good")
+                || snapshot.contains("h:stalled")
+                || snapshot.contains("h:heavy")
+        );
 
         // Should have comments
         assert!(snapshot.contains("cm:Coordinating"));
-    }
-
-    #[tokio::test]
-    async fn test_job_result_typing() {
-        // Test new() with serializable
-        #[derive(Serialize)]
-        struct MyResult {
-            value: i32,
-            message: String,
-        }
-
-        let result = JobResult::new(MyResult {
-            value: 42,
-            message: "Hello".to_string(),
-        })
-        .unwrap();
-
-        // Test extraction
-        #[derive(Deserialize, Debug, PartialEq)]
-        struct Extracted {
-            value: i32,
-            message: String,
-        }
-
-        let extracted: Extracted = result.extract().unwrap();
-        assert_eq!(extracted.value, 42);
-        assert_eq!(extracted.message, "Hello");
     }
 
     #[tokio::test]
@@ -1744,7 +1246,10 @@ mod tests {
         assert_eq!(job_state.status, JobStatus::Stalled);
 
         // Archive the job (Stalled → Completed)
-        commonbox.archive_job(&job, JobResult::new("archived").unwrap()).await.unwrap();
+        commonbox
+            .archive_job(&job, JobResult::new("archived").unwrap())
+            .await
+            .unwrap();
 
         // Verify job is completed
         let job_state = commonbox.get_job(&job).await.unwrap();

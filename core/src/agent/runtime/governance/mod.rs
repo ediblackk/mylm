@@ -16,6 +16,7 @@
 //! - `WorkerStall`: Handle stalled worker resolution
 
 pub mod authority;
+pub mod claim_enforcer;
 pub mod enforcer;
 pub mod worker_stall;
 
@@ -23,5 +24,6 @@ pub use authority::{
     Authority, AuthorityMatrix, MainPermissions, WorkerPermissions,
     ToolAccess, ShellAccess,
 };
+pub use claim_enforcer::{ClaimEnforcer, ClaimEnforcement};
 pub use enforcer::ApprovalEnforcer;
 pub use worker_stall::{WorkerStall, StallResolution, StalledJob};

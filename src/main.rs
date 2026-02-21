@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use std::sync::Arc;
 
 use mylm_core::config::Config;
-use mylm_core::agent::commonbox::Commonbox;
+use mylm_core::agent::runtime::orchestrator::commonbox::Commonbox;
 
 mod hub;
 mod tui;

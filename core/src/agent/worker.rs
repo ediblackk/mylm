@@ -8,8 +8,8 @@ use crate::agent::{
     factory::{AgentSessionFactory, WorkerSessionConfig},
     cognition::Planner,
 };
-use crate::agent::runtime::session::{Session, UserInput, SessionResult, OutputEvent};
-use crate::agent::runtime::session::session::AgencySession;
+use crate::agent::runtime::orchestrator::{Session, UserInput, SessionResult, OutputEvent};
+use crate::agent::runtime::orchestrator::orchestrator::AgencySession;
 use crate::agent::runtime::ContractRuntime;
 use crate::agent::runtime::capabilities::InMemoryTransport;
 use tokio::sync::{oneshot, RwLock};
@@ -74,6 +74,8 @@ impl WorkerManager {
         // Build worker configuration
         let worker_config = WorkerSessionConfig {
             allowed_tools: vec![], // Default: no pre-approved tools
+            allowed_commands: vec![], // Default: no auto-approved commands
+            forbidden_commands: vec!["rm -rf *".to_string(), "sudo *".to_string()], // Default safety
             scratchpad: None,
             output_tx: None,
             objective: spec.objective.clone(),

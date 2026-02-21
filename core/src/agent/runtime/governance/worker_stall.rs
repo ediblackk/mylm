@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
-use crate::agent::commonbox::{Commonbox, CommonboxEvent, JobId, JobResult};
+use crate::agent::runtime::orchestrator::commonbox::{Commonbox, CommonboxEvent, JobId, JobResult};
 use crate::agent::identity::AgentId;
 
 /// Strategy for resolving a stalled worker.
@@ -252,6 +252,6 @@ mod tests {
         
         // Job should be completed
         let job = commonbox.get_job(&job_id).await.unwrap();
-        assert_eq!(job.status, crate::agent::commonbox::JobStatus::Completed);
+        assert_eq!(job.status, crate::agent::runtime::orchestrator::commonbox::JobStatus::Completed);
     }
 }

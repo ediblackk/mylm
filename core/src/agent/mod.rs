@@ -81,15 +81,15 @@ pub mod worker;
 pub mod factory;
 pub mod memory;
 pub mod identity;
-pub mod commonbox;
+
 
 // Governance is now part of runtime::governance
 
 /// Contract module - Core type definitions and traits
 ///
 // Note: The contract module has been moved to runtime/ and types/.
-// Use runtime::orchestrator for AgencyKernel, runtime::session for Session,
-// and runtime::transport for EventTransport.
+// Use runtime::orchestrator for AgencyKernel, runtime::orchestrator for Session,
+// and runtime::orchestrator::transport for EventTransport.
 
 // Selective re-exports to avoid ambiguity
 pub use types::{

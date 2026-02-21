@@ -12,10 +12,11 @@ use crate::agent::types::intents::{Intent, ExitReason};
 use crate::agent::types::graph::IntentGraph;
 use crate::agent::types::ids::IntentId;
 use crate::agent::types::observations::{Observation, ExecutionError, HaltReason};
-use crate::agent::runtime::session::session::OutputEvent;
+use crate::agent::runtime::orchestrator::orchestrator::OutputEvent;
 use crate::agent::runtime::core::{
     AgencyRuntime, AgencyRuntimeError, TelemetryEvent, HealthStatus,
 };
+use crate::agent::runtime::governance::{ClaimEnforcer, ClaimEnforcement};
 
 use crate::agent::runtime::capabilities::{
     LlmClientCapability,
@@ -24,7 +25,7 @@ use crate::agent::runtime::capabilities::{
     AutoApproveCapability,
 };
 use crate::agent::runtime::core::LLMCapability;
-use crate::agent::runtime::session::dag_executor::DagExecutor;
+use crate::agent::runtime::orchestrator::dag_executor::DagExecutor;
 use crate::agent::tools::ToolRegistry;
 use crate::agent::runtime::core::{WorkerCapability, ToolCapability, ApprovalCapability};
 use crate::agent::runtime::core::terminal::{TerminalExecutor, DefaultTerminalExecutor};
@@ -79,6 +80,8 @@ pub struct ContractRuntime {
     output_tx: Option<broadcast::Sender<OutputEvent>>,
     /// Terminal executor for shell commands
     terminal: Arc<dyn TerminalExecutor>,
+    /// Claim enforcer for resource coordination (optional)
+    claim_enforcer: Option<Arc<ClaimEnforcer>>,
 }
 
 impl ContractRuntime {
@@ -104,6 +107,7 @@ impl ContractRuntime {
             telemetry_tx,
             output_tx: None,
             terminal: Arc::new(DefaultTerminalExecutor::new()),
+            claim_enforcer: None,
         }
     }
     
@@ -127,6 +131,7 @@ impl ContractRuntime {
             telemetry_tx,
             output_tx: None,
             terminal: Arc::new(DefaultTerminalExecutor::new()),
+            claim_enforcer: None,
         }
     }
     
@@ -163,6 +168,7 @@ impl ContractRuntime {
             telemetry_tx,
             output_tx: None,
             terminal: Arc::new(DefaultTerminalExecutor::new()),
+            claim_enforcer: None,
         }
     }
     
@@ -184,6 +190,7 @@ impl ContractRuntime {
             telemetry_tx,
             output_tx: None,
             terminal: Arc::new(DefaultTerminalExecutor::new()),
+            claim_enforcer: None,
         }
     }
     
@@ -208,6 +215,15 @@ impl ContractRuntime {
     /// Set output sender for streaming events
     pub fn with_output_sender(mut self, output_tx: broadcast::Sender<OutputEvent>) -> Self {
         self.output_tx = Some(output_tx);
+        self
+    }
+    
+    /// Set claim enforcer for resource coordination
+    /// 
+    /// When set, tools that modify files will require a claim first.
+    /// This prevents conflicts when multiple agents work in parallel.
+    pub fn with_claim_enforcer(mut self, enforcer: Arc<ClaimEnforcer>) -> Self {
+        self.claim_enforcer = Some(enforcer);
         self
     }
 
@@ -237,6 +253,49 @@ impl ContractRuntime {
                 // Include terminal executor so shell tool can use PTY
                 let ctx = RuntimeContext::new()
                     .with_terminal(Arc::clone(&self.terminal));
+                
+                // CLAIM ENFORCEMENT: Check if agent has claimed the resource
+                if let Some(ref claim_enforcer) = self.claim_enforcer {
+                    // Get agent_id from context or use default
+                    let agent_id = ctx.agent_id()
+                        .unwrap_or_else(|| crate::agent::identity::AgentId::worker("unknown"));
+                    
+                    match claim_enforcer.check_tool_call(&agent_id, &call).await {
+                        ClaimEnforcement::Allow => {
+                            // Proceed with execution
+                        }
+                        ClaimEnforcement::Deny { resource, claimed_by } => {
+                            return Ok(Observation::ToolCompleted {
+                                intent_id,
+                                result: crate::agent::types::events::ToolResult::Error {
+                                    message: format!(
+                                        "Access denied: '{}' is claimed by {}. \
+                                         Use commonboard to check status or coordinate.",
+                                        resource, claimed_by
+                                    ),
+                                    code: Some("RESOURCE_CLAIMED".to_string()),
+                                    retryable: false,
+                                },
+                                execution_time_ms: 0,
+                            });
+                        }
+                        ClaimEnforcement::RequiresClaim { resource } => {
+                            return Ok(Observation::ToolCompleted {
+                                intent_id,
+                                result: crate::agent::types::events::ToolResult::Error {
+                                    message: format!(
+                                        "You must claim '{}' before modifying it. \
+                                         Use: commonboard action=claim resource={}",
+                                        resource, resource
+                                    ),
+                                    code: Some("REQUIRES_CLAIM".to_string()),
+                                    retryable: true,
+                                },
+                                execution_time_ms: 0,
+                            });
+                        }
+                    }
+                }
                 
                 // Execute tool via registry
                 let tool_start = Instant::now();
@@ -435,7 +494,7 @@ impl ContractRuntime {
                 Ok(Observation::WorkerSpawned {
                     intent_id,
                     worker_id: handle.id,
-                    job_id: crate::agent::commonbox::JobId::new(), // Placeholder - real job_id comes from delegate
+                    job_id: crate::agent::runtime::orchestrator::commonbox::JobId::new(), // Placeholder - real job_id comes from delegate
                     objective: spec.objective.clone(),
                     agent_id: handle.id.0.to_string(), // Use numeric worker ID as agent_id
                 })
@@ -594,6 +653,7 @@ impl Clone for ContractRuntime {
             telemetry_tx: self.telemetry_tx.clone(),
             output_tx: self.output_tx.clone(),
             terminal: Arc::clone(&self.terminal),
+            claim_enforcer: self.claim_enforcer.clone(),
         }
     }
 }

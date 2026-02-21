@@ -33,7 +33,7 @@ pub enum Observation {
     WorkerSpawned {
         intent_id: IntentId,
         worker_id: WorkerId,
-        job_id: crate::agent::commonbox::JobId,
+        job_id: crate::agent::runtime::orchestrator::commonbox::JobId,
         objective: String,
         agent_id: String,
     },
@@ -41,7 +41,7 @@ pub enum Observation {
     /// A worker completed its task
     WorkerCompleted {
         worker_id: WorkerId,
-        job_id: crate::agent::commonbox::JobId,
+        job_id: crate::agent::runtime::orchestrator::commonbox::JobId,
         result: Result<String, WorkerError>,
         usage: TokenUsage,
     },

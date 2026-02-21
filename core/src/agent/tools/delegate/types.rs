@@ -1,6 +1,6 @@
 //! Types for the delegate tool - Worker configurations and arguments
 
-use crate::agent::commonbox::JobId;
+use crate::agent::runtime::orchestrator::commonbox::JobId;
 use crate::agent::types::events::WorkerId;
 use serde::Deserialize;
 use tokio::task::JoinHandle;

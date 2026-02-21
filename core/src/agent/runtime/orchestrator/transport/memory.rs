@@ -3,11 +3,16 @@
 //! For single-process use. Uses mpsc channels for communication.
 //! Preserves FIFO ordering per session.
 
+use crate::agent::runtime::orchestrator::transport::{
+    DeliveryGuarantee, EventTransport, TransportCapabilities, TransportError,
+};
+use crate::agent::types::envelope::{KernelEventEnvelope, OrderingGuarantee};
 use async_trait::async_trait;
 use tokio::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::agent::runtime::session::transport::{EventTransport, TransportError, TransportCapabilities, DeliveryGuarantee};
-use crate::agent::types::envelope::{KernelEventEnvelope, OrderingGuarantee};
+/// Global transport instance counter for identity verification
+static TRANSPORT_INSTANCE_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// In-memory transport for single-process use
 ///
@@ -40,6 +45,9 @@ pub struct InMemoryTransport {
     batch_size: usize,
     /// Whether transport is closed
     closed: bool,
+    /// INVARIANT: Unique ID for this transport instance
+    /// Used to verify transport identity across moves
+    instance_id: u64,
 }
 
 impl InMemoryTransport {
@@ -49,24 +57,29 @@ impl InMemoryTransport {
     /// * `buffer_size` - Size of the internal channel buffer
     pub fn new(buffer_size: usize) -> Self {
         let (tx, rx) = mpsc::channel(buffer_size);
+        let instance_id = TRANSPORT_INSTANCE_COUNTER.fetch_add(1, Ordering::SeqCst);
+        crate::info_log!("[TRANSPORT:{}] Creating new InMemoryTransport - tx addr: {:p}, rx addr: {:p}", instance_id, &tx, &rx);
         Self {
             rx,
             tx,
             buffer: Vec::new(),
             batch_size: 100,
             closed: false,
+            instance_id,
         }
     }
 
     /// Create a new transport with custom batch size
     pub fn with_batch_size(buffer_size: usize, batch_size: usize) -> Self {
         let (tx, rx) = mpsc::channel(buffer_size);
+        let instance_id = TRANSPORT_INSTANCE_COUNTER.fetch_add(1, Ordering::SeqCst);
         Self {
             rx,
             tx,
             buffer: Vec::new(),
             batch_size,
             closed: false,
+            instance_id,
         }
     }
 
@@ -86,6 +99,13 @@ impl InMemoryTransport {
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty() && self.rx.is_empty()
     }
+    
+    /// Get the unique instance ID for this transport
+    /// 
+    /// Used for identity verification across session moves
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
 }
 
 #[async_trait]
@@ -102,10 +122,12 @@ impl EventTransport for InMemoryTransport {
         }
 
         // Wait for at least one event
+        crate::info_log!("[TRANSPORT:{}] Waiting on rx {:p}", self.instance_id, &self.rx);
         match self.rx.recv().await {
             Some(envelope) => {
+                crate::info_log!("[TRANSPORT:{}] Received on rx {:p}: {:?}", self.instance_id, &self.rx, envelope.payload);
                 let mut batch = vec![envelope];
-                
+
                 // Collect more events up to batch_size (non-blocking)
                 while batch.len() < self.batch_size {
                     match self.rx.try_recv() {
@@ -113,7 +135,7 @@ impl EventTransport for InMemoryTransport {
                         Err(_) => break, // Channel empty
                     }
                 }
-                
+
                 Ok(batch)
             }
             None => {
@@ -131,11 +153,12 @@ impl EventTransport for InMemoryTransport {
             });
         }
 
+        crate::info_log!("[TRANSPORT:{}] Publishing via tx {:p}: {:?}", self.instance_id, &self.tx, event.payload);
         match self.tx.send(event).await {
             Ok(_) => Ok(()),
             Err(_) => Err(TransportError::Disconnected {
                 reason: "Receiver dropped".to_string(),
-            })
+            }),
         }
     }
 
@@ -163,6 +186,29 @@ impl EventTransport for InMemoryTransport {
             supports_batching: true,
         }
     }
+
+    fn inject(&self, event: KernelEventEnvelope) -> Result<(), TransportError> {
+        if self.closed {
+            return Err(TransportError::NotAvailable {
+                reason: "Transport closed".to_string(),
+            });
+        }
+
+        // Use try_send for non-blocking injection from external sources
+        match self.tx.try_send(event) {
+            Ok(_) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(TransportError::NotAvailable {
+                reason: "Channel full".to_string(),
+            }),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(TransportError::Disconnected {
+                reason: "Receiver dropped".to_string(),
+            }),
+        }
+    }
+    
+    fn instance_id(&self) -> u64 {
+        self.instance_id
+    }
 }
 
 /// Creates a pair of connected in-memory transports
@@ -171,6 +217,8 @@ impl EventTransport for InMemoryTransport {
 pub fn connected_pair(buffer_size: usize) -> (InMemoryTransport, InMemoryTransport) {
     let (tx1, rx1) = mpsc::channel(buffer_size);
     let (tx2, rx2) = mpsc::channel(buffer_size);
+    let instance_id1 = TRANSPORT_INSTANCE_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let instance_id2 = TRANSPORT_INSTANCE_COUNTER.fetch_add(1, Ordering::SeqCst);
 
     let transport1 = InMemoryTransport {
         rx: rx1,
@@ -178,6 +226,7 @@ pub fn connected_pair(buffer_size: usize) -> (InMemoryTransport, InMemoryTranspo
         buffer: Vec::new(),
         batch_size: 100,
         closed: false,
+        instance_id: instance_id1,
     };
 
     let transport2 = InMemoryTransport {
@@ -185,6 +234,7 @@ pub fn connected_pair(buffer_size: usize) -> (InMemoryTransport, InMemoryTranspo
         tx: tx1,
         buffer: Vec::new(),
         batch_size: 100,
+        instance_id: instance_id2,
         closed: false,
     };
 
@@ -194,8 +244,8 @@ pub fn connected_pair(buffer_size: usize) -> (InMemoryTransport, InMemoryTranspo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::types::ids::{EventId, NodeId, SessionId, LogicalClock};
     use crate::agent::types::events::KernelEvent;
+    use crate::agent::types::ids::{EventId, LogicalClock, NodeId, SessionId};
 
     #[tokio::test]
     async fn test_basic_publish_receive() {

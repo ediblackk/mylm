@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 
 use mylm_core::agent::runtime::Session;
 use mylm_core::agent::factory::AgentSessionFactory;
-use mylm_core::agent::commonbox::Commonbox;
+use mylm_core::agent::runtime::orchestrator::commonbox::Commonbox;
 use mylm_core::agent::runtime::core::ApprovalCapability;
 use mylm_core::agent::runtime::core::terminal::TerminalExecutor;
 use mylm_core::config::Config;

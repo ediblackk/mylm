@@ -9,11 +9,11 @@ pub mod telemetry;
 pub mod memory;
 pub mod retry;
 pub mod local;
-pub mod transport;
+// Transport moved to orchestrator::transport
 
 pub use llm::LlmClientCapability;
 pub use crate::agent::tools::{ToolRegistry, ToolDescription};
-pub use approval::{TerminalApprovalCapability, AutoApproveCapability};
+pub use approval::{TerminalApprovalCapability, AutoApproveCapability, WorkerRestrictedApprovalCapability};
 pub use worker::LocalWorkerCapability;
 pub use telemetry::ConsoleTelemetry;
 pub use memory::{MemoryCapability, MemoryCategory};
@@ -22,7 +22,7 @@ pub use retry::{
     CircuitBreakerLLM, ResilientLLM,
 };
 pub use local::SimpleToolExecutor;
-pub use transport::{InMemoryTransport, connected_pair};
+pub use crate::agent::runtime::orchestrator::transport::{InMemoryTransport, connected_pair};
 
 // Re-export from agent::memory for convenience
 pub use crate::agent::memory::{AgentMemoryManager, MemoryMode, MemoryStats};

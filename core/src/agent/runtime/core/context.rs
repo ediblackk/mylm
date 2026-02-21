@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use super::terminal::TerminalExecutor;
+use crate::agent::identity::AgentId;
 
 /// Distributed trace identifier
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -39,6 +40,9 @@ pub struct RuntimeContext {
     /// Terminal executor for shell commands
     /// When None, commands run via std::process::Command
     terminal: Option<Arc<dyn TerminalExecutor>>,
+    
+    /// Agent identity for this execution
+    agent_id: Option<AgentId>,
 }
 
 impl std::fmt::Debug for RuntimeContext {
@@ -57,6 +61,7 @@ impl RuntimeContext {
             trace_id: TraceId::new(),
             cancellation: CancellationToken::new(),
             terminal: None,
+            agent_id: None,
         }
     }
     
@@ -76,12 +81,24 @@ impl RuntimeContext {
         self.terminal.is_some()
     }
     
+    /// Set the agent ID
+    pub fn with_agent_id(mut self, agent_id: AgentId) -> Self {
+        self.agent_id = Some(agent_id);
+        self
+    }
+    
+    /// Get the agent ID if set
+    pub fn agent_id(&self) -> Option<AgentId> {
+        self.agent_id.clone()
+    }
+    
     /// Create child context with same trace
     pub fn child(&self) -> Self {
         Self {
             trace_id: self.trace_id.clone(),
             cancellation: self.cancellation.child_token(),
             terminal: self.terminal.clone(),
+            agent_id: self.agent_id.clone(),
         }
     }
     

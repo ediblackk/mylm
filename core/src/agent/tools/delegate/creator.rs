@@ -10,10 +10,10 @@
 //! between "creating" (this module) and "coordinating" (runner.rs).
 
 use super::types::WorkerConfig;
-use crate::agent::commonbox::{Commonbox, JobId};
-use crate::agent::runtime::session::{AgencySession, OutputEvent};
+use crate::agent::runtime::orchestrator::commonbox::{Commonbox, JobId};
+use crate::agent::runtime::orchestrator::{AgencySession, OutputEvent};
 use crate::agent::cognition::Planner;
-use crate::agent::runtime::session::ContractRuntime;
+use crate::agent::runtime::orchestrator::ContractRuntime;
 use crate::agent::runtime::capabilities::InMemoryTransport;
 use crate::agent::types::events::WorkerId;
 
@@ -82,8 +82,18 @@ pub async fn create_worker_session(
     
     // 3. Build worker session configuration
     let pre_approved_tools = config.tools.clone().unwrap_or_default();
+    let allowed_commands = config.allowed_commands.clone().unwrap_or_default();
+    let forbidden_commands = config.forbidden_commands.clone().unwrap_or_default();
+    
+    crate::info_log!(
+        "[CREATOR] Worker [{}] command restrictions: allowed={:?}, forbidden={:?}",
+        config.id, allowed_commands, forbidden_commands
+    );
+    
     let worker_config = crate::agent::factory::WorkerSessionConfig {
         allowed_tools: pre_approved_tools,
+        allowed_commands,
+        forbidden_commands,
         scratchpad: None, // Workers have their own agent-local scratchpad
         output_tx: Some(worker_output_tx),
         objective: config.objective.clone(),
@@ -96,7 +106,7 @@ pub async fn create_worker_session(
     crate::info_log!("[CREATOR] Creating session for worker [{}] via Factory...", config.id);
     let session = match ctx.factory.create_configured_worker_session(&config.id, worker_config).await {
         Ok(s) => {
-            crate::info_log!("[CREATOR] Session created for worker [{}]", config.id);
+            crate::info_log!("[CREATOR] Session created for worker [{}] at {:p}", config.id, &s);
             s
         }
         Err(e) => {
@@ -106,6 +116,7 @@ pub async fn create_worker_session(
         }
     };
     
+    crate::info_log!("[CREATOR] Returning CreatedWorker with session at {:p}, transport instance_id: {}", &session, session.transport_instance_id());
     Ok(CreatedWorker {
         config: config.clone(),
         job_id,
@@ -117,9 +128,9 @@ pub async fn create_worker_session(
 
 /// Emit WorkerSpawned event (helper for runner)
 pub fn emit_worker_spawned_event(
-    output_tx: &Option<crate::agent::runtime::session::OutputSender>,
+    output_tx: &Option<crate::agent::runtime::orchestrator::OutputSender>,
     worker_id: WorkerId,
-    job_id: crate::agent::commonbox::JobId,
+    job_id: crate::agent::runtime::orchestrator::commonbox::JobId,
     objective: String,
     agent_id: String,
 ) {

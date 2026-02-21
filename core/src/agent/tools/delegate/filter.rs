@@ -5,7 +5,7 @@
 //! 2. Preserving semantic event types (not flattening to Status)
 //! 3. Dropping diagnostic/noise events
 
-use crate::agent::runtime::session::OutputEvent;
+use crate::agent::runtime::orchestrator::OutputEvent;
 use crate::agent::types::events::WorkerId;
 
 /// Event filter decision for worker forwarding
@@ -102,9 +102,9 @@ impl WorkerEventFilter {
                 }
             }
             
-            // DROP: Noise/diagnostic events
+            // FORWARD: ResponseComplete - signals end of streaming to UI
             OutputEvent::ResponseComplete => {
-                FilterDecision::Drop("noise")
+                FilterDecision::Forward(event)
             }
             
             // PASS THROUGH: Worker events (already have worker_id)

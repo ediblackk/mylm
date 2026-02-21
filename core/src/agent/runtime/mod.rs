@@ -5,7 +5,7 @@
 //! - executor: Decision interpretation
 //! - capabilities: Capability implementations
 //! - governance: Policy enforcement
-//! - session: Orchestration
+//! - orchestrator: Orchestration layer (DAG execution, worker management)
 //! - stubs: Test utilities
 
 // Core types and traits - foundation
@@ -20,8 +20,8 @@ pub mod capabilities;
 // Governance and policy enforcement
 pub mod governance;
 
-// Session orchestration
-pub mod session;
+// Orchestrator layer (was session - renamed for clarity)
+pub mod orchestrator;
 
 // Test stubs
 pub mod stubs;
@@ -37,7 +37,7 @@ pub use core::{
 
 pub use executor::{AgentRuntime, CapabilityGraph};
 
-pub use session::{
+pub use orchestrator::{
     Session, UserInput, OutputEvent, SessionStatus, SessionResult, SessionError,
     ContractRuntime,
 };

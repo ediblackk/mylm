@@ -15,8 +15,8 @@ mod tests {
     use crate::agent::{
         AgentSessionFactory,
         WorkerSessionConfig,
-        commonbox::{Commonbox, JobResult},
-        runtime::session::{OutputEvent, UserInput},
+        runtime::orchestrator::commonbox::{Commonbox, JobResult},
+        runtime::orchestrator::{OutputEvent, UserInput},
         runtime::core::{LLMCapability, Capability, RuntimeContext, LLMError, StreamChunk},
         tools::ToolRegistry,
         types::intents::LLMRequest,
@@ -214,6 +214,8 @@ mod tests {
         // Configure worker with 1 second timeout
         let worker_config = WorkerSessionConfig {
             allowed_tools: vec!["read_file".to_string()],
+            allowed_commands: vec![],
+            forbidden_commands: vec![],
             output_tx: None,
             objective: "Test timeout behavior".to_string(),
             instructions: None,
@@ -286,6 +288,8 @@ mod tests {
         
         let worker_config = WorkerSessionConfig {
             allowed_tools: vec!["read_file".to_string()],
+            allowed_commands: vec![],
+            forbidden_commands: vec![],
             output_tx: None,
             objective: "Test failure event type".to_string(),
             instructions: None,
@@ -428,6 +432,8 @@ mod tests {
         
         let worker_config = WorkerSessionConfig {
             allowed_tools: vec!["read_file".to_string()],
+            allowed_commands: vec![],
+            forbidden_commands: vec![],
             output_tx: None,
             objective: "Say hello".to_string(),
             instructions: None,
