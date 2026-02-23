@@ -150,7 +150,7 @@ impl DagExecutor {
 mod tests {
     use super::*;
     use crate::agent::types::{Intent, IntentId, IntentGraphBuilder};
-    use crate::agent::runtime::{TelemetryEvent, HealthStatus};
+    use crate::agent::runtime::core::{TelemetryEvent, HealthStatus};
     use crate::agent::types::events::ToolResult;
     use async_trait::async_trait;
 

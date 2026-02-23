@@ -112,6 +112,7 @@ mod tests {
                 Ok(StreamChunk {
                     content: "Mock streaming response".to_string(),
                     is_final: true,
+                    usage: None,
                 })
             }))
         }
@@ -399,7 +400,7 @@ mod tests {
         
         // Send some events
         tx.send(OutputEvent::ResponseChunk { content: "Hello".to_string() }).ok();
-        tx.send(OutputEvent::ResponseComplete).ok();
+        tx.send(OutputEvent::ResponseComplete { usage: None }).ok();
         tx.send(OutputEvent::WorkerSpawned { 
             worker_id: crate::agent::types::events::WorkerId(1000),
             objective: "Test".to_string(),

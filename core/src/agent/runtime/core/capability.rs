@@ -21,6 +21,8 @@ pub trait Capability: Send + Sync {
 pub struct StreamChunk {
     pub content: String,
     pub is_final: bool,
+    /// Token usage (only present in final chunk when available)
+    pub usage: Option<crate::agent::types::events::TokenUsage>,
 }
 
 /// LLM capability - text completion

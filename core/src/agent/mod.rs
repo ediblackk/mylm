@@ -16,7 +16,8 @@
 //! │  - Capability traits: LLM, Tools, Approval, Workers, Telemetry│
 //! ├─────────────────────────────────────────────────────────────┤
 //! │  COGNITION        Pure state machine (no async/IO)          │
-//! │  - CognitiveEngine: (state, input) -> Transition            │
+//! │  - StepEngine: (state, input) -> Transition                 │
+//! │  - GraphEngine: events -> IntentGraph (DAG)                 │
 //! │  - AgentState: Immutable snapshot                           │
 //! │  - AgentDecision: Intent only (no execution)                │
 //! ├─────────────────────────────────────────────────────────────┤
@@ -88,7 +89,7 @@ pub mod identity;
 /// Contract module - Core type definitions and traits
 ///
 // Note: The contract module has been moved to runtime/ and types/.
-// Use runtime::orchestrator for AgencyKernel, runtime::orchestrator for Session,
+// Use runtime::orchestrator for GraphEngine, runtime::orchestrator for Session,
 // and runtime::orchestrator::transport for EventTransport.
 
 // Selective re-exports to avoid ambiguity
@@ -101,9 +102,9 @@ pub use types::{
 pub use cognition::{
     AgentState, Message, WorkerId,
     InputEvent, ApprovalOutcome, LLMResponse,
-    AgentDecision, Transition, CognitiveEngine,
+    AgentDecision, Transition, StepEngine,
     CognitiveError,
-    Planner, LegacyPlanner,
+    Planner, LlmEngine, GraphEngine, StubEngine, StubGraphEngine,
 };
 
 pub use runtime::{

@@ -6,13 +6,13 @@
 mod tests {
     use crate::agent::{
         AgentBuilder, SessionInput, SessionConfig,
-        CognitiveEngine, AgentState, InputEvent, Transition,
-        runtime::impls::{
-            LlmClientCapability,
-            ConsoleTelemetry,
-        },
-        runtime::tools::ToolRegistry,
+        StepEngine, AgentState, InputEvent, Transition,
     };
+    use crate::agent::runtime::capabilities::{
+        LlmClientCapability,
+        ConsoleTelemetry,
+    };
+    use crate::agent::tools::ToolRegistry;
     use tokio::sync::mpsc;
     use std::sync::Arc;
     use futures::Stream;
@@ -29,17 +29,17 @@ mod tests {
         }
     }
 
-    impl crate::agent::runtime::capability::Capability for MockLLM {
+    impl crate::agent::runtime::core::Capability for MockLLM {
         fn name(&self) -> &'static str { "mock-llm" }
     }
 
     #[async_trait::async_trait]
-    impl crate::agent::runtime::capability::LLMCapability for MockLLM {
+    impl crate::agent::runtime::core::LLMCapability for MockLLM {
         async fn complete(
             &self,
-            _ctx: &crate::agent::runtime::context::RuntimeContext,
-            _req: crate::agent::cognition::decision::LLMRequest,
-        ) -> Result<crate::agent::cognition::input::LLMResponse, crate::agent::runtime::error::LLMError> {
+            _ctx: &crate::agent::runtime::RuntimeContext,
+            _req: crate::agent::types::intents::LLMRequest,
+        ) -> Result<crate::agent::types::events::LLMResponse, crate::agent::runtime::LLMError> {
             let response = self.responses.get(self.call_count)
                 .cloned()
                 .unwrap_or_else(|| "No more responses".to_string());
@@ -56,17 +56,18 @@ mod tests {
         
         fn complete_stream<'a>(
             &'a self,
-            _ctx: &'a crate::agent::runtime::context::RuntimeContext,
+            _ctx: &'a crate::agent::runtime::RuntimeContext,
             _req: crate::agent::types::intents::LLMRequest,
-        ) -> std::pin::Pin<Box<dyn Stream<Item = Result<crate::agent::runtime::capability::StreamChunk, crate::agent::runtime::error::LLMError>> + Send + 'a>> {
+        ) -> std::pin::Pin<Box<dyn Stream<Item = Result<crate::agent::runtime::StreamChunk, crate::agent::runtime::LLMError>> + Send + 'a>> {
             let response = self.responses.get(self.call_count)
                 .cloned()
                 .unwrap_or_else(|| "No more responses".to_string());
             
             Box::pin(futures::stream::once(async move {
-                Ok(crate::agent::runtime::capability::StreamChunk {
+                Ok(crate::agent::runtime::StreamChunk {
                     content: response,
                     is_final: true,
+                    usage: None,
                 })
             }))
         }
@@ -104,7 +105,7 @@ mod tests {
         // Custom engine that always calls a tool
         struct ToolCallingEngine;
         
-        impl CognitiveEngine for ToolCallingEngine {
+        impl StepEngine for ToolCallingEngine {
             fn step(
                 &mut self,
                 state: &AgentState,
@@ -130,7 +131,7 @@ mod tests {
                     _ => AgentDecision::Exit(crate::agent::cognition::decision::AgentExitReason::Complete),
                 };
                 
-                Ok(Transition::new(state.clone().increment_step(), decision))
+                Ok(Transition::new(state.clone().increment_step_immutable(), decision))
             }
             
             fn build_prompt(&self, _state: &AgentState) -> String { "test".to_string() }

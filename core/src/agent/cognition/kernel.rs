@@ -1,18 +1,21 @@
-//! AgencyKernel trait - the pure, deterministic core
+//! GraphEngine trait - the pure, deterministic core
 //!
-//! The kernel is a state machine that:
+//! The graph engine is a state machine that:
 //! - Takes events as input
 //! - Returns a graph of intents as output
 //! - Has NO async, NO IO, NO side effects
 //! - Is fully deterministic and replayable
+//!
+//! For single-step decision making, see `StepEngine` in `engine.rs`.
 
 use crate::agent::types::graph::IntentGraph;
 use crate::agent::types::ids::IntentId;
 use crate::agent::types::intents::IntentNode;
 use crate::agent::types::config::KernelConfig;
-use crate::agent::types::error::{AgentError, ContractError};
+use crate::agent::types::error::ContractError;
 use crate::agent::types::intents::{Intent, ExitReason};
 use crate::agent::types::events::KernelEvent;
+use crate::agent::cognition::decision::ToolCall;
 use std::collections::HashMap;
 
 
@@ -68,7 +71,7 @@ pub use crate::agent::types::intents::Message;
 ///     }
 /// }
 /// ```
-pub trait AgencyKernel {
+pub trait GraphEngine {
     /// Initialize the kernel with configuration
     ///
     /// This is NOT async. If runtime resources need initialization,
@@ -154,14 +157,11 @@ impl From<ContractError> for KernelError {
     }
 }
 
-/// Agent state - the kernel's internal state
+/// Agent state - unified state for both AgencyKernel and CognitiveEngine
 ///
-/// This is implementation-specific, but typically includes:
-/// - Conversation history
-/// - Step count
-/// - Pending operations
-/// - Context/scratchpad
-#[derive(Debug, Clone, Default)]
+/// Combines all state fields from the legacy architecture.
+/// This is the single source of truth for agent cognition state.
+#[derive(Debug, Clone)]
 pub struct AgentState {
     /// Current step number
     pub step_count: usize,
@@ -175,6 +175,30 @@ pub struct AgentState {
     /// Working memory / scratchpad
     pub scratchpad: String,
 
+    /// Worker spawn count this turn
+    pub delegation_count: usize,
+
+    /// Maximum workers per turn
+    pub max_delegations: usize,
+
+    /// Tool rejection count this turn
+    pub rejection_count: usize,
+
+    /// Maximum rejections before giving up
+    pub max_rejections: usize,
+
+    /// Shutdown requested flag
+    pub shutdown_requested: bool,
+
+    /// Pending LLM request (waiting for response)
+    pub pending_llm: bool,
+
+    /// Pending approval (waiting for user)
+    pub pending_approval: bool,
+
+    /// Pending tool call (waiting for approval)
+    pub pending_tool: Option<ToolCall>,
+
     /// Number of active workers
     pub active_workers: usize,
 
@@ -187,7 +211,7 @@ pub struct AgentState {
     /// Token usage so far
     pub token_usage: TokenUsage,
 
-    /// Pending approval requests
+    /// Pending approval requests (batch processing)
     pub pending_approvals: Vec<PendingApproval>,
 
     /// Monotonic intent sequence counter (unique ID generator)
@@ -198,13 +222,21 @@ pub struct AgentState {
 }
 
 impl AgentState {
-    /// Create initial state
-    pub fn new() -> Self {
+    /// Create initial state with max_steps
+    pub fn new(max_steps: usize) -> Self {
         Self {
             step_count: 0,
-            max_steps: 50,
+            max_steps,
             history: Vec::new(),
             scratchpad: String::new(),
+            delegation_count: 0,
+            max_delegations: 10,
+            rejection_count: 0,
+            max_rejections: 2,
+            shutdown_requested: false,
+            pending_llm: false,
+            pending_approval: false,
+            pending_tool: None,
             active_workers: 0,
             halted: false,
             halt_reason: None,
@@ -215,14 +247,42 @@ impl AgentState {
         }
     }
 
+    /// Create initial state with defaults
+    pub fn default() -> Self {
+        Self::new(50)
+    }
+
+    /// Check if can continue stepping
+    pub fn can_continue(&self) -> bool {
+        !self.shutdown_requested
+            && !self.halted
+            && self.step_count < self.max_steps
+            && self.rejection_count < self.max_rejections
+    }
+
     /// Check if at step limit
     pub fn at_limit(&self) -> bool {
         self.step_count >= self.max_steps
     }
 
-    /// Increment step counter
+    /// Check if too many rejections
+    pub fn too_many_rejections(&self) -> bool {
+        self.rejection_count >= self.max_rejections
+    }
+
+    /// Increment step counter (mutable style)
     pub fn increment_step(&mut self) {
         self.step_count += 1;
+        self.delegation_count = 0;
+        self.rejection_count = 0;
+    }
+
+    /// Increment step counter, returns new state (immutable style for legacy compatibility)
+    pub fn increment_step_immutable(mut self) -> Self {
+        self.step_count += 1;
+        self.delegation_count = 0;
+        self.rejection_count = 0;
+        self
     }
 
     /// Mark as halted
@@ -234,6 +294,56 @@ impl AgentState {
     /// Check if there are pending approvals blocking progress
     pub fn has_pending_approvals(&self) -> bool {
         !self.pending_approvals.is_empty()
+    }
+
+    /// Increment rejection counter
+    pub fn increment_rejection(&mut self) {
+        self.rejection_count += 1;
+    }
+
+    /// Record delegation
+    pub fn with_delegation(mut self) -> Self {
+        self.delegation_count += 1;
+        self
+    }
+
+    /// Add message to history
+    pub fn with_message(mut self, message: Message) -> Self {
+        self.history.push(message);
+        self
+    }
+
+    /// Set pending LLM flag
+    pub fn with_pending_llm(mut self, pending: bool) -> Self {
+        self.pending_llm = pending;
+        self
+    }
+
+    /// Set pending approval flag
+    pub fn with_pending_approval(mut self, pending: bool) -> Self {
+        self.pending_approval = pending;
+        self
+    }
+
+    /// Set pending tool call
+    pub fn with_pending_tool(mut self, tool: Option<ToolCall>) -> Self {
+        self.pending_tool = tool;
+        self
+    }
+
+    /// Request shutdown
+    pub fn with_shutdown(mut self) -> Self {
+        self.shutdown_requested = true;
+        self
+    }
+
+    /// Append to scratchpad
+    pub fn with_scratchpad(mut self, entry: impl Into<String>) -> Self {
+        if !self.scratchpad.is_empty() {
+            self.scratchpad.push('\n');
+        }
+        self.scratchpad.push_str(&entry.into());
+        self
     }
 
     /// Increment and return next intent sequence number
@@ -270,28 +380,28 @@ impl TokenUsage {
     }
 }
 
-/// A simple kernel implementation for testing
-pub struct StubKernel {
+/// A simple graph engine implementation for testing
+pub struct StubGraphEngine {
     state: AgentState,
     config: KernelConfig,
 }
 
-impl StubKernel {
+impl StubGraphEngine {
     pub fn new() -> Self {
         Self {
-            state: AgentState::new(),
+            state: AgentState::default(),
             config: KernelConfig::default(),
         }
     }
 }
 
-impl Default for StubKernel {
+impl Default for StubGraphEngine {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl AgencyKernel for StubKernel {
+impl GraphEngine for StubGraphEngine {
     fn init(&mut self, config: KernelConfig) -> Result<(), KernelError> {
         self.state.max_steps = config.max_steps;
         self.config = config;
@@ -340,7 +450,7 @@ mod tests {
 
     #[test]
     fn test_stub_kernel() {
-        let mut kernel = StubKernel::new();
+        let mut kernel = StubGraphEngine::new();
         kernel.init(KernelConfig::default()).unwrap();
 
         let events = vec![KernelEvent::UserMessage {
@@ -354,7 +464,7 @@ mod tests {
 
     #[test]
     fn test_step_limit() {
-        let mut kernel = StubKernel::new();
+        let mut kernel = StubGraphEngine::new();
         let config = KernelConfig::default().with_max_steps(2);
         kernel.init(config).unwrap();
 

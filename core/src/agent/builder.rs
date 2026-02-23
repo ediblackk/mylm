@@ -21,7 +21,7 @@
 
 use crate::agent::{
     AgentRuntime, CapabilityGraph, Session, SessionConfig,
-    CognitiveEngine, LegacyPlanner,
+    StepEngine, LlmEngine,
 };
 use crate::agent::runtime::{
     LLMCapability, ToolCapability, ApprovalCapability, 
@@ -45,7 +45,7 @@ pub struct AgentBuilder {
     workers: Option<Arc<dyn WorkerCapability>>,
     telemetry: Option<Arc<dyn TelemetryCapability>>,
     config: SessionConfig,
-    engine: Option<Box<dyn CognitiveEngine + Send>>,
+    engine: Option<Box<dyn StepEngine + Send>>,
     memory_manager: Option<Arc<AgentMemoryManager>>,
 }
 
@@ -196,7 +196,7 @@ impl AgentBuilder {
     }
     
     /// Set custom engine
-    pub fn with_engine(mut self, engine: Box<dyn CognitiveEngine + Send>) -> Self {
+    pub fn with_engine(mut self, engine: Box<dyn StepEngine + Send>) -> Self {
         self.engine = Some(engine);
         self
     }
@@ -225,17 +225,16 @@ impl AgentBuilder {
         AgentRuntime::new(graph)
     }
     
-    /// Build a complete session with LLM-based engine
-    #[deprecated(since = "0.2.0", note = "Use AgentSessionFactory instead")]
-    pub fn build_with_llm_engine(mut self) -> Session<LegacyPlanner> {
+    /// Build a complete session with LLM-based step engine
+    pub fn build_with_llm_engine(mut self) -> Session<LlmEngine> {
         let runtime = self.build_runtime();
-        let engine = LegacyPlanner::new();
+        let engine = LlmEngine::new();
         
         Session::new(engine, runtime, self.config)
     }
     
     /// Build a complete session with custom engine
-    pub fn build_with_engine<E: CognitiveEngine>(mut self, engine: E) -> Session<E> {
+    pub fn build_with_engine<E: StepEngine>(mut self, engine: E) -> Session<E> {
         let runtime = self.build_runtime();
         Session::new(engine, runtime, self.config)
     }
@@ -253,7 +252,7 @@ pub mod presets {
     
     /// Create a testing agent with all stubs
     #[allow(deprecated)]
-    pub fn testing_agent() -> Session<LegacyPlanner> {
+    pub fn testing_agent() -> Session<LlmEngine> {
         AgentBuilder::new()
             .with_auto_approve()
             .with_stub_web_search()
@@ -263,7 +262,7 @@ pub mod presets {
     
     /// Create a terminal agent with full capabilities
     #[allow(deprecated)]
-    pub fn terminal_agent(llm_client: Arc<LlmClient>) -> Session<LegacyPlanner> {
+    pub fn terminal_agent(llm_client: Arc<LlmClient>) -> Session<LlmEngine> {
         AgentBuilder::new()
             .with_llm_client(llm_client)
             .with_tools(ToolRegistry::new())
@@ -276,7 +275,7 @@ pub mod presets {
     
     /// Create a headless agent (auto-approve, no terminal)
     #[allow(deprecated)]
-    pub fn headless_agent(llm_client: Arc<LlmClient>) -> Session<LegacyPlanner> {
+    pub fn headless_agent(llm_client: Arc<LlmClient>) -> Session<LlmEngine> {
         AgentBuilder::new()
             .with_llm_client(llm_client)
             .with_tools(ToolRegistry::new())

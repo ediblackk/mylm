@@ -11,8 +11,7 @@ pub mod terminal;
 pub mod top_bar;
 pub mod utils;
 
-// Re-export utility functions
-pub use utils::calculate_terminal_dimensions;
+
 
 use crate::tui::app::state::AppStateContainer as App;
 use crate::tui::app::types::AppState;

@@ -44,31 +44,4 @@ impl AppStateContainer {
         self.copy_text_to_clipboard(content);
     }
 
-    pub fn copy_visible_conversation_to_clipboard(&mut self) {
-        let mut transcript = String::new();
-        for msg in &self.chat_history {
-            match msg.message.role {
-                MessageRole::User => {
-                    if !transcript.is_empty() {
-                        transcript.push_str("\n\n");
-                    }
-                    transcript.push_str("User: ");
-                    transcript.push_str(&msg.message.content);
-                }
-                MessageRole::Assistant => {
-                    if !transcript.is_empty() {
-                        transcript.push_str("\n\n");
-                    }
-                    transcript.push_str("AI: ");
-                    transcript.push_str(&msg.message.content);
-                }
-                _ => {}
-            }
-        }
-        if transcript.is_empty() {
-            self.status_message = Some("⚠️ No conversation to copy".to_string());
-        } else {
-            self.copy_text_to_clipboard(transcript);
-        }
-    }
 }

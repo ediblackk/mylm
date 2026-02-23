@@ -13,7 +13,7 @@ mod example {
     use std::sync::Arc;
     use crate::agent::{
         AgentState, AgentDecision, Transition, InputEvent,
-        CognitiveEngine, CognitiveError,
+        StepEngine, CognitiveError,
         AgentRuntime,
         CapabilityGraph,
         Session, SessionConfig, SessionInput,
@@ -41,13 +41,11 @@ mod example {
     /// Example: Testing runtime with auto-approval
     #[allow(dead_code)]
     fn create_test_runtime() -> AgentRuntime {
-        use crate::agent::runtime::capability::{
-            LLMCapability, Capability,
+        use crate::agent::runtime::core::{
+            LLMCapability, Capability, RuntimeContext, LLMError,
         };
-        use crate::agent::runtime::context::RuntimeContext;
-        use crate::agent::runtime::error::LLMError;
-        use crate::agent::cognition::decision::LLMRequest;
-        use crate::agent::cognition::input::LLMResponse;
+        use crate::agent::types::intents::LLMRequest;
+        use crate::agent::types::events::LLMResponse;
 
         // Mock LLM that returns canned responses
         struct MockLLM;
@@ -71,11 +69,12 @@ mod example {
                 &'a self,
                 _ctx: &'a RuntimeContext,
                 _req: LLMRequest,
-            ) -> std::pin::Pin<Box<dyn Stream<Item = Result<crate::agent::runtime::capability::StreamChunk, LLMError>> + Send + 'a>> {
-                Box::pin(futures::stream::once(async {
-                    Ok(crate::agent::runtime::capability::StreamChunk {
+                ) -> std::pin::Pin<Box<dyn Stream<Item = Result<crate::agent::runtime::StreamChunk, LLMError>> + Send + 'a>> {
+                Box::pin(futures::stream::once(async {  
+                    Ok(crate::agent::runtime::StreamChunk {
                         content: "Mock response".to_string(),
                         is_final: true,
+                        usage: None,
                     })
                 }))
             }
@@ -107,7 +106,7 @@ mod example {
     /// Example: Engine that calls a tool
     struct ToolCallingEngine;
     
-    impl CognitiveEngine for ToolCallingEngine {
+    impl StepEngine for ToolCallingEngine {
         fn step(
             &mut self,
             state: &AgentState,
@@ -122,7 +121,7 @@ mod example {
                         working_dir: None,
                         timeout_secs: None,
                     });
-                    let next_state = state.clone().increment_step();
+                    let next_state = state.clone().increment_step_immutable();
                     Ok(Transition::new(next_state, decision))
                 }
                 
@@ -136,7 +135,7 @@ mod example {
                     let decision = AgentDecision::EmitResponse(
                         format!("Tool result: {}", output)
                     );
-                    let next_state = state.clone().increment_step();
+                    let next_state = state.clone().increment_step_immutable();
                     Ok(Transition::new(next_state, decision))
                 }
                 

@@ -9,9 +9,9 @@
 pub mod agent_setup;
 pub mod approval;
 pub mod controls;
-pub mod draw;
+
 pub mod event_loop;
-pub mod help;
+
 pub mod pty;
 pub mod session;
 pub mod session_manager;
@@ -23,7 +23,7 @@ pub mod ui;
 pub mod app;
 
 // Re-export main types for convenience
-pub use state::AppStateContainer;
+// AppStateContainer re-export removed - not currently used
 pub use app::App;
 pub use types::{
     AppState,

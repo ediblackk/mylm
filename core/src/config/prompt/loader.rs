@@ -320,12 +320,20 @@ fn system_prompt_config() -> PromptConfig {
 - Use for: TODOs, reminders, intermediate findings, context that should survive pruning
 - NOT for: Final answers, user-facing content
 
-**commonboard** - Coordination when using workers (optional):
+**commonboard** - Inter-agent coordination and job monitoring:
 ```json
-{\"t\":\"Checking worker status\",\"a\":\"commonboard\",\"i\":{\"action\":\"query\"}}
+// Check all active worker jobs
+{\"t\":\"Checking worker jobs\",\"a\":\"commonboard\",\"i\":{\"action\":\"list_jobs\"}}
+
+// Get details on a specific job
+{\"t\":\"Checking job status\",\"a\":\"commonboard\",\"i\":{\"action\":\"job_status\",\"job_id\":\"abc123\"}}
+
+// Check coordination claims
+{\"t\":\"Checking claims\",\"a\":\"commonboard\",\"i\":{\"action\":\"list_claims\"}}
 ```
 - Workers use this to claim files and report progress
-- Main agent can monitor but typically doesn't need to coordinate this way".to_string()
+- Main agent uses `list_jobs` to monitor worker status
+- Use `list_claims` to see what files workers have claimed".to_string()
                 ),
                 dynamic: Some(false),
                 generator: None,

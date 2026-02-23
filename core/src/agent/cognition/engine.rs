@@ -1,18 +1,21 @@
-//! Cognitive engine trait
+//! Step engine trait
 //! 
 //! The core abstraction: (state, input) -> Transition
 //! 
 //! No async. No IO. Pure state evolution.
+//! 
+//! For graph-based planning, see `GraphEngine` in `kernel.rs`.
 
-use crate::agent::cognition::state::AgentState;
+use crate::agent::cognition::kernel::AgentState;
 use crate::agent::cognition::input::InputEvent;
 use crate::agent::cognition::decision::Transition;
 use crate::agent::cognition::error::CognitiveError;
 
-/// Pure cognitive engine
+/// Pure step-based engine
 /// 
 /// Implementors produce intent (AgentDecision), never execute.
-pub trait CognitiveEngine {
+/// For graph-based planning with IntentGraph, use `GraphEngine` instead.
+pub trait StepEngine {
     /// Single cognitive step
     /// 
     /// # Arguments
@@ -36,7 +39,7 @@ pub trait CognitiveEngine {
     fn requires_approval(&self, tool: &str, args: &str) -> bool;
 }
 
-/// Stub engine for testing
+/// Stub step engine for testing
 #[derive(Debug, Default)]
 pub struct StubEngine;
 
@@ -46,7 +49,7 @@ impl StubEngine {
     }
 }
 
-impl CognitiveEngine for StubEngine {
+impl StepEngine for StubEngine {
     fn step(
         &mut self,
         state: &AgentState,
@@ -63,7 +66,7 @@ impl CognitiveEngine for StubEngine {
             AgentDecision::None
         };
         
-        let next_state = state.clone().increment_step();
+        let next_state = state.clone().increment_step_immutable();
         Ok(Transition::new(next_state, decision))
     }
     

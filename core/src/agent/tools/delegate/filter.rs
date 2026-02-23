@@ -6,7 +6,7 @@
 //! 3. Dropping diagnostic/noise events
 
 use crate::agent::runtime::orchestrator::OutputEvent;
-use crate::agent::types::events::WorkerId;
+
 
 /// Event filter decision for worker forwarding
 #[derive(Debug, Clone)]
@@ -26,17 +26,15 @@ pub enum FilterDecision {
 /// 2. Preserving semantic event types (not flattening to Status)
 /// 3. Dropping diagnostic/noise events
 pub struct WorkerEventFilter {
-    worker_id: WorkerId,
     last_status: Option<String>,
     last_status_time: std::time::Instant,
     status_dedup_window: std::time::Duration,
 }
 
 impl WorkerEventFilter {
-    /// Create a new filter for a specific worker
-    pub fn new(worker_id: WorkerId) -> Self {
+    /// Create a new filter
+    pub fn new() -> Self {
         Self {
-            worker_id,
             last_status: None,
             last_status_time: std::time::Instant::now(),
             status_dedup_window: std::time::Duration::from_millis(100),
@@ -103,7 +101,7 @@ impl WorkerEventFilter {
             }
             
             // FORWARD: ResponseComplete - signals end of streaming to UI
-            OutputEvent::ResponseComplete => {
+            OutputEvent::ResponseComplete { .. } => {
                 FilterDecision::Forward(event)
             }
             

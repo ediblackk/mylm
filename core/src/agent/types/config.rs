@@ -440,6 +440,7 @@ mod tests {
                 name: "test".to_string(),
                 description: "Test tool".to_string(),
                 parameters: serde_json::json!({}),
+                usage: None,
             });
 
         assert_eq!(config.max_steps, 100);

@@ -260,7 +260,9 @@ impl Job {
 
     #[allow(dead_code)]
     pub fn context_window(&self) -> (usize, usize) {
-        (0, 8192) // Could use real context manager
+        // Context window tracking not implemented - returns (0, 0) to indicate unavailable
+        // UI should display "—" when max_tokens is 0
+        (0, 0)
     }
 }
 
@@ -285,11 +287,6 @@ impl JobRegistry {
     /// Get a mutable reference to a job
     pub fn get_job_mut(&mut self, job_id: &str) -> Option<&mut Job> {
         self.jobs.get_mut(job_id)
-    }
-
-    /// Get a job by ID
-    pub fn get_job(&self, job_id: &str) -> Option<&Job> {
-        self.jobs.get(job_id)
     }
 
     pub fn list_all_jobs(&self) -> Vec<Job> {

@@ -7,7 +7,7 @@
 //! Instead, it emits Intent::RequestLLM with the prompt,
 //! and the Session/runtime layer fulfills it.
 
-use crate::agent::cognition::kernel::{AgencyKernel, AgentState, KernelError, PendingApproval};
+use crate::agent::cognition::kernel::{GraphEngine, AgentState, KernelError, PendingApproval};
 use crate::agent::types::{
     graph::IntentGraph,
     intents::IntentNode,
@@ -43,7 +43,7 @@ impl Planner {
     /// Create a new kernel
     pub fn new() -> Self {
         Self {
-            state: AgentState::new(),
+            state: AgentState::default(),
             system_prompt: build_system_prompt(),
             tool_descriptions: Vec::new(),
             parser: ShortKeyParser::new(),
@@ -76,7 +76,7 @@ impl Default for Planner {
     }
 }
 
-impl AgencyKernel for Planner {
+impl GraphEngine for Planner {
     fn init(&mut self, config: KernelConfig) -> Result<(), KernelError> {
         self.state.max_steps = config.max_steps;
         Ok(())
@@ -120,7 +120,7 @@ impl Planner {
             KernelEvent::WorkerCompleted { worker_id, result } => {
                 self.handle_worker_result(&worker_id.0.to_string(), result.as_ref().ok(), graph)
             }
-            KernelEvent::WorkerFailed { worker_id, error, .. } => {
+            KernelEvent::WorkerFailed { worker_id, error: _, .. } => {
                 self.handle_worker_result(&worker_id.0.to_string(), None, graph)
             }
             KernelEvent::RuntimeError { error, .. } => {

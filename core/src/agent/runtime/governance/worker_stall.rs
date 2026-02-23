@@ -195,7 +195,7 @@ pub enum StallError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::AgentId;
+    use crate::agent::identity::AgentId;
     
     // Note: WorkerStall was previously named StallScheduler
     
@@ -212,7 +212,7 @@ mod tests {
     #[tokio::test]
     async fn test_stall_detection() {
         let commonbox = Arc::new(Commonbox::new());
-        let scheduler = StallScheduler::new(commonbox.clone());
+        let scheduler = WorkerStall::new(commonbox.clone());
         
         // Create and stall a job
         let agent = AgentId::worker("test");
@@ -234,7 +234,7 @@ mod tests {
     #[tokio::test]
     async fn test_archive_resolution() {
         let commonbox = Arc::new(Commonbox::new());
-        let scheduler = StallScheduler::new(commonbox.clone());
+        let scheduler = WorkerStall::new(commonbox.clone());
         
         // Create and stall a job
         let agent = AgentId::worker("test");

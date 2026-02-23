@@ -216,7 +216,7 @@ pub async fn run_worker_session(
     let forward_handle = tokio::spawn(async move {
         crate::info_log!("[WORKER FORWARD] Starting FILTERED forwarding for worker {} (numeric ID: {})", worker_name, worker_id_numeric);
         
-        let mut filter = WorkerEventFilter::new(worker_id);
+        let mut filter = WorkerEventFilter::new();
         let mut total_received = 0u64;
         let mut total_forwarded = 0u64;
         let mut total_dropped = 0u64;
@@ -330,7 +330,7 @@ pub async fn run_worker_session(
     );
     
     match timeout(timeout_duration, session.run()).await {
-        Ok(result) => {
+        Ok(Ok(result)) => {
             crate::info_log!("Worker [{}] completed initial task", config.id);
             
             // Transition to Idle state (waiting for routed queries)

@@ -9,7 +9,7 @@
 mod tests {
     use crate::agent::{
         AgentState, AgentDecision, InputEvent, Transition, WorkerId,
-        CognitiveEngine, CognitiveError,
+        StepEngine, CognitiveError,
         AgentRuntime,
         Session, SessionConfig, SessionInput,
     };
@@ -27,7 +27,7 @@ mod tests {
         }
     }
 
-    impl CognitiveEngine for MockEngine {
+    impl StepEngine for MockEngine {
         fn step(
             &mut self,
             state: &AgentState,
@@ -38,7 +38,7 @@ mod tests {
                 .unwrap_or(AgentDecision::Exit(crate::agent::cognition::decision::AgentExitReason::Complete));
             self.call_count += 1;
             
-            let next_state = state.clone().increment_step();
+            let next_state = state.clone().increment_step_immutable();
             Ok(Transition::new(next_state, decision))
         }
         
@@ -77,7 +77,7 @@ mod tests {
         let state2 = state1.clone();
         
         // Mutation should produce new state
-        let state3 = state1.clone().increment_step();
+        let state3 = state1.clone().increment_step_immutable();
         
         assert_eq!(state1.step_count, 0);
         assert_eq!(state2.step_count, 0);

@@ -6,7 +6,6 @@
 //! - Input: Command palette with auto-complete
 //! - Hub: Session management, settings, help
 
-use crate::tui::app::App;
 use crate::tui::app::TimestampedChatMessage;
 use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
 use std::io;
@@ -20,21 +19,11 @@ pub mod app;
 pub mod setup;
 
 // Re-export commonly used types from app module for public API
-pub use app::{
-    AppState,
-    spawn_pty,
-    agent_setup,
-    approval,
-    event_loop,
-    help,
-    pty,
-    session,
-    session_manager,
-    status_tracker,
-    terminal_executor,
-    types,
-    ui,
-};
+pub use app::App;
+
+// Modules for TUI functionality
+pub use app::spawn_pty;
+pub use app::agent_setup;
 
 /// Result type for TUI session
 #[derive(Debug)]
@@ -193,7 +182,7 @@ async fn handle_agent_event(
             }
         }
         
-        OutputEvent::ResponseComplete => {
+        OutputEvent::ResponseComplete { .. } => {
             mylm_core::info_log!("[AGENT_EVENT] Response complete");
             
             // Normal completion - calculate generation time and update context

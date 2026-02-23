@@ -185,7 +185,7 @@ impl StatusTracker {
                 self.last_activity = Instant::now();
             }
 
-            OutputEvent::ResponseComplete => {
+            OutputEvent::ResponseComplete { .. } => {
                 // Only clear status if we're not showing an error
                 if !matches!(self.current_status, StatusInfo::Error { .. }) {
                     self.current_status = StatusInfo::Idle;

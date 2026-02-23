@@ -71,8 +71,8 @@ use tokio::time::Duration;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicU64;
 
-use crate::agent::cognition::kernel::{AgencyKernel};
-use crate::agent::runtime::core::{RuntimeError, AgencyRuntimeError, AgencyRuntime};
+use crate::agent::cognition::kernel::{GraphEngine};
+use crate::agent::runtime::core::{AgencyRuntimeError, AgencyRuntime};
 use crate::agent::runtime::orchestrator::transport::EventTransport;
 use crate::agent::types::graph::IntentGraph;
 use crate::agent::types::ids::IntentId;
@@ -157,8 +157,8 @@ pub enum OutputEvent {
     /// Response chunk (for streaming)
     ResponseChunk { content: String },
     
-    /// Response complete
-    ResponseComplete,
+    /// Response complete (with optional token usage for metrics)
+    ResponseComplete { usage: Option<crate::agent::types::events::TokenUsage> },
     
     /// Approval requested
     ApprovalRequested { intent_id: IntentId, tool: String, args: String },
@@ -272,7 +272,7 @@ impl std::error::Error for SessionError {}
 /// This ties together Kernel + Runtime + Transport
 pub struct AgencySession<K, R, T>
 where
-    K: AgencyKernel + Send + Sync,
+    K: GraphEngine + Send + Sync,
     R: AgencyRuntime,
     T: EventTransport,
 {
@@ -317,7 +317,7 @@ where
 
 impl<K, R, T> AgencySession<K, R, T>
 where
-    K: AgencyKernel + Send + Sync,
+    K: GraphEngine + Send + Sync,
     R: AgencyRuntime,
     T: EventTransport,
 {
@@ -505,7 +505,7 @@ where
             
             // Check for response emitted - send completion event
             if let Observation::ResponseEmitted { .. } = obs {
-                let _ = self.output_tx.send(OutputEvent::ResponseComplete);
+                let _ = self.output_tx.send(OutputEvent::ResponseComplete { usage: None });
             }
             
             // Check for LLM/runtime errors - mark error but don't return early
@@ -577,7 +577,7 @@ where
 #[async_trait]
 impl<K, R, T> Session for AgencySession<K, R, T>
 where
-    K: AgencyKernel + Send + Sync + 'static,
+    K: GraphEngine + Send + Sync + 'static,
     R: AgencyRuntime + 'static,
     T: EventTransport + 'static,
 {
@@ -817,7 +817,7 @@ where
                                         }
                                         Observation::LLMCompleted { .. } => {
                                             // Send completion signal only (ResponseChunk already sent by streaming)
-                                            let _ = self.output_tx.send(OutputEvent::ResponseComplete);
+                                            let _ = self.output_tx.send(OutputEvent::ResponseComplete { usage: None });
                                         }
                                         _ => {} // Other observations handled elsewhere or not needed for UI
                                     }
@@ -990,7 +990,7 @@ mod tests {
         let events = vec![
             OutputEvent::Thinking { intent_id: IntentId::new(1) },
             OutputEvent::ResponseChunk { content: "hello".to_string() },
-            OutputEvent::ResponseComplete,
+            OutputEvent::ResponseComplete { usage: None },
         ];
         
         assert_eq!(events.len(), 3);

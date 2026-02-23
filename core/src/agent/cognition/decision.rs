@@ -66,7 +66,7 @@ impl AgentDecision {
 #[derive(Debug, Clone)]
 pub struct Transition {
     /// Next state (always provided)
-    pub next_state: crate::agent::cognition::state::AgentState,
+    pub next_state: crate::agent::cognition::kernel::AgentState,
     
     /// Decision to execute (if any)
     pub decision: AgentDecision,
@@ -74,7 +74,7 @@ pub struct Transition {
 
 impl Transition {
     /// Create transition with decision
-    pub fn new(next_state: crate::agent::cognition::state::AgentState, decision: AgentDecision) -> Self {
+    pub fn new(next_state: crate::agent::cognition::kernel::AgentState, decision: AgentDecision) -> Self {
         Self {
             next_state,
             decision,
@@ -82,7 +82,7 @@ impl Transition {
     }
     
     /// Create transition with no action
-    pub fn none(next_state: crate::agent::cognition::state::AgentState) -> Self {
+    pub fn none(next_state: crate::agent::cognition::kernel::AgentState) -> Self {
         Self {
             next_state,
             decision: AgentDecision::None,
@@ -90,7 +90,7 @@ impl Transition {
     }
     
     /// Create exit transition
-    pub fn exit(next_state: crate::agent::cognition::state::AgentState, reason: AgentExitReason) -> Self {
+    pub fn exit(next_state: crate::agent::cognition::kernel::AgentState, reason: AgentExitReason) -> Self {
         Self {
             next_state,
             decision: AgentDecision::Exit(reason),

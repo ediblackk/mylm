@@ -1,7 +1,7 @@
 //! Chat pane rendering - history and input
 
 use crate::tui::app::state::AppStateContainer as App;
-use crate::tui::app::types::{ActionType, AppState, Focus};
+use crate::tui::app::types::{AppState, Focus};
 use mylm_core::provider::chat::MessageRole;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},

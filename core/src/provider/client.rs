@@ -934,7 +934,16 @@ impl LlmClient {
                 // Save request to file for WAF debugging
                 self.log_request_to_file(&body_json, "ERROR", Some(&format!("HTTP {}", status)));
                 
-                Err(anyhow::anyhow!("API request failed with status: {} - {}", status, error_body))?;
+                // Extract just the essential error - if HTML, only show status code
+                let error_display = if error_body.trim().starts_with('<') {
+                    // HTML response - don't dump the whole page, just the status
+                    format!("HTTP {} (check logs for details)", status)
+                } else {
+                    // JSON or text - try to extract message, fallback to truncated body
+                    error_body.chars().take(200).collect::<String>()
+                };
+                
+                Err(anyhow::anyhow!("LLM API error: {}", error_display))?;
                 return; // Explicit return to satisfy compiler
             }
 

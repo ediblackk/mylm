@@ -9,7 +9,7 @@
 use crate::agent::runtime::core::{Capability, ToolCapability, RuntimeContext, ToolError};
 use crate::agent::types::intents::ToolCall;
 use crate::agent::types::events::ToolResult;
-use crate::agent::runtime::orchestrator::commonbox::Commonbox;
+use crate::agent::runtime::orchestrator::commonbox::{Commonbox, Job};
 use crate::agent::identity::AgentId;
 use std::sync::Arc;
 
@@ -17,6 +17,29 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct CommonboardTool {
     commonbox: Arc<Commonbox>,
+}
+
+/// Find a job by partial or full ID string
+/// Matches against the display format (first 8 chars of UUID)
+async fn find_job_by_id(commonbox: &Commonbox, id_str: &str) -> Option<Job> {
+    // Get all active jobs and search for matching ID
+    let jobs = commonbox.list_active_jobs().await;
+    
+    // First try exact match
+    for job in &jobs {
+        if job.id.to_string() == id_str {
+            return Some(job.clone());
+        }
+    }
+    
+    // Try partial match
+    for job in &jobs {
+        if job.id.to_string().starts_with(id_str) {
+            return Some(job.clone());
+        }
+    }
+    
+    None
 }
 
 impl CommonboardTool {
@@ -68,12 +91,25 @@ Mark task complete with summary.
 
 Usage: {"action": "complete", "summary": "Refactored module X, all tests pass"}
 
+### list_jobs
+List all active worker jobs with their status.
+
+Usage: {"action": "list_jobs"}
+Response: {"jobs": [{"id": "abc123", "status": "Running", "agent_id": "WORKER-1", "message": "Processing..."}]}
+
+### job_status
+Get detailed status of a specific job.
+
+Usage: {"action": "job_status", "job_id": "abc123"}
+Response: {"id": "abc123", "status": "Running", "agent_id": "WORKER-1", "message": "..."}
+
 ## Coordination Protocol
 
 1. **Before modifying**: `claim` the file
 2. **During work**: Report `progress` if long-running
 3. **After done**: `release` the file
 4. **On completion**: Mark `complete`
+5. **Monitoring**: Use `list_jobs` to check worker status
 
 **WARNING**: Modifying files without claiming may cause conflicts!"#
     }
@@ -246,6 +282,78 @@ impl ToolCapability for CommonboardTool {
                         "count": claims.len(),
                     })),
                 })
+            }
+
+            "list_jobs" => {
+                let jobs = self.commonbox.list_active_jobs().await;
+                let jobs_list: Vec<_> = jobs.iter().map(|job| {
+                    serde_json::json!({
+                        "id": job.id.to_string(),
+                        "status": format!("{:?}", job.status),
+                        "agent_id": job.agent_id.short_name(),
+                        "message": job.status_message,
+                    })
+                }).collect();
+
+                let output = if jobs.is_empty() {
+                    "No active jobs.".to_string()
+                } else {
+                    jobs.iter()
+                        .map(|job| {
+                            let agent = job.agent_id.short_name();
+                            let msg = job.status_message.as_deref().unwrap_or("");
+                            format!("{}: {:?} ({}): {}", job.id, job.status, agent, msg)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+
+                Ok(ToolResult::Success {
+                    output,
+                    structured: Some(serde_json::json!({
+                        "status": "ok",
+                        "jobs": jobs_list,
+                        "count": jobs.len(),
+                    })),
+                })
+            }
+
+            "job_status" => {
+                let job_id_str = call.arguments.get("job_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| ToolError::new("Missing 'job_id' for job_status action"))?;
+
+                let job = find_job_by_id(&self.commonbox, job_id_str).await;
+
+                match job {
+                    Some(job) => {
+                        let output = format!(
+                            "Job {}: {:?} (Agent: {}) - {}",
+                            job.id,
+                            job.status,
+                            job.agent_id.short_name(),
+                            job.status_message.as_deref().unwrap_or("No status message")
+                        );
+                        Ok(ToolResult::Success {
+                            output,
+                            structured: Some(serde_json::json!({
+                                "id": job.id.to_string(),
+                                "status": format!("{:?}", job.status),
+                                "agent_id": job.agent_id.short_name(),
+                                "message": job.status_message,
+                                "dependencies": job.dependencies.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                                "dependents": job.dependents.iter().map(|id| id.to_string()).collect::<Vec<_>>(),
+                            })),
+                        })
+                    }
+                    None => Ok(ToolResult::Success {
+                        output: format!("Job '{}' not found", job_id_str),
+                        structured: Some(serde_json::json!({
+                            "status": "not_found",
+                            "job_id": job_id_str,
+                        })),
+                    }),
+                }
             }
 
             _ => Err(ToolError::new(format!("Unknown action: {}", action))),

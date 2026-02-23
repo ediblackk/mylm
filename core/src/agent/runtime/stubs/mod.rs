@@ -41,6 +41,7 @@ impl LLMCapability for StubLLM {
             Ok(crate::agent::runtime::core::StreamChunk {
                 content: "stub".to_string(),
                 is_final: true,
+                usage: None,
             })
         }))
     }

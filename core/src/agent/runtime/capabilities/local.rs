@@ -53,6 +53,7 @@ impl LLMCapability for LocalLLMStub {
             Ok(StreamChunk {
                 content: "Local LLM stub response".to_string(),
                 is_final: true,
+                usage: None,
             })
         }))
     }

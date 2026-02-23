@@ -4,9 +4,9 @@
 //! Receives SessionInput, produces cognition steps, interprets decisions.
 
 use std::sync::Arc;
-use crate::agent::cognition::engine::CognitiveEngine;
+use crate::agent::cognition::engine::StepEngine;
 use crate::agent::cognition::input::InputEvent;
-use crate::agent::cognition::state::AgentState;
+use crate::agent::cognition::kernel::AgentState;
 use crate::agent::types::events::WorkerId;
 use crate::agent::cognition::decision::{AgentDecision, AgentExitReason};
 use crate::agent::cognition::error::CognitiveError;
@@ -68,7 +68,7 @@ impl Default for SessionConfig {
 /// Session coordinates cognition and runtime
 pub struct Session<E> 
 where
-    E: CognitiveEngine,
+    E: StepEngine,
 {
     /// Cognitive engine (pure logic)
     engine: E,
@@ -101,7 +101,7 @@ where
 
 impl<E> Session<E>
 where
-    E: CognitiveEngine,
+    E: StepEngine,
 {
     /// Create a new session
     /// 
@@ -195,10 +195,10 @@ where
         let mut context_manager = ContextManager::new(context_config.clone());
         for msg in &persisted.history {
             let role = match msg.role {
-                crate::agent::cognition::history::MessageRole::User => "user",
-                crate::agent::cognition::history::MessageRole::Assistant => "assistant",
-                crate::agent::cognition::history::MessageRole::System => "system",
-                crate::agent::cognition::history::MessageRole::Tool => "tool",
+                crate::agent::types::intents::Role::User => "user",
+                crate::agent::types::intents::Role::Assistant => "assistant",
+                crate::agent::types::intents::Role::System => "system",
+                crate::agent::types::intents::Role::Tool => "tool",
             };
             context_manager.add_message(role, &msg.content);
         }
@@ -287,10 +287,10 @@ where
         if state_history_len > existing_count {
             for msg in &self.state.history[existing_count..] {
                 let role = match msg.role {
-                    crate::agent::cognition::history::MessageRole::User => "user",
-                    crate::agent::cognition::history::MessageRole::Assistant => "assistant",
-                    crate::agent::cognition::history::MessageRole::System => "system",
-                    crate::agent::cognition::history::MessageRole::Tool => "tool",
+                    crate::agent::types::intents::Role::User => "user",
+                    crate::agent::types::intents::Role::Assistant => "assistant",
+                    crate::agent::types::intents::Role::System => "system",
+                    crate::agent::types::intents::Role::Tool => "tool",
                 };
                 self.context_manager.add_message(role, &msg.content);
             }
@@ -311,18 +311,18 @@ where
     /// Build a persisted session snapshot
     pub fn build_persisted_session(&self) -> PersistedSession {
         // Convert ContextManager history back to cognition messages
-        let history: Vec<crate::agent::cognition::history::Message> = self.context_manager
+        let history: Vec<crate::agent::cognition::kernel::Message> = self.context_manager
             .history()
             .iter()
             .map(|m| {
                 let role = match m.role.as_str() {
-                    "user" => crate::agent::cognition::history::MessageRole::User,
-                    "assistant" => crate::agent::cognition::history::MessageRole::Assistant,
-                    "system" => crate::agent::cognition::history::MessageRole::System,
-                    "tool" => crate::agent::cognition::history::MessageRole::Tool,
-                    _ => crate::agent::cognition::history::MessageRole::User,
+                    "user" => crate::agent::types::intents::Role::User,
+                    "assistant" => crate::agent::types::intents::Role::Assistant,
+                    "system" => crate::agent::types::intents::Role::System,
+                    "tool" => crate::agent::types::intents::Role::Tool,
+                    _ => crate::agent::types::intents::Role::User,
                 };
-                crate::agent::cognition::history::Message {
+                crate::agent::cognition::kernel::Message {
                     role,
                     content: m.content.clone(),
                 }

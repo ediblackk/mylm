@@ -34,8 +34,6 @@ use runner::spawn_worker;
 pub struct DelegateTool {
     /// Commonbox for tracking workers and agent state
     commonbox: Arc<Commonbox>,
-    /// Parent tool registry (for creating restricted views)
-    parent_tools: Arc<dyn crate::agent::runtime::core::ToolCapability>,
     /// Factory for creating worker sessions (single source of truth)
     factory: crate::agent::AgentSessionFactory,
     /// LLM client for workers
@@ -55,12 +53,10 @@ impl DelegateTool {
     /// Create a new delegate tool
     pub fn new(
         commonbox: Arc<Commonbox>,
-        parent_tools: Arc<dyn crate::agent::runtime::core::ToolCapability>,
         factory: crate::agent::AgentSessionFactory,
     ) -> Self {
         Self {
             commonbox,
-            parent_tools,
             factory,
             llm_client: None,
             max_workers: 10,
@@ -291,10 +287,10 @@ mod tests {
     #[tokio::test]
     async fn test_delegate_tool_creation() {
         let commonbox = Arc::new(Commonbox::new());
-        let tools = Arc::new(ToolRegistry::new());
+        let _tools = Arc::new(ToolRegistry::new()); // Kept for test context, not passed to constructor
         let config = crate::config::Config::default();
         let factory = crate::agent::AgentSessionFactory::new(config);
-        let tool = DelegateTool::new(commonbox, tools, factory);
+        let tool = DelegateTool::new(commonbox, factory);
         assert_eq!(tool.name(), "delegate");
     }
 

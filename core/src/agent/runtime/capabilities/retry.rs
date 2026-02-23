@@ -457,21 +457,14 @@ mod tests {
     
     #[tokio::test]
     async fn test_retry_llm() {
-        use crate::agent::runtime::graph::StubLLM;
+        use crate::agent::runtime::stubs::StubLLM;
         
         let stub = Arc::new(StubLLM);
         let retry_llm = RetryLLM::new(stub, RetryConfig::default());
         
         let ctx = RuntimeContext::new();
         let context = crate::agent::types::intents::Context::new("test".to_string());
-        let req = LLMRequest {
-            context,
-            max_tokens: None,
-            temperature: None,
-            model: None,
-            response_format: None,
-            stream: false,
-        };
+        let req = LLMRequest::new(context);
         
         let result = retry_llm.complete(&ctx, req).await;
         assert!(result.is_ok());

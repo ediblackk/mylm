@@ -146,7 +146,7 @@ impl WorkerManager {
                             OutputEvent::ResponseChunk { content } => {
                                 output_buffer.push(content);
                             }
-                            OutputEvent::ResponseComplete => {
+                            OutputEvent::ResponseComplete { .. } => {
                                 // Response is complete
                             }
                             OutputEvent::Halted { .. } => {
@@ -256,19 +256,6 @@ impl WorkerHandle {
     pub fn id(&self) -> &WorkerId {
         &self.id
     }
-}
-
-/// Build system prompt for worker
-fn build_worker_prompt(objective: &str) -> String {
-    format!(r#"You are a worker agent focused on completing a specific task.
-
-Your objective: {}
-
-You have access to the same tools as the main agent (shell, read_file, write_file, etc.).
-Focus on completing your assigned task efficiently.
-When done, respond with a summary of what you accomplished.
-
-Be concise and focused."#, objective)
 }
 
 /// Worker capability implementation

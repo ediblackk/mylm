@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 use tracing::{info, warn, error};
 
-use crate::agent::cognition::history::Message;
+use crate::agent::cognition::kernel::Message;
 use crate::agent::types::events::TokenUsage;
 
 /// Session data for persistence

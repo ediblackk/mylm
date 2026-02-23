@@ -566,7 +566,7 @@ More text"#;
         assert!(done);
         
         // Test with escaped quotes
-        let (t, f, _done) = parser.extract_streaming_content(r#"{"t": "Say \"hello\"", "f": ""}"#);
+        let (t, _f, _done) = parser.extract_streaming_content(r#"{"t": "Say \"hello\"", "f": ""}"#);
         assert_eq!(t, r#"Say "hello""#);
     }
 

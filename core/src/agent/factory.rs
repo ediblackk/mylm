@@ -211,10 +211,8 @@ impl AgentSessionFactory {
             };
             
             // Create delegate tool with output sender for worker events
-            let parent_tools: Arc<dyn crate::agent::runtime::core::ToolCapability> = Arc::new(tool_registry);
             let delegate = DelegateTool::new(
                 Arc::clone(commonbox),
-                parent_tools,
                 worker_factory,
             ).with_output_sender(crate::agent::runtime::orchestrator::OutputSender::Broadcast(output_tx.clone()));
             

@@ -335,6 +335,7 @@ impl ContractRuntime {
                     let mut full_content = String::new();
                     let mut stream_failed = false;
                     let mut stream_error = String::new();
+                    let mut accumulated_usage: Option<crate::agent::types::events::TokenUsage> = None;
                     
                     crate::info_log!("[RUNTIME] Starting LLM stream...");
                     let mut chunk_count = 0;
@@ -346,6 +347,8 @@ impl ContractRuntime {
                                     // crate::debug_log!("[RUNTIME] Got chunk: len={}, is_final={}", chunk.content.len(), chunk.is_final);
                                 }
                                 if chunk.is_final {
+                                    // Capture usage from final chunk
+                                    accumulated_usage = chunk.usage;
                                     break;
                                 }
                                 if !chunk.content.is_empty() {
@@ -388,7 +391,9 @@ impl ContractRuntime {
                                         content: response.content.clone(),
                                     });
                                 }
-                                let _ = output_tx.send(OutputEvent::ResponseComplete);
+                                let _ = output_tx.send(OutputEvent::ResponseComplete { 
+                                    usage: Some(response.usage.clone()) 
+                                });
                                 
                                 return Ok(Observation::LLMCompleted {
                                     intent_id,
@@ -413,14 +418,15 @@ impl ContractRuntime {
                     
                     crate::info_log!("[RUNTIME] Stream complete: {} chunks, {} bytes", chunk_count, full_content.len());
                     
-                    // Emit completion
-                    let _ = output_tx.send(OutputEvent::ResponseComplete);
+                    // Emit completion with usage
+                    let usage = accumulated_usage.unwrap_or_default();
+                    let _ = output_tx.send(OutputEvent::ResponseComplete { usage: Some(usage.clone()) });
                     
                     Ok(Observation::LLMCompleted {
                         intent_id,
                         response: crate::agent::types::events::LLMResponse {
                             content: full_content,
-                            usage: crate::agent::types::events::TokenUsage::default(),
+                            usage,
                             model: "unknown".to_string(),
                             provider: "unknown".to_string(),
                             finish_reason: crate::agent::types::events::FinishReason::Stop,

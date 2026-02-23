@@ -3,7 +3,7 @@
 use crate::tui::app::state::AppStateContainer as App;
 use crate::tui::app::types::{ActionType, Focus, JobStatus};
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
@@ -109,9 +109,14 @@ pub fn render_jobs_panel(frame: &mut Frame, app: &mut App, area: Rect) {
             Color::Green
         };
 
-        // Build progress bar with unicode blocks
-        let progress_bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
-        let token_text = format!(" {}↑/{} ", used_tokens, max_tokens);
+        // Build progress bar with unicode blocks (or show "—" when not tracked)
+        let (progress_bar, token_text) = if max_tokens == 0 {
+            ("".to_string(), " —/— ".to_string())
+        } else {
+            let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+            let text = format!(" {}↑/{} ", used_tokens, max_tokens);
+            (bar, text)
+        };
 
         // Calculate space needed for token/progress section
         let token_section_len = progress_bar.len() + token_text.len();

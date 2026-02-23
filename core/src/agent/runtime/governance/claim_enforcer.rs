@@ -130,14 +130,15 @@ mod tests {
         let call = ToolCall {
             name: "write_file".to_string(),
             arguments: json!({"path": "src/main.rs", "content": "fn main() {}"}),
-            tool_use_id: Some("test-1".to_string()),
+            working_dir: None,
+            timeout_secs: None,
         };
 
         let agent = AgentId::worker("test");
         let result = enforcer.check_tool_call(&agent, &call).await;
 
         assert!(
-            matches!(result, ClaimEnforcement::RequiresClaim { resource } if resource == "src/main.rs"),
+            matches!(result, ClaimEnforcement::RequiresClaim { ref resource } if resource == "src/main.rs"),
             "Expected RequiresClaim, got {:?}",
             result
         );
@@ -157,14 +158,15 @@ mod tests {
         let call = ToolCall {
             name: "write_file".to_string(),
             arguments: json!({"path": "src/main.rs", "content": "fn main() {}"}),
-            tool_use_id: Some("test-2".to_string()),
+            working_dir: None,
+            timeout_secs: None,
         };
 
         let my_agent = AgentId::worker("me");
         let result = enforcer.check_tool_call(&my_agent, &call).await;
 
         assert!(
-            matches!(result, ClaimEnforcement::Deny { resource, claimed_by } 
+            matches!(result, ClaimEnforcement::Deny { ref resource, ref claimed_by } 
                 if resource == "src/main.rs" && claimed_by == "WORKER-other"),
             "Expected Deny, got {:?}",
             result
@@ -179,7 +181,8 @@ mod tests {
         let call = ToolCall {
             name: "read_file".to_string(),
             arguments: json!({"path": "src/main.rs"}),
-            tool_use_id: Some("test-3".to_string()),
+            working_dir: None,
+            timeout_secs: None,
         };
 
         let agent = AgentId::worker("test");

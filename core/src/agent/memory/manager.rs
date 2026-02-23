@@ -601,7 +601,7 @@ mod tests {
     
     #[tokio::test]
     async fn test_memory_manager_disabled() {
-        let config = MemoryConfig {
+        let _config = MemoryConfig {
             enabled: false,
             ..Default::default()
         };

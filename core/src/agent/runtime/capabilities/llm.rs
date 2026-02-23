@@ -180,6 +180,7 @@ impl LLMCapability for LlmClientCapability {
         
         Box::pin(async_stream::try_stream! {
             let mut stream = self.client.chat_stream(&chat_request);
+            let mut accumulated_usage: Option<crate::agent::types::events::TokenUsage> = None;
             
             while let Some(event) = stream.next().await {
                 match event {
@@ -187,17 +188,24 @@ impl LLMCapability for LlmClientCapability {
                         yield StreamChunk {
                             content,
                             is_final: false,
+                            usage: None,
                         };
                     }
                     Ok(crate::provider::chat::StreamEvent::Done) => {
                         yield StreamChunk {
                             content: String::new(),
                             is_final: true,
+                            usage: accumulated_usage.clone(),
                         };
                         break;
                     }
-                    Ok(crate::provider::chat::StreamEvent::Usage(_)) => {
-                        // Usage info at end, ignore for now
+                    Ok(crate::provider::chat::StreamEvent::Usage(usage)) => {
+                        // Accumulate usage for final reporting
+                        accumulated_usage = Some(crate::agent::types::events::TokenUsage {
+                            prompt_tokens: usage.prompt_tokens,
+                            completion_tokens: usage.completion_tokens,
+                            total_tokens: usage.total_tokens,
+                        });
                     }
                     Ok(crate::provider::chat::StreamEvent::Error(msg)) => {
                         crate::error_log!("[LLM_CLIENT] Stream error from provider: {}", msg);

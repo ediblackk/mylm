@@ -1,18 +1,5 @@
 //! UI Utility functions
 
-/// Calculate terminal dimensions based on total size and chat width percentage
-pub fn calculate_terminal_dimensions(
-    total_width: u16,
-    total_height: u16,
-    chat_width_percent: u16,
-) -> (u16, u16) {
-    // Terminal pane is (100% - chat_width_percent) of width, minus borders
-    let term_width =
-        ((total_width as f32 * (1.0 - chat_width_percent as f32 / 100.0)) as u16).saturating_sub(2);
-    let term_height = total_height.saturating_sub(4);
-    (term_width, term_height)
-}
-
 /// Format elapsed time in human-readable form
 pub fn format_elapsed(duration: std::time::Duration) -> String {
     let secs = duration.as_secs();
@@ -130,8 +117,7 @@ pub fn calculate_input_cursor_pos(text: &str, cursor_idx: usize, width: usize) -
     (col as u16, row as u16)
 }
 
-/// Helper to create a centered rectangle (re-exported from parent)
-pub use super::centered_rect;
+
 
 /// Format a unix timestamp as a compact string for the list view
 /// Shows date if not today, otherwise shows time

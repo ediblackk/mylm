@@ -116,16 +116,16 @@ impl<E> MemoryAugmentedEngine<E> {
     }
 }
 
-impl<E: crate::agent::CognitiveEngine> crate::agent::CognitiveEngine for MemoryAugmentedEngine<E> {
+impl<E: crate::agent::StepEngine> crate::agent::StepEngine for MemoryAugmentedEngine<E> {
     fn step(
         &mut self,
-        state: &crate::agent::cognition::state::AgentState,
+        state: &crate::agent::cognition::kernel::AgentState,
         input: Option<InputEvent>,
     ) -> Result<crate::agent::cognition::decision::Transition, crate::agent::cognition::error::CognitiveError> {
         self.inner.step(state, input)
     }
     
-    fn build_prompt(&self, state: &crate::agent::cognition::state::AgentState) -> String {
+    fn build_prompt(&self, state: &crate::agent::cognition::kernel::AgentState) -> String {
         self.inner.build_prompt(state)
     }
     
@@ -156,7 +156,7 @@ mod tests {
         };
         
         // In disabled mode, we can create a manager without persistence
-        let manager = AgentMemoryManager::new(&config)
+        let manager = AgentMemoryManager::new(config.memory)
             .await
             .expect("Failed to create memory manager");
         

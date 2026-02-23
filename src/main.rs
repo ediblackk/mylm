@@ -669,7 +669,7 @@ async fn quick_query(config: &Config, query: &str) -> Result<()> {
                     OutputEvent::ResponseChunk { content } => {
                         print!("{}", content);
                     }
-                    OutputEvent::ResponseComplete => {
+                    OutputEvent::ResponseComplete { .. } => {
                         println!("\n");
                         break;
                     }

@@ -1,16 +1,15 @@
-//! Legacy Single-Step Planner (DEPRECATED)
+//! LLM-based Step Engine
 //!
-//! This is the old single-step cognitive engine.
+//! Implements the `StepEngine` trait using an LLM for decision making.
 //! 
-//! DEPRECATED: Use `Planner` from `crate::agent::cognition::planner` instead.
-//! This module is kept for reference and will be removed in a future version.
+//! This engine produces single-step transitions based on state + input.
+//! For graph-based intent planning, use `GraphPlanner` instead.
 //!
-//! Real cognitive engine that uses LLM to make decisions.
 //! Parses LLM responses using the parser module (types::parser).
 
 use crate::agent::cognition::{
-    engine::CognitiveEngine,
-    state::AgentState,
+    engine::StepEngine,
+    kernel::AgentState,
     input::InputEvent,
     decision::{Transition, AgentDecision, LLMRequest, AgentExitReason, ApprovalRequest},
     error::CognitiveError,
@@ -31,7 +30,7 @@ pub struct ToolDescription {
 /// This engine is PURE - it doesn't make actual LLM calls.
 /// Instead, it emits AgentDecision::RequestLLM with the prompt,
 /// and the Session/runtime layer fulfills it.
-pub struct LLMBasedEngine {
+pub struct LlmEngine {
     system_prompt: String,
     #[allow(dead_code)]
     max_tool_failures: usize,
@@ -41,7 +40,7 @@ pub struct LLMBasedEngine {
     parser: ShortKeyParser,
 }
 
-impl LLMBasedEngine {
+impl LlmEngine {
     pub fn new() -> Self {
         Self {
             system_prompt: build_system_prompt(),
@@ -112,7 +111,7 @@ impl LLMBasedEngine {
     }
 }
 
-impl Default for LLMBasedEngine {
+impl Default for LlmEngine {
     fn default() -> Self {
         Self::new()
     }
@@ -128,7 +127,7 @@ impl From<crate::agent::tools::ToolDescription> for ToolDescription {
     }
 }
 
-impl CognitiveEngine for LLMBasedEngine {
+impl StepEngine for LlmEngine {
     fn step(
         &mut self,
         state: &AgentState,
@@ -153,26 +152,15 @@ impl CognitiveEngine for LLMBasedEngine {
             // User message - request LLM to decide
             Some(InputEvent::UserMessage(msg)) => {
                 let state_with_message = state.clone()
-                    .with_message(crate::agent::cognition::history::Message::user(&msg));
+                    .with_message(crate::agent::cognition::kernel::Message {
+                        role: crate::agent::types::intents::Role::User,
+                        content: msg.clone(),
+                    });
                 
                 let scratchpad = format!("User: {}\n\nWhat should I do?", msg);
                 
-                let history: Vec<crate::agent::types::intents::Message> = state_with_message.history.iter().map(|m| {
-                    let role = match m.role {
-                        crate::agent::cognition::history::MessageRole::User => 
-                            crate::agent::types::intents::Role::User,
-                        crate::agent::cognition::history::MessageRole::Assistant => 
-                            crate::agent::types::intents::Role::Assistant,
-                        crate::agent::cognition::history::MessageRole::System => 
-                            crate::agent::types::intents::Role::System,
-                        crate::agent::cognition::history::MessageRole::Tool => 
-                            crate::agent::types::intents::Role::Tool,
-                    };
-                    crate::agent::types::intents::Message {
-                        role,
-                        content: m.content.clone(),
-                    }
-                }).collect();
+                // History is already the correct type now that AgentState is unified
+                let history: Vec<crate::agent::types::intents::Message> = state_with_message.history.clone();
                 
                 let context = crate::agent::types::intents::Context::new(scratchpad)
                     .with_system(self.system_prompt.clone())
@@ -190,14 +178,17 @@ impl CognitiveEngine for LLMBasedEngine {
                     extra_system_messages: Vec::new(),
                 });
                 
-                let next_state = state_with_message.increment_step();
+                let next_state = state_with_message.increment_step_immutable();
                 Ok(Transition::new(next_state, decision))
             }
             
             // LLM response - parse and act
             Some(InputEvent::LLMResponse(llm_resp)) => {
                 let state_with_response = state.clone()
-                    .with_message(crate::agent::cognition::history::Message::assistant(&llm_resp.content));
+                    .with_message(crate::agent::cognition::kernel::Message {
+                        role: crate::agent::types::intents::Role::Assistant,
+                        content: llm_resp.content.clone(),
+                    });
                 
                 match self.parse_response(state, &llm_resp.content) {
                     Ok(decision) => {
@@ -216,14 +207,13 @@ impl CognitiveEngine for LLMBasedEngine {
                             (decision, None)
                         };
                         
-                        let next_state = state_with_response
-                            .increment_step()
-                            .with_pending_tool(pending_tool);
+                        let mut next_state = state_with_response.increment_step_immutable();
+                        next_state.pending_tool = pending_tool;
                         Ok(Transition::new(next_state, final_decision))
                     }
                     Err(e) => {
                         Ok(Transition::new(
-                            state_with_response.increment_step(),
+                            state_with_response.increment_step_immutable(),
                             AgentDecision::EmitResponse(format!("Error: {}", e))
                         ))
                     }
@@ -246,24 +236,13 @@ impl CognitiveEngine for LLMBasedEngine {
                 
                 let tool_content = format!("Tool '{}' {}: {}", tool, status, output);
                 let state_with_tool = state.clone()
-                    .with_message(crate::agent::cognition::history::Message::tool(&tool_content));
+                    .with_message(crate::agent::cognition::kernel::Message {
+                        role: crate::agent::types::intents::Role::Tool,
+                        content: tool_content,
+                    });
                 
-                let history: Vec<crate::agent::types::intents::Message> = state_with_tool.history.iter().map(|m| {
-                    let role = match m.role {
-                        crate::agent::cognition::history::MessageRole::User => 
-                            crate::agent::types::intents::Role::User,
-                        crate::agent::cognition::history::MessageRole::Assistant => 
-                            crate::agent::types::intents::Role::Assistant,
-                        crate::agent::cognition::history::MessageRole::System => 
-                            crate::agent::types::intents::Role::System,
-                        crate::agent::cognition::history::MessageRole::Tool => 
-                            crate::agent::types::intents::Role::Tool,
-                    };
-                    crate::agent::types::intents::Message {
-                        role,
-                        content: m.content.clone(),
-                    }
-                }).collect();
+                // History is already the correct type
+                let history: Vec<crate::agent::types::intents::Message> = state_with_tool.history.clone();
                 
                 let scratchpad = format!(
                     "Tool '{}' {} with output: {}\n\nWhat should I do next?",
@@ -286,7 +265,7 @@ impl CognitiveEngine for LLMBasedEngine {
                     extra_system_messages: Vec::new(),
                 });
                 
-                let next_state = state_with_tool.increment_step();
+                let next_state = state_with_tool.increment_step_immutable();
                 Ok(Transition::new(next_state, decision))
             }
             
@@ -296,18 +275,18 @@ impl CognitiveEngine for LLMBasedEngine {
                     crate::agent::cognition::input::ApprovalOutcome::Granted => {
                         if let Some(ref tool_call) = state.pending_tool {
                             crate::info_log!("[LLM_ENGINE] Approval granted, executing pending tool: {}", tool_call.name);
-                            let next_state = state.clone()
-                                .increment_step()
-                                .with_pending_tool(None);
+                            let mut next_state = state.clone().increment_step_immutable();
+                            next_state.pending_tool = None;
                             Ok(Transition::new(next_state, AgentDecision::CallTool(tool_call.clone())))
                         } else {
                             crate::warn_log!("[LLM_ENGINE] Approval granted but no pending tool found");
-                            let next_state = state.clone().increment_step();
+                            let next_state = state.clone().increment_step_immutable();
                             Ok(Transition::new(next_state, AgentDecision::None))
                         }
                     }
                     crate::agent::cognition::input::ApprovalOutcome::Denied { .. } => {
-                        let next_state = state.clone().increment_rejection();
+                        let mut next_state = state.clone();
+                        next_state.increment_rejection();
                         let scratchpad = "Tool execution was denied by user. What should I do instead?".to_string();
                         let context = crate::agent::types::intents::Context::new(scratchpad)
                             .with_system(self.system_prompt.clone())
@@ -349,7 +328,7 @@ impl CognitiveEngine for LLMBasedEngine {
                     extra_system_messages: Vec::new(),
                 });
                 
-                let next_state = state.clone().increment_step();
+                let next_state = state.clone().increment_step_immutable();
                 Ok(Transition::new(next_state, decision))
             }
             

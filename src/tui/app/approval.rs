@@ -27,9 +27,8 @@ pub struct PendingApproval {
 /// Internal storage for current pending approval
 #[derive(Debug, Clone)]
 struct CurrentPending {
-    /// The approval request details (stored for querying)
-    request: ApprovalRequest,
     /// Whether a response has been sent
+    #[allow(dead_code)]
     responded: bool,
 }
 
@@ -62,39 +61,8 @@ impl TuiApprovalCapability {
         }, pending_rx)
     }
     
-    /// Get the auto_approve flag for external toggling
-    pub fn auto_approve(&self) -> Arc<std::sync::atomic::AtomicBool> {
-        Arc::clone(&self.auto_approve)
-    }
-    
-    /// Respond to the current pending approval
-    pub async fn respond(&self, outcome: ApprovalOutcome) -> Result<(), String> {
-        let mut current = self.current.lock().await;
-        if let Some(ref mut pending) = *current {
-            if pending.responded {
-                return Err("Approval already responded to".to_string());
-            }
-            pending.responded = true;
-            // Note: The actual response is sent through the oneshot channel by the UI
-            // This method just marks it as responded in our tracking
-            Ok(())
-        } else {
-            Err("No pending approval request".to_string())
-        }
-    }
-    
-    /// Check if there's a pending approval
-    pub async fn has_pending(&self) -> bool {
-        self.current.lock().await.is_some()
-    }
-    
-    /// Get the current pending approval (without consuming it)
-    pub async fn get_pending(&self) -> Option<ApprovalRequest> {
-        self.current.lock().await.as_ref().map(|p| p.request.clone())
-    }
-    
     /// Clear the current pending approval
-    pub async fn clear_pending(&self) {
+    async fn clear_pending(&self) {
         *self.current.lock().await = None;
     }
 }
@@ -129,7 +97,6 @@ impl ApprovalCapability for TuiApprovalCapability {
         
         // Store request info in current (without sender)
         *self.current.lock().await = Some(CurrentPending {
-            request: req,
             responded: false,
         });
         
@@ -153,29 +120,4 @@ impl ApprovalCapability for TuiApprovalCapability {
     }
 }
 
-/// Shared handle for responding to approvals from the UI
-#[derive(Clone)]
-pub struct ApprovalHandle {
-    capability: Arc<TuiApprovalCapability>,
-}
 
-impl ApprovalHandle {
-    pub fn new(capability: Arc<TuiApprovalCapability>) -> Self {
-        Self { capability }
-    }
-    
-    /// Get the underlying capability
-    pub fn capability(&self) -> &TuiApprovalCapability {
-        &self.capability
-    }
-    
-    /// Check if there's a pending approval
-    pub async fn has_pending(&self) -> bool {
-        self.capability.has_pending().await
-    }
-    
-    /// Get pending approval details
-    pub async fn get_pending(&self) -> Option<ApprovalRequest> {
-        self.capability.get_pending().await
-    }
-}

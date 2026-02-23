@@ -329,7 +329,7 @@ pub enum MemoryArgs {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Tests would need a real VectorStore instance
     
     // Note: These tests would need a real VectorStore instance
     // For unit tests, we'd typically mock the VectorStore

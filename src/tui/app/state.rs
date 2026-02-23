@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 
 // Import real Session types from session module
 use crate::tui::app::session::{Session, SessionMonitor};
-use crate::tui::app::approval::ApprovalHandle;
+
 
 // Stub types for items not yet in contract
 #[derive(Debug, Clone)]
@@ -167,9 +167,7 @@ pub struct AppStateContainer {
     pub command_output_buffer: String,
     #[allow(dead_code)]
     pub pending_command_tx: Option<tokio::sync::oneshot::Sender<String>>,
-    /// Approval handle for responding to tool approval requests
-    #[allow(dead_code)]
-    pub approval_handle: Option<ApprovalHandle>,
+
     #[allow(dead_code)]
     pub stream_state: Option<StreamState>,
     
@@ -329,7 +327,6 @@ impl AppStateContainer {
             current_response: String::new(),
             response_start_time: None,
 
-            approval_handle: None,
             approval_rx: None,
             interrupt_flag: Arc::new(AtomicBool::new(false)),
             verbose_mode,

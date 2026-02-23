@@ -110,7 +110,7 @@ pub mod util;
 // Re-exports from new architecture
 pub use agent::{
     AgentState, AgentDecision, InputEvent, Transition, WorkerId,
-    CognitiveEngine, CognitiveError, ApprovalOutcome,
+    StepEngine, CognitiveError, ApprovalOutcome,
     AgentRuntime, RuntimeContext, RuntimeError, CapabilityGraph, TraceId,
     LLMCapability, ToolCapability, ApprovalCapability, WorkerCapability, TelemetryCapability,
     Session, SessionConfig, SessionError, SessionInput, WorkerEvent,
