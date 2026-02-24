@@ -193,22 +193,37 @@ impl ShortKeyParser {
         let func_name_end = content[func_name_start..].find(">")?;
         let tool_name = &content[func_name_start..func_name_start + func_name_end];
         
-        // Look for <parameter=name>value</parameter>
-        let param_start = content.find("<parameter=")?;
-        let param_name_start = param_start + 11; // len("<parameter=")
-        let param_name_end = content[param_name_start..].find(">")?;
-        let param_name = &content[param_name_start..param_name_start + param_name_end];
+        // Parse ALL parameters, not just the first one
+        let mut input_map = serde_json::Map::new();
+        let mut search_start = 0;
         
-        // Extract value between <parameter=name> and </parameter>
-        let value_start = param_name_start + param_name_end + 1;
-        let value_end_marker = format!("</parameter>");
-        let value_end = content[value_start..].find(&value_end_marker)?;
-        let param_value = &content[value_start..value_start + value_end];
+        while let Some(param_start) = content[search_start..].find("<parameter=") {
+            let param_start = search_start + param_start;
+            let param_name_start = param_start + 11; // len("<parameter=")
+            
+            if let Some(param_name_end) = content[param_name_start..].find(">") {
+                let param_name = &content[param_name_start..param_name_start + param_name_end];
+                
+                // Extract value between <parameter=name> and </parameter>
+                let value_start = param_name_start + param_name_end + 1;
+                let value_end_marker = "</parameter>";
+                
+                if let Some(value_end) = content[value_start..].find(value_end_marker) {
+                    let param_value = content[value_start..value_start + value_end].trim();
+                    input_map.insert(param_name.to_string(), serde_json::Value::String(param_value.to_string()));
+                    search_start = value_start + value_end + value_end_marker.len();
+                    continue;
+                }
+            }
+            break;
+        }
         
-        // Build the input object
-        let input = serde_json::json!({
-            param_name: param_value.trim()
-        });
+        // Build the input object from all parsed parameters
+        let input = if input_map.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::Value::Object(input_map)
+        };
         
         Some(ShortKeyAction {
             thought: format!("XML tool call: {}", tool_name),

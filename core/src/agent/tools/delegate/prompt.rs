@@ -1,6 +1,7 @@
 //! Worker prompt builder - generates system prompts for delegated workers
 
 use super::types::WorkerConfig;
+use crate::memory::store::sanitize_memory_content;
 
 /// Build worker system prompt
 pub fn build_worker_prompt(
@@ -8,7 +9,7 @@ pub fn build_worker_prompt(
     shared_context: &Option<String>,
 ) -> String {
     let instructions = config.instructions.as_ref()
-        .map(|i| format!("\n## Additional Instructions\n{}\n", i))
+        .map(|i| format!("\n## Additional Instructions\n{}\n", sanitize_memory_content(i)))
         .unwrap_or_default();
 
     let tags_str = config.tags.join(", ");
@@ -16,7 +17,7 @@ pub fn build_worker_prompt(
 
     let shared = shared_context
         .as_ref()
-        .map(|c| format!("\n## Shared Context\n{}\n", c))
+        .map(|c| format!("\n## Shared Context\n{}\n", sanitize_memory_content(c)))
         .unwrap_or_default();
 
     // Build detailed tools info with examples
@@ -76,7 +77,7 @@ Completing task:
 - Use scratchpad ONLY for your own private notes (not coordination)
 "#,
         config.id,
-        config.objective,
+        sanitize_memory_content(&config.objective),
         shared,
         instructions,
         coord,

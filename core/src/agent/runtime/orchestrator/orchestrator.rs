@@ -200,6 +200,13 @@ pub enum OutputEvent {
         result: String,
     },
     
+    /// Worker response complete with token usage (for job metrics tracking)
+    WorkerResponseComplete {
+        worker_id: crate::agent::types::events::WorkerId,
+        job_id: crate::agent::runtime::orchestrator::commonbox::JobId,
+        usage: Option<crate::agent::types::events::TokenUsage>,
+    },
+    
     /// Error occurred
     Error { message: String },
     
@@ -470,6 +477,12 @@ where
                         intent_id: node.id,
                         tool: call.name.clone(),
                         args: call.arguments.to_string(),
+                    });
+                }
+                Intent::RequestLLM(_) => {
+                    // Emit Thinking event so UI shows activity during memory fetch + LLM TTFB
+                    let _ = self.output_tx.send(OutputEvent::Thinking {
+                        intent_id: node.id,
                     });
                 }
                 Intent::EmitResponse(_text) => {

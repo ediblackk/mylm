@@ -194,6 +194,12 @@ impl StatusTracker {
                 self.last_activity = Instant::now();
             }
 
+            OutputEvent::WorkerResponseComplete { .. } => {
+                // Worker response complete - similar to ResponseComplete but for workers
+                // Status update handled by other events, just update activity
+                self.last_activity = Instant::now();
+            }
+
             OutputEvent::Halted { reason } => {
                 // Halt is typically an error condition
                 self.current_status = StatusInfo::Error {

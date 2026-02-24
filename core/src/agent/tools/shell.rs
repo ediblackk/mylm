@@ -190,6 +190,21 @@ impl Capability for ShellTool {
     }
 }
 
+/// Shell execution mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellMode {
+    /// Execute the command (default)
+    Execute,
+    /// Suggest command for user to run in their terminal
+    Suggest,
+}
+
+impl Default for ShellMode {
+    fn default() -> Self {
+        ShellMode::Execute
+    }
+}
+
 #[async_trait::async_trait]
 impl ToolCapability for ShellTool {
     async fn execute(
@@ -213,6 +228,27 @@ impl ToolCapability for ShellTool {
             .get("background")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+
+        // Check for suggest mode
+        let mode = call.arguments
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .map(|s| match s {
+                "suggest" => ShellMode::Suggest,
+                _ => ShellMode::Execute,
+            })
+            .unwrap_or(ShellMode::Execute);
+
+        // If suggest mode, return suggestion instead of executing
+        if mode == ShellMode::Suggest {
+            return Ok(ToolResult::Success {
+                output: format!("SUGGESTED_COMMAND: {}", args_str),
+                structured: Some(serde_json::json!({
+                    "suggested": true,
+                    "command": args_str
+                })),
+            });
+        }
 
         // Use terminal executor from context if available
         if let Some(terminal) = ctx.terminal() {

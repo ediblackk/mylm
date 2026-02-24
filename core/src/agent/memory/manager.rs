@@ -159,8 +159,7 @@ impl AgentMemoryManager {
     
     /// Add a new memory entry
     /// 
-    /// Content is sanitized to remove patterns that might trigger WAF when
-    /// memories are later retrieved and injected into LLM prompts.
+    /// Content is sanitized in VectorStore::add_memory_typed_with_id before storage.
     pub async fn add_memory(
         &self,
         content: &str,
@@ -171,17 +170,15 @@ impl AgentMemoryManager {
             return Ok(0);
         }
         
-        // Sanitize content to remove WAF-triggering patterns
-        let sanitized = sanitize_memory_content(content);
-        
-        debug!("Adding memory: type={:?}, content_len={}", memory_type, sanitized.len());
+        debug!("Adding memory: type={:?}, content_len={}", memory_type, content.len());
         
         let id = chrono::Utc::now().timestamp_nanos_opt()
             .unwrap_or_else(|| chrono::Utc::now().timestamp());
         
+        // Note: sanitization happens in VectorStore::add_memory_typed_with_id
         self.vector_store.add_memory_typed_with_id(
             id,
-            &sanitized,
+            content,
             memory_type,
             None, // session_id
             None, // metadata
@@ -263,9 +260,12 @@ impl AgentMemoryManager {
                             InteractionType::Chat => MemoryType::UserNote,
                         };
                         
+                        // Sanitize journal entry content before creating Memory
+                        let sanitized_content = sanitize_memory_content(&entry.content);
+                        
                         Memory {
                             id: i as i64,
-                            content: entry.content.clone(),
+                            content: sanitized_content,
                             summary: None,
                             created_at: chrono::Utc::now().timestamp(),
                             r#type: memory_type,
@@ -288,7 +288,7 @@ impl AgentMemoryManager {
     }
     
     /// Format memories for inclusion in prompt context
-    /// Content is sanitized to remove WAF-triggering patterns before injection
+    /// Content is already sanitized when stored in VectorStore or retrieved from journal.
     pub fn format_memories_for_prompt(memories: &[Memory]) -> String {
         if memories.is_empty() {
             return "No relevant memories.".to_string();
@@ -301,15 +301,13 @@ impl AgentMemoryManager {
                 .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
                 .unwrap_or_else(|| "unknown".to_string());
             
-            // Sanitize content before injecting into prompt
-            let sanitized_content = sanitize_memory_content(&mem.content);
-            
+            // Content is already sanitized when stored
             context.push_str(&format!(
                 "{}. [{} | {}] {}\n",
                 i + 1,
                 mem.r#type,
                 timestamp,
-                sanitized_content.lines().next().unwrap_or(&sanitized_content)
+                mem.content.lines().next().unwrap_or(&mem.content)
             ));
         }
         
@@ -618,53 +616,5 @@ mod tests {
     }
 }
 
-/// Sanitize memory content by removing patterns that trigger WAF.
-/// Uses simple replacement text that doesn't look like code/markup to WAF.
-fn sanitize_memory_content(content: &str) -> String {
-    use regex::Regex;
-    
-    // Step 1: Strip ANSI escape sequences
-    let ansi_regex = Regex::new(r"\x1B\[[0-9;]*[a-zA-Z]|\x1B\][^\x07]*\x07|\x1B\[[\?0-9]*[hl]").unwrap();
-    let without_ansi = ansi_regex.replace_all(content, "");
-    
-    // Step 2: Remove command substitution patterns entirely
-    let cmd_subst_regex = Regex::new(r"\$\([^)]+\)|`[^`]+`|\$\{[^}]+\}").unwrap();
-    let without_cmd_subst = cmd_subst_regex.replace_all(&without_ansi, " ... ");
-    
-    // Step 3: Remove shell prompt patterns entirely
-    let shell_prompt_regex = Regex::new(r"[a-zA-Z0-9_-]+@[a-zA-Z0-9_-]+:[^$]+\$\s*>?\s*|[a-zA-Z0-9_-]+@[a-zA-Z0-9_-]+\$\s*").unwrap();
-    let without_shell_prompts = shell_prompt_regex.replace_all(&without_cmd_subst, " ");
-    
-    // Step 4: Remove the word "command" in JSON keys
-    let command_key_regex = Regex::new(r#"\"?command\"?"#).unwrap();
-    let without_command_key = command_key_regex.replace_all(&without_shell_prompts, "cmd");
-    
-    // Step 5: Remove execute_command action name
-    let exec_cmd_regex = Regex::new(r"execute_command").unwrap();
-    let without_exec_cmd = exec_cmd_regex.replace_all(&without_command_key, "run");
-    
-    // Step 6: Remove suggestion UI lines entirely
-    let suggestion_regex = Regex::new(r"\[Suggestion\]:.*").unwrap();
-    let without_suggestions = suggestion_regex.replace_all(&without_exec_cmd, " ");
-
-    // Step 7: Remove lines starting with "> " (shell redirection)
-    let redirect_regex = Regex::new(r"(?m)^> .+").unwrap();
-    let without_redirects = redirect_regex.replace_all(&without_suggestions, " ");
-
-    // Step 8: Remove shell operators and test patterns
-    let shell_ops_regex = Regex::new(r"2>/dev/null|>/dev/null|&&|\|\||\[ -t 0 \]|stty echo|stty -echo|\{ [^}]+ \}|> [^;\n]+").unwrap();
-    let without_shell_ops = shell_ops_regex.replace_all(&without_redirects, " ");
-    
-    // Step 9: Remove terminal context markers (look like code comments)
-    let terminal_marker_regex = Regex::new(r"--- TERMINAL CONTEXT ---|--- COMMAND OUTPUT ---|CMD_OUTPUT:").unwrap();
-    let without_markers = terminal_marker_regex.replace_all(&without_shell_ops, " ");
-    
-    // Step 10: Collapse multiple spaces and newlines
-    let collapsed = Regex::new(r"\s+").unwrap().replace_all(&without_markers, " ");
-    
-    // Step 11: Remove control characters except whitespace
-    collapsed
-        .chars()
-        .filter(|c| c.is_ascii_graphic() || c.is_ascii_whitespace())
-        .collect()
-}
+// Re-export from store for backward compatibility
+pub use crate::memory::store::sanitize_memory_content;

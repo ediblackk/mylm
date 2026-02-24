@@ -197,8 +197,8 @@ impl RestrictedToolRegistry {
         if self.shell.is_some() {
             descriptions.push(super::ToolDescription {
                 name: "shell",
-                description: "Execute shell commands",
-                usage: "shell <command> or {\"command\": \"<cmd>\"}",
+                description: "Execute or suggest shell commands",
+                usage: "shell <command> | Execute: {\"command\": \"<cmd>\"} | Suggest: {\"command\": \"<cmd>\", \"mode\": \"suggest\"}",
             });
         }
         

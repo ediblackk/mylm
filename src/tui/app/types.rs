@@ -228,6 +228,8 @@ pub struct Job {
     pub error: Option<String>,
     pub metrics: JobMetrics,
     pub started_at: chrono::DateTime<chrono::Utc>,
+    /// Maximum context window for this job (from config)
+    pub max_context_window: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -260,9 +262,13 @@ impl Job {
 
     #[allow(dead_code)]
     pub fn context_window(&self) -> (usize, usize) {
-        // Context window tracking not implemented - returns (0, 0) to indicate unavailable
-        // UI should display "—" when max_tokens is 0
-        (0, 0)
+        // Returns (used_tokens, max_tokens) for display
+        // Using total_tokens as used_tokens, with max from config
+        if self.metrics.total_tokens > 0 {
+            (self.metrics.total_tokens, self.max_context_window)
+        } else {
+            (0, 0)
+        }
     }
 }
 

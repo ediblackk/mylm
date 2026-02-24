@@ -16,6 +16,7 @@ use crate::agent::cognition::{
     prompts::system::build_system_prompt,
 };
 use crate::agent::types::parser::{ShortKeyParser, ParsedResponse};
+use crate::memory::store::sanitize_memory_content;
 
 /// Tool description for dynamic prompt generation
 #[derive(Debug, Clone)]
@@ -224,10 +225,10 @@ impl StepEngine for LlmEngine {
             Some(InputEvent::ToolResult { tool, result }) => {
                 let (status, output) = match result {
                     crate::agent::types::events::ToolResult::Success { output, .. } => {
-                        ("succeeded", output.clone())
+                        ("succeeded", sanitize_memory_content(&output))
                     }
                     crate::agent::types::events::ToolResult::Error { message, .. } => {
-                        ("failed", message.clone())
+                        ("failed", sanitize_memory_content(&message))
                     }
                     crate::agent::types::events::ToolResult::Cancelled => {
                         ("cancelled", "Cancelled".to_string())

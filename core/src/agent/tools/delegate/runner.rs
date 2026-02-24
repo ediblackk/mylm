@@ -23,6 +23,7 @@ use crate::agent::runtime::orchestrator::{Session, UserInput, OutputEvent};
 
 use crate::agent::types::events::WorkerId;
 use crate::agent::runtime::orchestrator::OutputSender;
+use crate::memory::store::sanitize_memory_content;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -185,8 +186,8 @@ pub async fn run_worker_session(
     
     let objective_msg = format!(
         "Your objective: {}\n\nShared context: {}\n\nBegin working on your task. Remember to use the commonboard tool for coordination.",
-        config.objective,
-        shared_context.unwrap_or_default()
+        sanitize_memory_content(&config.objective),
+        shared_context.as_ref().map(|s| sanitize_memory_content(s)).unwrap_or_default()
     );
     
     crate::info_log!("Worker [{}] sending objective message ({} bytes)...", config.id, objective_msg.len());
@@ -268,6 +269,15 @@ pub async fn run_worker_session(
                             // ResponseChunk: pass through unchanged (worker context is implicit)
                             // Adding prefix here causes spam: "[Worker 1000]" appears throughout text
                             chunk @ OutputEvent::ResponseChunk { .. } => chunk,
+                            // Transform ResponseComplete to WorkerResponseComplete for token tracking
+                            OutputEvent::ResponseComplete { usage } => {
+                                crate::info_log!("[WORKER FORWARD] Transforming ResponseComplete -> WorkerResponseComplete with usage");
+                                OutputEvent::WorkerResponseComplete {
+                                    worker_id,
+                                    job_id,
+                                    usage,
+                                }
+                            }
                             // Prefix Error with worker ID for context
                             OutputEvent::Error { message } => {
                                 OutputEvent::Error {
@@ -284,6 +294,9 @@ pub async fn run_worker_session(
                             }
                             OutputEvent::WorkerToolCompleted { .. } => {
                                 crate::info_log!("[WORKER FORWARD] Sending WorkerToolCompleted");
+                            }
+                            OutputEvent::WorkerResponseComplete { usage, .. } => {
+                                crate::info_log!("[WORKER FORWARD] Sending WorkerResponseComplete: usage={:?}", usage);
                             }
                             _ => {}
                         }

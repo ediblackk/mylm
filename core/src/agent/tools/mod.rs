@@ -172,8 +172,8 @@ impl ToolRegistry {
         let mut descriptions = vec![
             ToolDescription {
                 name: "shell",
-                description: "Execute shell commands",
-                usage: "{\"a\": \"shell\", \"i\": {\"command\": \"<cmd>\"}}",
+                description: "Execute or suggest shell commands",
+                usage: "Execute: {\"a\": \"shell\", \"i\": {\"command\": \"<cmd>\"}} | Suggest: {\"a\": \"shell\", \"i\": {\"command\": \"<cmd>\", \"mode\": \"suggest\"}}",
             },
             ToolDescription {
                 name: "read_file",
@@ -223,8 +223,8 @@ impl ToolRegistry {
         if self.delegate.is_some() {
             descriptions.push(ToolDescription {
                 name: "delegate",
-                description: "Spawn specialized worker agents for parallel tasks. Use allowed_commands/forbidden_commands to control shell access",
-                usage: r#"{"a": "delegate", "i": {"workers": [{"id": "worker1", "objective": "List files", "tools": ["shell"], "allowed_commands": ["ls -la", "ls -l *"], "forbidden_commands": ["rm *", "sudo *"]}]}}"#,
+                description: "Spawn worker agents for parallel/independent tasks. USE FOR: large file analysis, batch processing, background tasks, parallel searches. Workers run independently with isolated shells",
+                usage: r#"Large file analysis: {"a": "delegate", "i": {"workers": [{"id": "analyzer", "objective": "Read src/main.rs and summarize key functions", "tools": ["read_file", "shell"]}]}} | Parallel tasks: {"a": "delegate", "i": {"workers": [{"id": "w1", "objective": "Find TODOs in src/", "tools": ["shell"], "allowed_commands": ["grep -r TODO src/"]}, {"id": "w2", "objective": "Find FIXMEs in src/", "tools": ["shell"], "allowed_commands": ["grep -r FIXME src/"]}]}}"#,
             });
         }
         

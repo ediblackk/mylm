@@ -249,6 +249,9 @@ pub struct AppStateContainer {
     /// Full pending approval with response channel (from approval capability)
     pub pending_approval_with_response: Option<crate::tui::app::approval::PendingApproval>,
     
+    /// Pending suggested command for clipboard copy
+    pub pending_suggestion: Option<String>,
+    
     /// Flag to request session save
     pub save_session_request: bool,
     
@@ -386,6 +389,7 @@ impl AppStateContainer {
             // Missing fields
             pending_approval: None,
             pending_approval_with_response: None,
+            pending_suggestion: None,
             save_session_request: false,
             stream_in_final: false,
             session_active: true,

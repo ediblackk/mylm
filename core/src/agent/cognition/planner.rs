@@ -191,29 +191,20 @@ impl Planner {
             return Ok(());
         }
 
-        // Check for XML format (common LLM error)
-        let contains_xml = content.contains("<tool_call") 
-            || content.contains("<function=")
-            || content.contains("<parameter=");
-        
-        // Try to parse the response
+        // Try to parse the response (parser handles both JSON and XML formats)
         let parse_result = self.parser.parse_to_response(content);
-        let is_valid = !contains_xml && parse_result.is_ok();
+        let is_valid = parse_result.is_ok();
 
         // Get retry count for this request chain
         let retry_count = self.state.llm_retry_counts.get(&intent_id).copied().unwrap_or(0);
 
         if !is_valid && retry_count < Self::MAX_FORMAT_RETRIES {
             // Format invalid - trigger retry WITHOUT adding to history
-            crate::warn_log!("[PLANNER] LLM output invalid format (XML={}, retry={}/{}), requesting retry", 
-                contains_xml, retry_count + 1, Self::MAX_FORMAT_RETRIES);
+            crate::warn_log!("[PLANNER] LLM output invalid format (retry={}/{}), requesting retry", 
+                retry_count + 1, Self::MAX_FORMAT_RETRIES);
 
             // Build corrective system message
-            let correction = if contains_xml {
-                "⚠️ CORRECTION: You output XML format. Use ONLY Short-Key JSON like: {\"t\": \"reasoning\", \"a\": \"tool\", \"i\": {...}}. NEVER use <tool_call> tags."
-            } else {
-                "⚠️ CORRECTION: Your response was not valid Short-Key JSON. Use ONLY JSON format like: {\"t\": \"reasoning\", \"f\": \"response\"}"
-            };
+            let correction = "⚠️ CORRECTION: Your response was not valid Short-Key JSON. Use ONLY JSON format like: {\"t\": \"reasoning\", \"a\": \"tool\", \"i\": {...}} or {\"t\": \"reasoning\", \"f\": \"response\"}";
 
             // Create retry request with same context but extra system message
             let retry_context = self.build_context("Please provide your response in the correct Short-Key JSON format.");
@@ -257,8 +248,14 @@ impl Planner {
                 if let Some(call) = calls.into_iter().next() {
                     let args_str = call.arguments.to_string();
                     
-                    // Check approval
-                    if self.approval_policy.check(&call.name, &args_str) {
+                    // Check if this is a suggestion (no approval needed)
+                    let is_suggestion = call.arguments.get("mode")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s == "suggest")
+                        .unwrap_or(false);
+                    
+                    // Check approval (skip for suggestions)
+                    if !is_suggestion && self.approval_policy.check(&call.name, &args_str) {
                         crate::info_log!("[LLM_KERNEL] Adding pending approval for tool: {}, args: {}", call.name, args_str);
                         
                         // Generate intent ID once and reuse (step already incremented at function start)
@@ -373,6 +370,17 @@ impl Planner {
                 ("cancelled", "Cancelled".to_string())
             }
         };
+        
+        // Skip follow-up LLM request for suggestions - command is in terminal, user handles it
+        if output.starts_with("SUGGESTED_COMMAND: ") {
+            crate::info_log!("[PLANNER] Tool result is a suggestion, skipping LLM follow-up");
+            // Still add to history but don't request interpretation
+            self.state.history.push(Message {
+                role: Role::Tool,
+                content: output.clone(),
+            });
+            return Ok(());
+        }
         
         // Add tool message to history
         self.state.history.push(Message {

@@ -126,10 +126,33 @@ async fn handle_agent_event(
         
         OutputEvent::ToolCompleted { result, .. } => {
             mylm_core::info_log!("[AGENT_EVENT] Tool completed, result len={}", result.len());
-            app.chat_history.push(TimestampedChatMessage::assistant(format!(
-                "🔧 Tool result:\n```\n{}\n```",
-                result
-            )));
+            
+            // Check if this is a suggested command (not actually executed)
+            if result.starts_with("SUGGESTED_COMMAND: ") {
+                let command = result.strip_prefix("SUGGESTED_COMMAND: ").unwrap_or("");
+                // Insert command into terminal for user to run (user presses Enter)
+                let _ = app.pty_manager.write_all(command.as_bytes());
+                // Show confirmation in chat
+                app.chat_history.push(TimestampedChatMessage::assistant(format!(
+                    "💡 Command ready in terminal:\n  ▶ {}\n\nPress Enter to run",
+                    command
+                )));
+                // Auto-focus terminal so user can press Enter immediately
+                app.focus = crate::tui::app::types::Focus::Terminal;
+            } else {
+                // Only show errors in chat, not successful results (they're visible in terminal)
+                let is_error = result.starts_with("❌ Error:") 
+                    || result.starts_with("Error:") 
+                    || result.contains("rate limited")
+                    || result.contains("timed out");
+                
+                if is_error {
+                    app.chat_history.push(TimestampedChatMessage::assistant(format!(
+                        "❌ Tool failed: {}", result
+                    )));
+                }
+                // Successful tool results are not shown in chat (visible in terminal)
+            }
             
             // Add tool result to context manager history
             app.context_manager.add_message("tool", &result);
@@ -147,8 +170,10 @@ async fn handle_agent_event(
             if needs_init {
                 mylm_core::info_log!("[AGENT_EVENT] Starting streaming response");
                 app.state = crate::tui::app::AppState::Streaming("Answering...".to_string());
-                // Record start time for generation time tracking
-                app.response_start_time = Some(std::time::Instant::now());
+                // Start timing only if not already started (should be set when message submitted)
+                if app.response_start_time.is_none() {
+                    app.response_start_time = Some(std::time::Instant::now());
+                }
                 // Initialize with empty assistant message
                 app.chat_history.push(TimestampedChatMessage::assistant(String::new()));
             }
@@ -233,9 +258,22 @@ async fn handle_agent_event(
             } else {
                 display_args
             };
-            app.chat_history.push(TimestampedChatMessage::assistant(format!(
-                "⚠️ Approve running {}?\n```\n{}\n```\n(Y/N)", tool, truncated_args
-            )));
+            // Format approval message nicely - no markdown, clean layout
+            let approval_msg = if truncated_args.lines().count() == 1 {
+                // Single line command - compact format
+                format!(
+                    "🔒 Approve: {}\n\n  ▶ {}\n\nPress 'y' to run, 'n' to cancel",
+                    tool, truncated_args
+                )
+            } else {
+                // Multi-line - use block format with left border
+                format!(
+                    "🔒 Approve: {}\n\n{}\n\nPress 'y' to run, 'n' to cancel",
+                    tool,
+                    truncated_args.lines().map(|l| format!("  │ {}", l)).collect::<Vec<_>>().join("\n")
+                )
+            };
+            app.chat_history.push(TimestampedChatMessage::assistant(approval_msg));
         }
         
         OutputEvent::WorkerSpawned { worker_id, job_id, objective, agent_id } => {
@@ -248,6 +286,8 @@ async fn handle_agent_event(
             )));
             
             // Add to job registry with authoritative data from Core
+            // Get context window from worker config (or use main config as fallback)
+            let max_context = app.config.active_profile().context_window;
             let job = crate::tui::app::types::Job {
                 id: worker_id.0.to_string(),
                 job_id: job_id.to_string(),
@@ -260,6 +300,7 @@ async fn handle_agent_event(
                 error: None,
                 metrics: crate::tui::app::types::JobMetrics::default(),
                 started_at: chrono::Utc::now(),
+                max_context_window: max_context,
             };
             app.job_registry.add_job(job);
         }
@@ -276,6 +317,12 @@ async fn handle_agent_event(
             // Update job registry
             if let Some(job) = app.job_registry.get_job_mut(&worker_id.0.to_string()) {
                 job.status = crate::tui::app::types::JobStatus::Completed;
+            }
+            
+            // Reset state if waiting for this worker
+            if matches!(app.state, crate::tui::app::AppState::Streaming(_) 
+                | crate::tui::app::AppState::Thinking(_)) {
+                app.state = crate::tui::app::AppState::Idle;
             }
         }
         
@@ -298,6 +345,12 @@ async fn handle_agent_event(
                     crate::tui::app::types::JobStatus::Failed
                 };
                 job.error = Some(error.clone());
+            }
+            
+            // Reset state if waiting for this worker
+            if matches!(app.state, crate::tui::app::AppState::Streaming(_) 
+                | crate::tui::app::AppState::Thinking(_)) {
+                app.state = crate::tui::app::AppState::Idle;
             }
         }
         
@@ -326,6 +379,29 @@ async fn handle_agent_event(
                     content: result.clone(),
                     timestamp: chrono::Local::now(),
                 });
+            }
+        }
+        
+        OutputEvent::WorkerResponseComplete { worker_id, job_id, usage } => {
+            mylm_core::info_log!("[AGENT_EVENT] Worker {} response complete (job={}), usage={:?}", worker_id.0, job_id, usage);
+            
+            // Update job metrics with token usage
+            if let Some(job) = app.job_registry.get_job_mut(&worker_id.0.to_string()) {
+                if let Some(ref u) = usage {
+                    job.metrics.prompt_tokens += u.prompt_tokens as usize;
+                    job.metrics.completion_tokens += u.completion_tokens as usize;
+                    job.metrics.total_tokens += u.total_tokens as usize;
+                    job.metrics.request_count += 1;
+                }
+            }
+            
+            // Reset state if this was a worker response (either streaming or thinking)
+            if matches!(app.state, crate::tui::app::AppState::Streaming(_) 
+                | crate::tui::app::AppState::Thinking(_)) {
+                app.state = crate::tui::app::AppState::Idle;
+                app.current_response.clear();
+                app.stream_thought = None;
+                app.stream_in_final = false;
             }
         }
         

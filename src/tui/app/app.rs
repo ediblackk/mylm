@@ -180,6 +180,9 @@ impl AppStateContainer {
         self.state = AppState::Thinking("...".to_string());
         self.chat_scroll = 0;
         self.chat_auto_scroll = true;
+        
+        // Start timing the response now (covers memory fetch + LLM time-to-first-byte)
+        self.response_start_time = Some(std::time::Instant::now());
 
         // Submit message to agent session via input channel
         mylm_core::info_log!("[APP] Submitting to session...");
