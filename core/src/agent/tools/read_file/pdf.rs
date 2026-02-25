@@ -31,6 +31,9 @@ pub async fn extract_text(path: &Path) -> Result<String, ReadError> {
 }
 
 /// Synchronous PDF text extraction
+/// 
+/// Suppresses stderr output from pdf-extract to avoid unicode warnings
+/// flooding the terminal.
 fn extract_text_sync(path: &Path) -> Result<String, ReadError> {
     // First check if file is readable
     let content = std::fs::read(path)
@@ -41,23 +44,25 @@ fn extract_text_sync(path: &Path) -> Result<String, ReadError> {
         return Err(ReadError::PdfEncrypted);
     }
     
+    // Suppress stderr during extraction to hide pdf-extract's unicode warnings
+    let _print_gag = gag::Gag::stdout().ok();
+    let _stderr_gag = gag::Gag::stderr().ok();
+    
     // Extract text using pdf-extract
-    match pdf_extract::extract_text(path) {
-        Ok(text) => Ok(text),
-        Err(e) => {
-            // Check if this is an encryption error
-            let error_str = e.to_string().to_lowercase();
-            if error_str.contains("password") || 
-               error_str.contains("encrypt") || 
-               error_str.contains("decrypt") {
-                Err(ReadError::PdfEncrypted)
-            } else {
-                Err(ReadError::PdfExtractionError(format!(
-                    "Failed to extract PDF text: {}", e
-                )))
-            }
+    pdf_extract::extract_text(path).map_err(|e| {
+        let error_str = e.to_string();
+        // Check if this is an encryption error
+        let error_lower = error_str.to_lowercase();
+        if error_lower.contains("password") || 
+           error_lower.contains("encrypt") || 
+           error_lower.contains("decrypt") {
+            ReadError::PdfEncrypted
+        } else {
+            ReadError::PdfExtractionError(format!(
+                "Failed to extract PDF text: {}", error_str
+            ))
         }
-    }
+    })
 }
 
 /// Check if PDF content appears to be encrypted
