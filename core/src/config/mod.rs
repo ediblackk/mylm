@@ -63,7 +63,7 @@ pub use bridge::{
 };
 
 // Re-exports from agent
-pub use agent::{AgentConfig, MemoryConfig};
+pub use agent::{AgentConfig, MemoryConfig, UserProfile, SessionSummary};
 
 // Re-exports from prompt_schema (prompt types)
 pub use prompt_schema::{PromptConfig, IdentitySection, Section, Protocols, JsonKeys, ReactProtocol};

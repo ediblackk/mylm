@@ -38,7 +38,7 @@ impl AppStateContainer {
     pub fn copy_terminal_buffer_to_clipboard(&mut self) {
         let history_height = 5000;
         let width = self.terminal_size.1;
-        let mut temp_parser = vt100::Parser::new(history_height, width, 0);
+        let mut temp_parser = vt100::Parser::new(history_height, width, 5000); // 5000 lines scrollback
         temp_parser.process(&self.raw_buffer);
         let content = temp_parser.screen().contents();
         self.copy_text_to_clipboard(content);

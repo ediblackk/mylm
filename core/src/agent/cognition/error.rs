@@ -1,4 +1,12 @@
 //! Cognitive errors
+//!
+//! Errors from pure cognitive processing (no runtime/IO errors).
+//! These represent logic failures: malformed actions, invalid state, context overflow.
+//!
+//! Links:
+//! - Used by: StepEngine implementations (engine.rs, llm_engine.rs)
+//! - Returned from: `StepEngine::step()`, `GraphEngine::process()`
+//! - Distinct from: RuntimeError (IO failures), AgentError (general)
 
 use std::fmt;
 

@@ -150,4 +150,7 @@ mod tests {
     mod test_architecture;
     mod example_integration;
     mod integration_tests;
+    mod read_file_e2e;
+    // TODO: Fix worker_tests compilation errors
+    // mod worker_tests;
 }

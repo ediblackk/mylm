@@ -24,6 +24,8 @@
 
 ### Features
 
+- **Intelligent file reading** — Automatic chunking for large files, PDF extraction, partial reads
+- **Full-text search** — Tantivy-powered search across all accessed files
 - **Persistent vector memory** — LanceDB with semantic search across sessions
 - **Multi-agent orchestration** — Parallel workers with job tracking
 - **Full terminal context** — tmux integration, zero manual context sharing
@@ -91,16 +93,30 @@ Every command goes through:
 3. **User approval** — You see it before it runs
 
 
-### 🌐 10+ Built-in Tools
-- **shell** — Execute with safety checks
+### 🌐 15+ Built-in Tools
+
+**File & Code Operations:**
+- **read_file** — Read files with intelligent chunking for large files (>100KB auto-chunked)
+  - Partial reads: `line_offset` and `n_lines` parameters
+  - PDF text extraction support
+  - Multiple strategies: `direct`, `chunked`, `search`, `auto`
+- **write_file** — Write content to files
+- **list_files** — List directory contents
+- **search_files** — Full-text search across indexed files (Tantivy-powered)
 - **git** — Status, log, diff analysis
-- **fs** — Read/write files
-- **web_search** — Real-time information
-- **crawl** — Deep documentation extraction
-- **memory** — Store and retrieve knowledge
-- **delegate** — Spawn sub-agents
-- **state** — Persistent key-value storage
-- **terminal_sight** — Capture terminal state
+
+**Execution & Safety:**
+- **shell** — Execute with safety checks and approval workflow
+- **delegate** — Spawn parallel sub-agents for large tasks
+
+**Information & Memory:**
+- **web_search** — Real-time web search
+- **memory** — Long-term semantic memory (LanceDB)
+- **scratchpad** — Agent-local persistent notes
+- **commonboard** — Inter-agent coordination
+
+**System:**
+- **terminal_sight** — Capture terminal state (tmux integration)
 - **system** — Resource monitoring
 
 ### ⚡ Built for Speed
@@ -110,9 +126,29 @@ Every command goes through:
 
 ---
 
+## ⚙️ Configuration
+
+mylm stores configuration in `~/.config/mylm/config.toml`:
+
+```toml
+[workers]
+max_persistent_workers = 5  # Max chunk workers for large files (1-50)
+tantivy_enabled = true      # Enable full-text search indexing
+```
+
+### Large File Reading
+
+Files are automatically handled based on size:
+- **< 10KB**: Direct read
+- **10-100KB**: Direct read with token warning
+- **100KB-1MB**: Chunked reading (parallel workers)
+- **> 1MB**: Search-based reading with Tantivy
+
+Chunk workers persist until the session ends, allowing follow-up questions about specific parts of large files.
+
 ## 🔒 Security & Privacy
 
-- **Local-first**: Vector DB runs locally (LanceDB)
+- **Local-first**: Vector DB and search index run locally
 - **No telemetry**: Your data stays yours
 - **Command safety**: Approval workflow, allowlists, pattern detection
 - **API key handling**: Stored in config, never logged

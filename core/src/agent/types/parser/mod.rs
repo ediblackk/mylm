@@ -5,39 +5,19 @@
 
 mod short_key;
 
-pub use short_key::{ShortKeyParser, parse_short_key_action, ShortKeyAction};
-
-use crate::agent::types::intents::ToolCall;
+pub use short_key::{ShortKeyParser, parse_short_key_action, ShortKeyAction, ShortKeyExtracted};
 
 /// Result of parsing an LLM response
+/// 
+/// Y-Switch Design: The parser extracts ALL fields without making decisions.
+/// The planner (traffic controller) decides which "tracks" to take based on
+/// what fields are present. This is the single-source-of-truth approach.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParsedResponse {
-    /// One or more tool calls to execute
-    ToolCalls(Vec<ToolCall>),
-    /// Final answer to present to user
-    FinalAnswer(String),
-    /// Request for confirmation before acting (ReAct style)
-    ConfirmRequest { 
-        /// The agent's thought/reasoning
-        thought: String, 
-        /// The tool to execute if approved
-        tool: ToolCall 
-    },
-    /// Remember content to memory (inline fire-and-forget save)
-    /// The memory save happens asynchronously - no waiting
-    Remember { 
-        /// Content to save
-        content: String,
-        /// Optional associated action to perform (happens concurrently)
-        next_action: Option<ToolCall>,
-    },
-    /// Combined action: remember + tool call (fire-and-forget)
-    RememberAndCall {
-        /// Content to save
-        content: String,
-        /// Tool call to execute
-        tool: ToolCall,
-    },
+    /// Short-Key JSON response - carries all extracted fields
+    /// The planner creates intents based on what's present (Y-switch)
+    ShortKey(ShortKeyExtracted),
+    
     /// Malformed response that couldn't be parsed
     Malformed { 
         /// Error message describing what went wrong

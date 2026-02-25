@@ -171,6 +171,7 @@ mod tests {
                 }
                 _ => Ok(Observation::ToolCompleted {
                     intent_id: IntentId::new(1),
+                    tool: "mock".to_string(),
                     result: ToolResult::Success {
                         output: "ok".to_string(),
                         structured: None,

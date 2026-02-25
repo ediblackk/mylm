@@ -24,11 +24,20 @@ pub struct WorkerHandle {
 }
 
 /// Worker execution result
+/// 
+/// Contains worker's output plus what it learned during execution.
+/// The learned context flows back to parent for continuity.
 #[derive(Debug, Clone)]
 pub struct WorkerResult {
     pub worker_id: WorkerId,
     pub output: String,
     pub success: bool,
+    /// What the worker learned (key facts, discoveries)
+    /// Flows back to parent context
+    pub context_diff: Vec<String>,
+    /// Reasoning trace - how worker arrived at conclusion
+    /// For debugging/auditing
+    pub reasoning_trace: Vec<String>,
 }
 
 /// Internal worker spawn parameters
@@ -39,6 +48,9 @@ pub struct WorkerResult {
 pub struct WorkerSpawnParams {
     pub id: String,
     pub objective: String,
+    /// Context/instructions passed from parent to worker
+    /// Contains key facts worker needs (NOT full history)
+    pub context: String,
     pub parent_trace_id: String,
 }
 
@@ -72,6 +84,7 @@ impl WorkerManager {
         let (result_tx, result_rx) = oneshot::channel();
         
         // Build worker configuration
+        // Pass spec.context as instructions so worker receives parent's context
         let worker_config = WorkerSessionConfig {
             allowed_tools: vec![], // Default: no pre-approved tools
             allowed_commands: vec![], // Default: no auto-approved commands
@@ -79,7 +92,7 @@ impl WorkerManager {
             scratchpad: None,
             output_tx: None,
             objective: spec.objective.clone(),
-            instructions: None,
+            instructions: Some(spec.context.clone()), // Pass parent context as instructions
             tags: None,
             commonbox: None, // Legacy worker doesn't use commonbox
         };
@@ -102,6 +115,8 @@ impl WorkerManager {
                         worker_id: worker_id_clone,
                         output: format!("Failed to create worker session: {}", e),
                         success: false,
+                        context_diff: vec![],
+                        reasoning_trace: vec![],
                     });
                     return;
                 }
@@ -181,11 +196,42 @@ impl WorkerManager {
                 }
             }
             
-            // Send result back to parent
+            // Extract learned context from output buffer
+            // Look for patterns like "DISCOVERED:", "FOUND:", "NOTE:" in output
+            let context_diff: Vec<String> = output_buffer
+                .iter()
+                .filter(|line| {
+                    let line_lower = line.to_lowercase();
+                    line_lower.contains("discovered:") 
+                        || line_lower.contains("found:")
+                        || line_lower.contains("note:")
+                        || line_lower.contains("important:")
+                        || line_lower.contains("key finding:")
+                })
+                .cloned()
+                .collect();
+            
+            // Build reasoning trace from output events
+            let reasoning_trace: Vec<String> = output_buffer
+                .iter()
+                .filter(|line| {
+                    let line_lower = line.to_lowercase();
+                    line_lower.contains("step") 
+                        || line_lower.contains("then")
+                        || line_lower.contains("next")
+                        || line_lower.contains("reasoning")
+                })
+                .take(10) // Limit to prevent overflow
+                .cloned()
+                .collect();
+            
+            // Send result back to parent with learned context
             let worker_result = WorkerResult {
                 worker_id: worker_id_clone,
                 output: output_buffer.join(""),
                 success,
+                context_diff,
+                reasoning_trace,
             };
             
             let _ = result_tx.send(worker_result);
@@ -219,11 +265,15 @@ impl WorkerManager {
                     worker_id: worker_id_clone,
                     output,
                     success: true,
+                    context_diff: vec![], // Simple workers don't produce context_diff
+                    reasoning_trace: vec![],
                 },
                 Err(e) => WorkerResult {
                     worker_id: worker_id_clone,
                     output: e,
                     success: false,
+                    context_diff: vec![],
+                    reasoning_trace: vec![],
                 },
             };
             
@@ -289,6 +339,7 @@ impl crate::agent::runtime::core::WorkerCapability for WorkerCapabilityImpl {
         let worker_spec = WorkerSpawnParams {
             id: worker_id.0.to_string(),
             objective: spec.objective,
+            context: spec.context, // Pass context from WorkerSpec
             parent_trace_id: "parent".to_string(),
         };
         
@@ -313,6 +364,7 @@ mod tests {
         let handle = manager.spawn(WorkerSpawnParams {
             id: "test-worker".to_string(),
             objective: "List current directory".to_string(),
+            context: String::new(), // No additional context for test
             parent_trace_id: "test".to_string(),
         }).await.expect("Failed to spawn worker");
         

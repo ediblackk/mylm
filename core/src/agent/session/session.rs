@@ -66,6 +66,12 @@ impl Default for SessionConfig {
 }
 
 /// Session coordinates cognition and runtime
+/// 
+/// # Context Management
+/// 
+/// Session owns the ContextManager (wrapped in Arc<Mutex<>>) which is shared
+/// with the LLM capability for size enforcement. This ensures single source
+/// of truth for conversation history.
 pub struct Session<E> 
 where
     E: StepEngine,
@@ -73,7 +79,7 @@ where
     /// Cognitive engine (pure logic)
     engine: E,
     
-    /// State tracking
+    /// State tracking (note: history is stored in context_manager)
     state: AgentState,
     
     /// Runtime for executing decisions
@@ -93,7 +99,9 @@ where
     session_id: String,
     
     /// Context manager for token-aware history management
-    context_manager: ContextManager,
+    /// 
+    /// Shared with LLM capability via Arc - single source of truth
+    context_manager: Arc<tokio::sync::Mutex<ContextManager>>,
     
     /// LLM client for context condensation (optional)
     llm_client: Option<Arc<crate::provider::LlmClient>>,
@@ -122,7 +130,7 @@ where
             memory_manager: None,
             persistence: Some(SessionPersistence::new()),
             session_id: uuid::Uuid::new_v4().to_string(),
-            context_manager: ContextManager::new(context_config),
+            context_manager: Arc::new(tokio::sync::Mutex::new(ContextManager::new(context_config))),
             llm_client: None,
         }
     }
@@ -147,7 +155,7 @@ where
             memory_manager: None,
             persistence: Some(SessionPersistence::from_config(memory_config)),
             session_id: uuid::Uuid::new_v4().to_string(),
-            context_manager: ContextManager::new(context_config),
+            context_manager: Arc::new(tokio::sync::Mutex::new(ContextManager::new(context_config))),
             llm_client: None,
         }
     }
@@ -171,7 +179,7 @@ where
             memory_manager: Some(memory_manager),
             persistence: Some(persistence),
             session_id: uuid::Uuid::new_v4().to_string(),
-            context_manager: ContextManager::new(context_config),
+            context_manager: Arc::new(tokio::sync::Mutex::new(ContextManager::new(context_config))),
             llm_client: None,
         }
     }
@@ -194,30 +202,21 @@ where
         // Convert persisted history to ContextManager
         let mut context_manager = ContextManager::new(context_config.clone());
         for msg in &persisted.history {
-            let role = match msg.role {
-                crate::agent::types::intents::Role::User => "user",
-                crate::agent::types::intents::Role::Assistant => "assistant",
-                crate::agent::types::intents::Role::System => "system",
-                crate::agent::types::intents::Role::Tool => "tool",
-            };
-            context_manager.add_message(role, &msg.content);
+            context_manager.add_message(&msg.role, &msg.content);
         }
         
-        // Also populate state history for the engine
-        let state_with_history = AgentState {
-            history: persisted.history.clone(),
-            ..state
-        };
+        // Note: AgentState no longer stores history separately - ContextManager is source of truth
+        // The engine receives history via the RequestLLM intent's Context
         
         Self {
             engine,
-            state: state_with_history,
+            state,
             runtime,
             config,
             memory_manager,
             persistence: Some(SessionPersistence::new()),
             session_id: persisted.id,
-            context_manager,
+            context_manager: Arc::new(tokio::sync::Mutex::new(context_manager)),
             llm_client: None,
         }
     }
@@ -265,68 +264,55 @@ where
     pub fn set_llm_client(&mut self, client: Arc<crate::provider::LlmClient>) {
         self.llm_client = Some(client);
         // Update context manager config from LLM client
-        self.context_manager = ContextManager::from_llm_client(&self.llm_client.as_ref().unwrap());
+        let new_cm = ContextManager::from_llm_client(&self.llm_client.as_ref().unwrap());
+        self.context_manager = Arc::new(tokio::sync::Mutex::new(new_cm));
     }
     
-    /// Get the context manager
-    pub fn context_manager(&self) -> &ContextManager {
-        &self.context_manager
+    /// Get a clone of the context manager Arc for sharing with capabilities
+    pub fn context_manager(&self) -> Arc<tokio::sync::Mutex<ContextManager>> {
+        self.context_manager.clone()
     }
     
-    /// Get mutable context manager
-    pub fn context_manager_mut(&mut self) -> &mut ContextManager {
-        &mut self.context_manager
-    }
-    
-    /// Sync state history to ContextManager
-    fn sync_history_to_context_manager(&mut self) {
+    /// Sync state history to ContextManager (async due to Mutex)
+    /// 
+    /// Note: This is a temporary bridge. In the future, history should be 
+    /// written directly to ContextManager, not through AgentState.
+    async fn sync_history_to_context_manager(&self) {
+        let mut cm = self.context_manager.lock().await;
+        
         // Only add new messages from state.history that aren't in context_manager yet
-        let existing_count = self.context_manager.history().len();
+        let existing_count = cm.history().len();
         let state_history_len = self.state.history.len();
         
         if state_history_len > existing_count {
             for msg in &self.state.history[existing_count..] {
-                let role = match msg.role {
-                    crate::agent::types::intents::Role::User => "user",
-                    crate::agent::types::intents::Role::Assistant => "assistant",
-                    crate::agent::types::intents::Role::System => "system",
-                    crate::agent::types::intents::Role::Tool => "tool",
-                };
-                self.context_manager.add_message(role, &msg.content);
+                cm.add_message(&msg.role, &msg.content);
             }
             
             crate::info_log!(
                 "[SESSION] Synced {} new messages to ContextManager (total: {})",
                 state_history_len - existing_count,
-                self.context_manager.history().len()
+                cm.history().len()
             );
         }
     }
     
     /// Prepare context for LLM call with pruning/condensation
-    pub async fn prepare_context(&mut self) -> Result<Vec<crate::provider::chat::ChatMessage>, crate::conversation::ContextError> {
-        self.context_manager.prepare_context(self.llm_client.as_ref()).await
+    pub async fn prepare_context(&self) -> Result<Vec<crate::provider::chat::ChatMessage>, crate::conversation::ContextError> {
+        let mut cm = self.context_manager.lock().await;
+        cm.prepare_context(self.llm_client.as_ref()).await
     }
     
     /// Build a persisted session snapshot
-    pub fn build_persisted_session(&self) -> PersistedSession {
-        // Convert ContextManager history back to cognition messages
-        let history: Vec<crate::agent::cognition::kernel::Message> = self.context_manager
+    pub async fn build_persisted_session(&self) -> PersistedSession {
+        // Convert ContextManager history (canonical Message) to cognition messages
+        // Using From trait for clean conversion during Phase 3 migration
+        let cm = self.context_manager.lock().await;
+        #[allow(deprecated)]
+        let history: Vec<crate::agent::cognition::kernel::Message> = cm
             .history()
             .iter()
-            .map(|m| {
-                let role = match m.role.as_str() {
-                    "user" => crate::agent::types::intents::Role::User,
-                    "assistant" => crate::agent::types::intents::Role::Assistant,
-                    "system" => crate::agent::types::intents::Role::System,
-                    "tool" => crate::agent::types::intents::Role::Tool,
-                    _ => crate::agent::types::intents::Role::User,
-                };
-                crate::agent::cognition::kernel::Message {
-                    role,
-                    content: m.content.clone(),
-                }
-            })
+            .map(|m| crate::agent::cognition::kernel::Message::from(m.clone()))
             .collect();
         
         SessionBuilder::new()
@@ -338,7 +324,7 @@ where
     /// Save the current session state
     pub async fn save(&self) {
         if let Some(ref persistence) = self.persistence {
-            let session = self.build_persisted_session();
+            let session = self.build_persisted_session().await;
             persistence.save(&session).await;
         }
     }
@@ -400,7 +386,7 @@ where
             self.state = transition.next_state.clone();
             
             // Sync session history with ContextManager for token-aware management
-            self.sync_history_to_context_manager();
+            self.sync_history_to_context_manager().await;
             
             // Handle decision
             match transition.decision {

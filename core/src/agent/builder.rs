@@ -33,6 +33,7 @@ use crate::agent::runtime::capabilities::{
     MemoryCapability, AgentMemoryManager,
 };
 use crate::agent::tools::{ToolRegistry, WebSearchTool, WebSearchConfig, SearchProvider};
+use crate::conversation::ContextManager;
 use crate::memory::store::VectorStore;
 use crate::provider::LlmClient;
 use std::sync::Arc;
@@ -65,7 +66,9 @@ impl AgentBuilder {
     
     /// Add LLM capability from existing client
     pub fn with_llm_client(mut self, client: Arc<LlmClient>) -> Self {
-        self.llm = Some(Arc::new(LlmClientCapability::new(client)));
+        let context_config = crate::conversation::ContextConfig::default();
+        let context_manager = Arc::new(tokio::sync::Mutex::new(ContextManager::new(context_config)));
+        self.llm = Some(Arc::new(LlmClientCapability::new(client, context_manager)));
         self
     }
     

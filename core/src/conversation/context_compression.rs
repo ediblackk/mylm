@@ -1,23 +1,23 @@
-//! Smart Pruning System
+//! Context Compression Module
 //!
 //! Prevents the "disappearing message" problem by:
-//! 1. Smart preservation (extract memories before pruning)
-//! 2. Visual pruning indicators in UI
-//! 3. Archive and recovery of pruned content
+//! 1. Smart preservation (extract memories before compression)
+//! 2. Visual compression indicators in UI
+//! 3. Archive and recovery of trimmed content
 
-use crate::agent::cognition::history::{Message, MessageRole};
+use crate::conversation::manager::Message;
 // Note: ContextManager integration is in manager.rs
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-/// A segment of pruned messages
+/// A segment of compressed/trimmed messages
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrunedSegment {
+pub struct CompressedSegment {
     /// Unique ID for this segment
     pub id: String,
     
-    /// When it was pruned
+    /// When it was compressed
     pub timestamp: DateTime<Utc>,
     
     /// How many messages were pruned
@@ -32,15 +32,15 @@ pub struct PrunedSegment {
     /// Full content that was pruned
     pub messages: Vec<Message>,
     
-    /// Memories extracted before pruning
+    /// Memories extracted before compression
     pub extracted_memories: Vec<String>,
     
     /// Whether user has acknowledged/viewed this
     pub acknowledged: bool,
 }
 
-impl PrunedSegment {
-    /// Create a new pruned segment
+impl CompressedSegment {
+    /// Create a new compressed segment
     pub fn new(messages: Vec<Message>, tokens_saved: usize) -> Self {
         let message_count = messages.len();
         let summary = generate_summary(&messages);
@@ -81,17 +81,17 @@ impl PrunedSegment {
     }
 }
 
-/// Archive for pruned segments
+/// Archive for compressed segments
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PrunedHistory {
-    /// Archive of pruned segments (oldest first)
-    segments: VecDeque<PrunedSegment>,
+pub struct CompressionArchive {
+    /// Archive of compressed segments (oldest first)
+    segments: VecDeque<CompressedSegment>,
     
     /// Max segments to keep in memory
     max_segments: usize,
 }
 
-impl PrunedHistory {
+impl CompressionArchive {
     /// Create new archive with max size
     pub fn new(max_segments: usize) -> Self {
         Self {
@@ -100,8 +100,8 @@ impl PrunedHistory {
         }
     }
     
-    /// Add a pruned segment
-    pub fn push(&mut self, segment: PrunedSegment) {
+    /// Add a compressed segment
+    pub fn push(&mut self, segment: CompressedSegment) {
         if self.segments.len() >= self.max_segments {
             self.segments.pop_front(); // Remove oldest
         }
@@ -109,17 +109,17 @@ impl PrunedHistory {
     }
     
     /// Get all segments
-    pub fn segments(&self) -> &VecDeque<PrunedSegment> {
+    pub fn segments(&self) -> &VecDeque<CompressedSegment> {
         &self.segments
     }
     
     /// Get a specific segment by ID
-    pub fn get(&self, id: &str) -> Option<&PrunedSegment> {
+    pub fn get(&self, id: &str) -> Option<&CompressedSegment> {
         self.segments.iter().find(|s| s.id == id)
     }
     
     /// Get mutable reference to segment
-    pub fn get_mut(&mut self, id: &str) -> Option<&mut PrunedSegment> {
+    pub fn get_mut(&mut self, id: &str) -> Option<&mut CompressedSegment> {
         self.segments.iter_mut().find(|s| s.id == id)
     }
     
@@ -130,8 +130,8 @@ impl PrunedHistory {
         Some(segment.messages)
     }
     
-    /// Search pruned history
-    pub fn search(&self, query: &str) -> Vec<&PrunedSegment> {
+    /// Search compression archive
+    pub fn search(&self, query: &str) -> Vec<&CompressedSegment> {
         let query_lower = query.to_lowercase();
         self.segments
             .iter()
@@ -147,10 +147,10 @@ impl PrunedHistory {
     /// Format for display
     pub fn format_list(&self) -> String {
         if self.segments.is_empty() {
-            return "No pruned segments in archive.".to_string();
+            return "No compressed segments in archive.".to_string();
         }
         
-        let mut output = format!("📦 Pruned History ({} segments)\n\n", self.segments.len());
+        let mut output = format!("📦 Compression Archive ({} segments)\n\n", self.segments.len());
         
         for (i, segment) in self.segments.iter().enumerate() {
             let status = if segment.acknowledged { "✓" } else { "○" };
@@ -170,13 +170,13 @@ impl PrunedHistory {
     }
 }
 
-/// Configuration for smart pruning
+/// Configuration for context compression
 #[derive(Debug, Clone)]
-pub struct SmartPruningConfig {
+pub struct CompressionConfig {
     /// Patterns that indicate important content
     pub preserve_patterns: Vec<String>,
     
-    /// Auto-extract memories before pruning
+    /// Auto-extract memories before compression
     pub auto_extract_memories: bool,
     
     /// Keep first N messages (setup/context)
@@ -189,7 +189,7 @@ pub struct SmartPruningConfig {
     pub max_archive_size: usize,
 }
 
-impl Default for SmartPruningConfig {
+impl Default for CompressionConfig {
     fn default() -> Self {
         Self {
             preserve_patterns: vec![
@@ -207,21 +207,21 @@ impl Default for SmartPruningConfig {
     }
 }
 
-/// Generate a summary of pruned messages
+/// Generate a summary of compressed messages
 fn generate_summary(messages: &[Message]) -> String {
     if messages.is_empty() {
         return "No messages".to_string();
     }
     
     // Count message types
-    let user_count = messages.iter().filter(|m| m.role == MessageRole::User).count();
-    let assistant_count = messages.iter().filter(|m| m.role == MessageRole::Assistant).count();
-    let tool_count = messages.iter().filter(|m| m.role == MessageRole::Tool).count();
+    let user_count = messages.iter().filter(|m| m.role == "user").count();
+    let assistant_count = messages.iter().filter(|m| m.role == "assistant").count();
+    let tool_count = messages.iter().filter(|m| m.role == "tool").count();
     
     // Extract key topics from user messages
     let topics: Vec<String> = messages
         .iter()
-        .filter(|m| m.role == MessageRole::User)
+        .filter(|m| m.role == "user")
         .take(3)
         .map(|m| {
             // Extract first few words
@@ -247,10 +247,10 @@ fn generate_summary(messages: &[Message]) -> String {
         format!("about {}", topics.join(", "))
     };
     
-    format!("{} {} {}", parts.join(", "), topic_str, "pruned")
+    format!("{} {} {}", parts.join(", "), topic_str, "compressed")
 }
 
-/// Extract memories from messages before pruning
+/// Extract memories from messages before compression
 fn extract_memories(messages: &[Message]) -> Vec<String> {
     let mut memories = vec![];
     
@@ -271,7 +271,7 @@ fn extract_memories(messages: &[Message]) -> Vec<String> {
         }
         
         // Extract user preferences/corrections
-        if msg.role == MessageRole::User {
+        if msg.role == "user" {
             // Patterns like "I prefer", "Use X not Y", etc.
             if msg.content.contains("prefer") 
                 || msg.content.contains("use ")
@@ -300,39 +300,39 @@ fn extract_json_memory(content: &str) -> Option<String> {
     None
 }
 
-/// Smart pruning result
+/// Context compression result
 #[derive(Debug)]
-pub struct SmartPruneResult {
+pub struct CompressionResult {
     /// Messages to keep
     pub kept: Vec<Message>,
     
-    /// Messages that were pruned (archived)
-    pub pruned: Vec<Message>,
+    /// Messages that were trimmed (archived)
+    pub trimmed: Vec<Message>,
     
-    /// The pruned segment (for UI indicator)
-    pub segment: PrunedSegment,
+    /// The compressed segment (for UI indicator)
+    pub segment: CompressedSegment,
     
-    /// Whether pruning was needed
-    pub was_pruned: bool,
+    /// Whether compression was needed
+    pub was_compressed: bool,
 }
 
-/// Perform smart pruning
-pub fn smart_prune(
+/// Perform context compression
+pub fn compress_context(
     messages: Vec<Message>,
     token_limit: usize,
-    config: &SmartPruningConfig,
-) -> SmartPruneResult {
+    config: &CompressionConfig,
+) -> CompressionResult {
     let total_tokens: usize = messages.iter()
         .map(|m| m.content.len() / 4 + 1)
         .sum();
     
     // If under limit, no pruning needed
     if total_tokens <= token_limit {
-        return SmartPruneResult {
+        return CompressionResult {
             kept: messages,
-            pruned: vec![],
-            segment: PrunedSegment::new(vec![], 0),
-            was_pruned: false,
+            trimmed: vec![],
+            segment: CompressedSegment::new(vec![], 0),
+            was_compressed: false,
         };
     }
     
@@ -349,7 +349,7 @@ pub fn smart_prune(
     
     // Keep recent messages within budget
     let mut kept = important;
-    let mut pruned = vec![];
+    let mut trimmed = vec![];
     let mut current_tokens = important_tokens;
     
     // Work backwards through remaining messages
@@ -359,28 +359,28 @@ pub fn smart_prune(
             kept.push(msg);
             current_tokens += msg_tokens;
         } else {
-            pruned.push(msg);
+            trimmed.push(msg);
         }
     }
     
     // Reverse to maintain order
     kept.reverse();
-    pruned.reverse();
+    trimmed.reverse();
     
-    // Create pruned segment
-    let tokens_saved = pruned.iter().map(|m| m.content.len() / 4 + 1).sum();
-    let segment = PrunedSegment::new(pruned.clone(), tokens_saved);
+    // Create compressed segment
+    let tokens_saved = trimmed.iter().map(|m| m.content.len() / 4 + 1).sum();
+    let segment = CompressedSegment::new(trimmed.clone(), tokens_saved);
     
-    SmartPruneResult {
+    CompressionResult {
         kept,
-        pruned,
+        trimmed,
         segment,
-        was_pruned: true,
+        was_compressed: true,
     }
 }
 
 /// Check if a message should be preserved
-fn should_preserve(msg: &Message, config: &SmartPruningConfig) -> bool {
+fn should_preserve(msg: &Message, config: &CompressionConfig) -> bool {
     let content_lower = msg.content.to_lowercase();
     
     // Check preserve patterns
@@ -391,17 +391,17 @@ fn should_preserve(msg: &Message, config: &SmartPruningConfig) -> bool {
     }
     
     // Preserve system messages
-    if msg.role == MessageRole::System {
+    if msg.role == "system" {
         return true;
     }
     
     // Preserve tool results (they contain facts)
-    if msg.role == MessageRole::Tool {
+    if msg.role == "tool" {
         return true;
     }
     
     // Preserve user corrections
-    if msg.role == MessageRole::User {
+    if msg.role == "user" {
         if content_lower.starts_with("no,")
             || content_lower.starts_with("wrong")
             || content_lower.starts_with("incorrect")
@@ -419,19 +419,19 @@ fn should_preserve(msg: &Message, config: &SmartPruningConfig) -> bool {
 #[derive(Debug, Clone)]
 pub struct AutoRestoreResult {
     /// Segments that matched and should be restored
-    pub segments: Vec<PrunedSegment>,
+    pub segments: Vec<CompressedSegment>,
     /// Whether any segments were found
     pub found: bool,
     /// Search keywords that matched
     pub keywords: Vec<String>,
 }
 
-/// Check if user message references pruned content
+/// Check if user message references compressed content
 /// 
 /// This is called before processing user input to see if we need
-/// to auto-restore any pruned context.
-pub fn check_auto_restore(user_message: &str, history: &PrunedHistory) -> AutoRestoreResult {
-    if history.segments().is_empty() {
+/// to auto-restore any compressed context.
+pub fn check_auto_restore(user_message: &str, archive: &CompressionArchive) -> AutoRestoreResult {
+    if archive.segments().is_empty() {
         return AutoRestoreResult {
             segments: vec![],
             found: false,
@@ -454,7 +454,7 @@ pub fn check_auto_restore(user_message: &str, history: &PrunedHistory) -> AutoRe
     let mut matching_segments = vec![];
     let mut matched_keywords = vec![];
     
-    for segment in history.segments() {
+    for segment in archive.segments() {
         let segment_text = format!(
             "{} {}",
             segment.summary,
@@ -568,17 +568,17 @@ fn extract_keywords(text: &str) -> Vec<String> {
     words
 }
 
-/// Extension trait for ContextManager to use smart pruning
-pub trait SmartPruning {
-    /// Perform smart pruning and return segment for UI
-    fn smart_prune_with_indicator(&mut self, config: &SmartPruningConfig) -> Option<PrunedSegment>;
+/// Extension trait for ContextManager to use context compression
+pub trait ContextCompression {
+    /// Perform context compression and return segment for UI
+    fn compress_with_indicator(&mut self, config: &CompressionConfig) -> Option<CompressedSegment>;
     
-    /// Get archive of pruned segments
-    fn pruned_history(&self) -> &PrunedHistory;
+    /// Get compression archive
+    fn compression_archive(&self) -> &CompressionArchive;
     
-    /// Get mutable archive
-    fn pruned_history_mut(&mut self) -> &mut PrunedHistory;
+    /// Get mutable compression archive
+    fn compression_archive_mut(&mut self) -> &mut CompressionArchive;
     
-    /// Check if user message references pruned content
+    /// Check if user message references compressed content
     fn check_auto_restore(&self, user_message: &str) -> AutoRestoreResult;
 }

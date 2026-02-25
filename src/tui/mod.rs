@@ -115,7 +115,11 @@ async fn handle_agent_event(
     match event {
         OutputEvent::Thinking { intent_id } => {
             mylm_core::debug_log!("[AGENT_EVENT] Agent thinking, intent_id={}", intent_id.0);
-            app.state = crate::tui::app::AppState::Thinking("Agent is thinking...".to_string());
+            // Only show thinking in main chat if no workers are active
+            // Worker thinking is shown in the job panel instead
+            if app.active_worker_count == 0 {
+                app.state = crate::tui::app::AppState::Thinking("Agent is thinking...".to_string());
+            }
         }
         
         OutputEvent::ToolExecuting { intent_id, tool, args } => {
@@ -279,7 +283,10 @@ async fn handle_agent_event(
         OutputEvent::WorkerSpawned { worker_id, job_id, objective, agent_id } => {
             mylm_core::info_log!("[AGENT_EVENT] Worker spawned: {} (job={}) - {}", worker_id.0, job_id, objective);
             
-            // Add to chat history
+            // Track active worker
+            app.active_worker_count += 1;
+            
+            // Add to chat history (only for first worker or if no other messages recently)
             app.chat_history.push(TimestampedChatMessage::assistant(format!(
                 "🚀 Started worker {}: {}",
                 worker_id.0, objective
@@ -308,6 +315,11 @@ async fn handle_agent_event(
         OutputEvent::WorkerCompleted { worker_id, job_id } => {
             mylm_core::info_log!("[AGENT_EVENT] Worker completed: {} (job={})", worker_id.0, job_id);
             
+            // Decrement active worker count
+            if app.active_worker_count > 0 {
+                app.active_worker_count -= 1;
+            }
+            
             // Update chat history
             app.chat_history.push(TimestampedChatMessage::assistant(format!(
                 "✅ Worker {} completed",
@@ -328,6 +340,11 @@ async fn handle_agent_event(
         
         OutputEvent::WorkerFailed { worker_id, job_id, error, is_stall } => {
             mylm_core::error_log!("[AGENT_EVENT] Worker {} failed (job={}, stall={}): {}", worker_id.0, job_id, is_stall, error);
+            
+            // Decrement active worker count
+            if app.active_worker_count > 0 {
+                app.active_worker_count -= 1;
+            }
             
             // Update chat history
             let emoji = if is_stall { "⚠️" } else { "❌" };
@@ -402,6 +419,23 @@ async fn handle_agent_event(
                 app.current_response.clear();
                 app.stream_thought = None;
                 app.stream_in_final = false;
+            }
+        }
+        
+        OutputEvent::WorkerThinking { worker_id, job_id } => {
+            // Worker thinking is isolated from main chat - shown in job panel instead
+            // This event should rarely reach here since the delegate filter drops these,
+            // but we handle it for completeness
+            mylm_core::debug_log!("[AGENT_EVENT] Worker {} thinking (job={}) - not shown in main chat", worker_id.0, job_id);
+            
+            // Could update job status here to show "Thinking..." in the job panel
+            if let Some(job) = app.job_registry.get_job_mut(&worker_id.0.to_string()) {
+                // Only update if job doesn't have a more specific current action
+                if job.action_log.is_empty() || 
+                   matches!(job.action_log.last().map(|e| e.action_type), 
+                            Some(crate::tui::app::types::ActionType::Thought)) {
+                    // Worker is thinking - this is tracked in the job panel, not main chat
+                }
             }
         }
         

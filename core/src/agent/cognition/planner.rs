@@ -12,11 +12,12 @@ use crate::agent::types::{
     graph::IntentGraph,
     intents::IntentNode,
     ids::IntentId,
-    intents::{Intent, ExitReason, Context, LLMRequest, Message, Role},
+    intents::{Intent, ExitReason, Context, LLMRequest},
     events::KernelEvent,
     config::KernelConfig,
-    parser::{ShortKeyParser, ParsedResponse},
+    parser::{ShortKeyParser, ParsedResponse, ShortKeyExtracted},
 };
+use crate::conversation::manager::Message;
 
 use super::prompts::system::{ToolDescription, build_tool_defs, build_system_prompt};
 use super::policy::approval::ApprovalPolicy;
@@ -146,10 +147,7 @@ impl Planner {
         self.state.increment_step();
         
         // Add message to history
-        self.state.history.push(Message {
-            role: Role::User,
-            content: content.to_string(),
-        });
+        self.state.history.push(Message::new("user", content));
         
         let context = self.build_context(&format!("User: {}\n\nWhat should I do?", content));
         
@@ -173,6 +171,122 @@ impl Planner {
         ));
         crate::info_log!("[PLANNER] Graph now has {} nodes, step_count={}", graph.len(), self.state.step_count);
         
+        Ok(())
+    }
+    
+    /// Y-SWITCH: Handle Short-Key extracted fields
+    /// 
+    /// The planner acts as a traffic controller, routing to different "tracks" based on
+    /// what fields are present in the extracted response. This is the heart of the Y-switch design.
+    /// 
+    /// Track 1 (Remember): If "r" field present → Intent::Remember (fire-and-forget)
+    /// Track 2 (Tool): If "a" field present → Intent::CallTool or Intent::RequestApproval
+    /// Track 3 (Final): If "f" field present → Intent::EmitResponse
+    /// 
+    /// Tracks can run in parallel (no dependencies) or sequentially based on semantics.
+    fn handle_short_key_response(
+        &mut self,
+        extracted: ShortKeyExtracted,
+        graph: &mut IntentGraph,
+    ) -> Result<(), KernelError> {
+        crate::info_log!("[PLANNER] Y-SWITCH processing: r={}, a={}, f={}, c={}",
+            extracted.remember.is_some(),
+            extracted.tool_call.is_some(),
+            extracted.final_answer.is_some(),
+            extracted.confirm
+        );
+
+        // Track 1: REMEMBER (fire-and-forget, no dependencies)
+        // The "r" field is saved to memory asynchronously - doesn't block other tracks
+        let has_remember = extracted.remember.is_some();
+        let _remember_node = if let Some(content) = extracted.remember {
+            let node_id = self.next_intent_id();
+            crate::info_log!("[PLANNER] Track 1: Creating Remember intent {}", node_id.0);
+            graph.add(IntentNode::new(
+                node_id,
+                Intent::Remember { content },
+            ));
+            Some(node_id)
+        } else {
+            None
+        };
+
+        // Track 2: TOOL CALL (may need approval)
+        // If "c" flag is set, we create RequestApproval instead of CallTool
+        let has_tool = extracted.tool_call.is_some();
+        let tool_node = if let Some(tool) = extracted.tool_call {
+            let args_str = tool.arguments.to_string();
+            let node_id = self.next_intent_id();
+
+            // Check if this is a suggestion (no approval needed)
+            let is_suggestion = tool.arguments.get("mode")
+                .and_then(|v| v.as_str())
+                .map(|s| s == "suggest")
+                .unwrap_or(false);
+
+            let tool_name = tool.name.clone();
+            if !is_suggestion && (extracted.confirm || self.approval_policy.check(&tool_name, &args_str)) {
+                crate::info_log!("[PLANNER] Track 2: Creating RequestApproval intent {} for tool '{}'",
+                    node_id.0, tool_name);
+                
+                self.state.pending_approvals.push(PendingApproval {
+                    intent_id: node_id,
+                    tool: tool_name.clone(),
+                    args: args_str.clone(),
+                    requested_at: std::time::SystemTime::now(),
+                });
+
+                graph.add(IntentNode::new(
+                    node_id,
+                    Intent::RequestApproval(crate::agent::types::intents::ApprovalRequest {
+                        tool: tool_name.clone(),
+                        args: args_str,
+                        reason: format!("Tool '{}' requires approval", tool_name),
+                    }),
+                ));
+            } else {
+                crate::info_log!("[PLANNER] Track 2: Creating CallTool intent {} for tool '{}'",
+                    node_id.0, tool_name);
+                graph.add(IntentNode::new(
+                    node_id,
+                    Intent::CallTool(tool),
+                ));
+            }
+            Some(node_id)
+        } else {
+            None
+        };
+
+        // Track 3: FINAL ANSWER (user-facing response)
+        // If there's a tool call, the final answer should come AFTER tool completion
+        // So we add a dependency edge: tool_node -> emit_node
+        if let Some(answer) = extracted.final_answer {
+            let node_id = self.next_intent_id();
+            crate::info_log!("[PLANNER] Track 3: Creating EmitResponse intent {}", node_id.0);
+            
+            let mut emit_node = IntentNode::new(
+                node_id,
+                Intent::EmitResponse(answer),
+            );
+
+            // If there's a tool call, emit response depends on tool completion
+            if let Some(tool_id) = tool_node {
+                emit_node = emit_node.depends_on(tool_id);
+                crate::info_log!("[PLANNER] Track 3: Adding dependency: emit {} depends on tool {}",
+                    node_id.0, tool_id.0);
+            }
+
+            graph.add(emit_node);
+        } else if extracted.thought.is_empty() && !has_remember && !has_tool {
+            // Nothing to do - malformed response
+            crate::warn_log!("[PLANNER] Y-SWITCH: No actionable fields found in response");
+            graph.add(IntentNode::new(
+                self.next_intent_id(),
+                Intent::EmitResponse("I received your message but I'm not sure how to respond.".to_string()),
+            ));
+        }
+
+        crate::info_log!("[PLANNER] Y-SWITCH complete: {} nodes in graph", graph.len());
         Ok(())
     }
     
@@ -235,98 +349,16 @@ impl Planner {
         }
 
         // Add assistant message to history (only for valid responses or after max retries)
-        self.state.history.push(Message {
-            role: Role::Assistant,
-            content: content.to_string(),
-        });
+        self.state.history.push(Message::new("assistant", content));
 
         // Clean up retry tracking for this intent
         self.state.llm_retry_counts.remove(&intent_id);
         
+        // Y-SWITCH: The planner is the traffic controller
+        // It takes the extracted Short-Key fields and creates appropriate intents
         match parse_result {
-            Ok(ParsedResponse::ToolCalls(calls)) => {
-                if let Some(call) = calls.into_iter().next() {
-                    let args_str = call.arguments.to_string();
-                    
-                    // Check if this is a suggestion (no approval needed)
-                    let is_suggestion = call.arguments.get("mode")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s == "suggest")
-                        .unwrap_or(false);
-                    
-                    // Check approval (skip for suggestions)
-                    if !is_suggestion && self.approval_policy.check(&call.name, &args_str) {
-                        crate::info_log!("[LLM_KERNEL] Adding pending approval for tool: {}, args: {}", call.name, args_str);
-                        
-                        // Generate intent ID once and reuse (step already incremented at function start)
-                        let approval_intent_id = self.next_intent_id();
-                        
-                        self.state.pending_approvals.push(PendingApproval {
-                            intent_id: approval_intent_id,
-                            tool: call.name.clone(),
-                            args: args_str.clone(),
-                            requested_at: std::time::SystemTime::now(),
-                        });
-                        
-                        let tool_name = call.name.clone();
-                        graph.add(IntentNode::new(
-                            approval_intent_id,
-                            Intent::RequestApproval(crate::agent::types::intents::ApprovalRequest {
-                                tool: call.name,
-                                args: args_str,
-                                reason: format!("Tool '{}' requires approval", tool_name),
-                            }),
-                        ));
-                    } else {
-                        graph.add(IntentNode::new(
-                            self.next_intent_id(),
-                            Intent::CallTool(call),
-                        ));
-                    }
-                }
-            }
-            Ok(ParsedResponse::FinalAnswer(answer)) => {
-                graph.add(IntentNode::new(
-                    self.next_intent_id(),
-                    Intent::EmitResponse(answer),
-                ));
-            }
-            Ok(ParsedResponse::Remember { content: memory, .. }) => {
-                graph.add(IntentNode::new(
-                    self.next_intent_id(),
-                    Intent::Remember { content: memory },
-                ));
-            }
-            Ok(ParsedResponse::RememberAndCall { content: _, tool }) => {
-                // For now, prioritize the tool call
-                let args_str = tool.arguments.to_string();
-                
-                if self.approval_policy.check(&tool.name, &args_str) {
-                    let tool_name = tool.name.clone();
-                    graph.add(IntentNode::new(
-                        self.next_intent_id(),
-                        Intent::RequestApproval(crate::agent::types::intents::ApprovalRequest {
-                            tool: tool.name,
-                            args: args_str,
-                            reason: format!("Tool '{}' requires approval", tool_name),
-                        }),
-                    ));
-                } else {
-                    graph.add(IntentNode::new(
-                        self.next_intent_id(),
-                        Intent::CallTool(tool),
-                    ));
-                }
-            }
-            Ok(ParsedResponse::ConfirmRequest { tool, .. }) => {
-                graph.add(IntentNode::new(
-                    self.next_intent_id(),
-                    Intent::RequestApproval(crate::agent::types::intents::ApprovalRequest {
-                        tool: tool.name,
-                        args: tool.arguments.to_string(),
-                        reason: "Tool requires confirmation".to_string(),
-                    }),
-                ));
+            Ok(ParsedResponse::ShortKey(extracted)) => {
+                self.handle_short_key_response(extracted, graph)?;
             }
             Ok(ParsedResponse::Malformed { error, .. }) => {
                 graph.add(IntentNode::new(
@@ -375,18 +407,12 @@ impl Planner {
         if output.starts_with("SUGGESTED_COMMAND: ") {
             crate::info_log!("[PLANNER] Tool result is a suggestion, skipping LLM follow-up");
             // Still add to history but don't request interpretation
-            self.state.history.push(Message {
-                role: Role::Tool,
-                content: output.clone(),
-            });
+            self.state.history.push(Message::new("tool", output.clone()));
             return Ok(());
         }
         
         // Add tool message to history
-        self.state.history.push(Message {
-            role: Role::Tool,
-            content: format!("Tool '{}' {}: {}", tool, status, output),
-        });
+        self.state.history.push(Message::new("tool", format!("Tool '{}' {}: {}", tool, status, output)));
         
         // Don't include tool output in scratchpad - it's already in history
         // This avoids duplicate content that can trigger WAF

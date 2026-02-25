@@ -2,10 +2,30 @@
 //!
 //! Handles parsing of Short-Key action format from LLM responses.
 //! Supports fenced JSON blocks, inline JSON, and various normalization strategies.
+//!
+//! Y-Switch Design: Parser extracts ALL fields, Planner decides which tracks to take.
 
 use serde::{Deserialize, Serialize};
 use crate::agent::types::intents::ToolCall;
 use super::{ParsedResponse, ParseError, extract_json_objects, extract_code_blocks};
+
+/// Extracted Short-Key fields - flat extraction, no decisions made here.
+/// 
+/// This is the Y-switch source: the planner uses these fields to create
+/// appropriate intents. All fields are optional - presence determines routing.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ShortKeyExtracted {
+    /// Thought/reasoning ("t" field)
+    pub thought: String,
+    /// Remember content - save to memory ("r" field)
+    pub remember: Option<String>,
+    /// Tool call ("a" + "i" fields combined)
+    pub tool_call: Option<ToolCall>,
+    /// Final answer to user ("f" field)
+    pub final_answer: Option<String>,
+    /// Confirm flag - request approval before tool execution ("c" field)
+    pub confirm: bool,
+}
 
 /// Short-Key Action representation.
 ///
@@ -48,7 +68,9 @@ impl ShortKeyParser {
 
     /// Parse content and return a ParsedResponse
     ///
-    /// This is the main entry point that integrates with the ResponseParser trait
+    /// Y-Switch Design: Extracts ALL fields from Short-Key JSON.
+    /// The PLANNER decides which intents to create (remember, tool, emit, etc.)
+    /// This avoids losing data when multiple fields are present (e.g., "r" + "f" + "a").
     pub fn parse_to_response(&self, content: &str) -> Result<ParsedResponse, ParseError> {
         match self.parse(content) {
             Ok(actions) => {
@@ -59,85 +81,28 @@ impl ShortKeyParser {
                     });
                 }
 
-                // Get the first action for analysis
+                // Get the first action (primary action)
                 let first = &actions[0];
 
-                // Check for final answer first
-                if let Some(final_answer) = actions.iter().find_map(|a| a.final_answer.clone()) {
-                    return Ok(ParsedResponse::FinalAnswer(final_answer));
-                }
-
-                // Extract tool call from first action if present
-                let tool_call = first.action.as_ref().map(|tool_name| {
-                    ToolCall {
-                        name: tool_name.clone(),
-                        arguments: first.input.clone().unwrap_or(serde_json::Value::Null),
-                        working_dir: None,
-                        timeout_secs: None,
-                    }
-                });
-
-                // Check for inline memory save (r field)
-                // This is fire-and-forget: we save and continue immediately
-                if let Some(remember_content) = first.remember.clone() {
-                    // Has remember field
-                    if let Some(tool) = tool_call {
-                        if first.confirm {
-                            return Ok(ParsedResponse::ConfirmRequest {
-                                thought: first.thought.clone(),
-                                tool,
-                            });
+                // Extract all fields - NO DECISIONS made here!
+                // The planner (traffic controller) will decide what to do.
+                let extracted = ShortKeyExtracted {
+                    thought: first.thought.clone(),
+                    remember: first.remember.clone(),
+                    tool_call: first.action.as_ref().map(|tool_name| {
+                        ToolCall {
+                            name: tool_name.clone(),
+                            arguments: first.input.clone().unwrap_or(serde_json::Value::Null),
+                            working_dir: None,
+                            timeout_secs: None,
                         }
-                        return Ok(ParsedResponse::RememberAndCall {
-                            content: remember_content,
-                            tool,
-                        });
-                    }
-                    return Ok(ParsedResponse::Remember {
-                        content: remember_content,
-                        next_action: None,
-                    });
-                }
+                    }),
+                    final_answer: first.final_answer.clone(),
+                    confirm: first.confirm,
+                };
 
-                // Collect all tool calls for batch processing
-                let tool_calls: Vec<ToolCall> = actions
-                    .iter()
-                    .filter_map(|action| {
-                        action.action.as_ref().map(|tool_name| {
-                            ToolCall {
-                                name: tool_name.clone(),
-                                arguments: action.input.clone().unwrap_or(serde_json::Value::Null),
-                                working_dir: None,
-                                timeout_secs: None,
-                            }
-                        })
-                    })
-                    .collect();
-
-                if tool_calls.is_empty() {
-                    // Thought only - treat as final answer
-                    if let Some(thought) = actions.first().map(|a| a.thought.clone()) {
-                        if !thought.is_empty() {
-                            return Ok(ParsedResponse::FinalAnswer(thought));
-                        }
-                    }
-                    return Ok(ParsedResponse::Malformed {
-                        error: "No actionable content found".to_string(),
-                        raw: content.to_string(),
-                    });
-                }
-
-                // Check for confirm flag on first action
-                if let Some(first_action) = actions.first() {
-                    if first_action.confirm && !tool_calls.is_empty() {
-                        return Ok(ParsedResponse::ConfirmRequest {
-                            thought: first_action.thought.clone(),
-                            tool: tool_calls[0].clone(),
-                        });
-                    }
-                }
-
-                Ok(ParsedResponse::ToolCalls(tool_calls))
+                // Return flat extraction - planner does the Y-switch routing
+                Ok(ParsedResponse::ShortKey(extracted))
             }
             Err(e) => Err(e),
         }
@@ -481,8 +446,12 @@ mod tests {
         let response = parser.parse_to_response(content).unwrap();
         
         match response {
-            ParsedResponse::FinalAnswer(msg) => assert_eq!(msg, "Hello!"),
-            _ => panic!("Expected FinalAnswer, got {:?}", response),
+            ParsedResponse::ShortKey(extracted) => {
+                assert_eq!(extracted.final_answer, Some("Hello!".to_string()));
+                assert!(extracted.remember.is_none());
+                assert!(extracted.tool_call.is_none());
+            }
+            _ => panic!("Expected ShortKey, got {:?}", response),
         }
     }
 
@@ -493,11 +462,12 @@ mod tests {
         let response = parser.parse_to_response(content).unwrap();
         
         match response {
-            ParsedResponse::ToolCalls(calls) => {
-                assert_eq!(calls.len(), 1);
-                assert_eq!(calls[0].name, "shell");
+            ParsedResponse::ShortKey(extracted) => {
+                assert!(extracted.tool_call.is_some());
+                assert_eq!(extracted.tool_call.unwrap().name, "shell");
+                assert_eq!(extracted.thought, "List files");
             }
-            _ => panic!("Expected ToolCalls, got {:?}", response),
+            _ => panic!("Expected ShortKey, got {:?}", response),
         }
     }
 
@@ -508,11 +478,13 @@ mod tests {
         let response = parser.parse_to_response(content).unwrap();
         
         match response {
-            ParsedResponse::ConfirmRequest { thought, tool } => {
-                assert_eq!(thought, "Delete file?");
-                assert_eq!(tool.name, "shell");
+            ParsedResponse::ShortKey(extracted) => {
+                assert_eq!(extracted.thought, "Delete file?");
+                assert!(extracted.confirm);
+                assert!(extracted.tool_call.is_some());
+                assert_eq!(extracted.tool_call.unwrap().name, "shell");
             }
-            _ => panic!("Expected ConfirmRequest, got {:?}", response),
+            _ => panic!("Expected ShortKey, got {:?}", response),
         }
     }
 
@@ -538,8 +510,8 @@ More text"#;
         
         let response = parser.parse_to_response(content).unwrap();
         match response {
-            ParsedResponse::FinalAnswer(msg) => assert_eq!(msg, "Hello from fence"),
-            _ => panic!("Expected FinalAnswer from fenced block"),
+            ParsedResponse::ShortKey(extracted) => assert_eq!(extracted.final_answer, Some("Hello from fence".to_string())),
+            _ => panic!("Expected ShortKey from fenced block"),
         }
     }
 
@@ -588,17 +560,18 @@ More text"#;
     #[test]
     fn test_parse_remember_field() {
         let parser = ShortKeyParser::new();
-        // When remember is combined with final_answer, final_answer takes precedence
-        // The memory save happens as a side effect
+        // Y-SWITCH: Parser extracts ALL fields, planner decides what to do
         let content = r#"{"t": "User likes Python", "r": "User prefers Python", "f": "I'll use Python."}"#;
         let response = parser.parse_to_response(content).unwrap();
         
-        // Final answer takes precedence over remember
         match response {
-            ParsedResponse::FinalAnswer(answer) => {
-                assert_eq!(answer, "I'll use Python.");
+            ParsedResponse::ShortKey(extracted) => {
+                // Both "r" and "f" are extracted - no data loss!
+                assert_eq!(extracted.remember, Some("User prefers Python".to_string()));
+                assert_eq!(extracted.final_answer, Some("I'll use Python.".to_string()));
+                assert_eq!(extracted.thought, "User likes Python");
             }
-            _ => panic!("Expected FinalAnswer, got {:?}", response),
+            _ => panic!("Expected ShortKey, got {:?}", response),
         }
     }
     
@@ -610,11 +583,12 @@ More text"#;
         let response = parser.parse_to_response(content).unwrap();
         
         match response {
-            ParsedResponse::Remember { content, next_action } => {
-                assert_eq!(content, "User prefers Python");
-                assert!(next_action.is_none());
+            ParsedResponse::ShortKey(extracted) => {
+                assert_eq!(extracted.remember, Some("User prefers Python".to_string()));
+                assert!(extracted.final_answer.is_none());
+                assert!(extracted.tool_call.is_none());
             }
-            _ => panic!("Expected Remember, got {:?}", response),
+            _ => panic!("Expected ShortKey, got {:?}", response),
         }
     }
 
@@ -629,11 +603,33 @@ More text"#;
         let response = parser.parse_to_response(content).unwrap();
         
         match response {
-            ParsedResponse::RememberAndCall { content, tool } => {
-                assert_eq!(content, "User likes dark mode");
-                assert_eq!(tool.name, "shell");
+            ParsedResponse::ShortKey(extracted) => {
+                // Y-SWITCH: All fields extracted - planner creates multiple intents!
+                assert_eq!(extracted.remember, Some("User likes dark mode".to_string()));
+                assert!(extracted.tool_call.is_some());
+                assert_eq!(extracted.tool_call.unwrap().name, "shell");
             }
-            _ => panic!("Expected RememberAndCall, got {:?}", response),
+            _ => panic!("Expected ShortKey, got {:?}", response),
+        }
+    }
+    
+    #[test]
+    fn test_parse_y_switch_all_fields() {
+        let parser = ShortKeyParser::new();
+        // Test with ALL fields present - Y-switch extracts everything
+        let content = r#"{"t": "Full response", "r": "Important fact", "a": "write_file", "i": {"path": "/tmp/test", "content": "hello"}, "f": "Done!", "c": true}"#;
+        let response = parser.parse_to_response(content).unwrap();
+        
+        match response {
+            ParsedResponse::ShortKey(extracted) => {
+                assert_eq!(extracted.thought, "Full response");
+                assert_eq!(extracted.remember, Some("Important fact".to_string()));
+                assert!(extracted.tool_call.is_some());
+                assert_eq!(extracted.tool_call.unwrap().name, "write_file");
+                assert_eq!(extracted.final_answer, Some("Done!".to_string()));
+                assert!(extracted.confirm);
+            }
+            _ => panic!("Expected ShortKey, got {:?}", response),
         }
     }
 

@@ -1,5 +1,3 @@
-use crate::config::ContextProfile;
-
 /// A self-contained unit of context (e.g., Terminal History, Git Status, Memory)
 #[derive(Debug, Clone)]
 pub struct ContextPack {
@@ -25,27 +23,36 @@ impl ContextPack {
     }
 }
 
-/// Builder for creating context packs based on profile and budget
+/// Builder for creating context packs based on available token budget
+/// 
+/// INTELLIGENT ALLOCATION: Terminal context dynamically fills available space
+/// If context window has 100k tokens and 10k are used, we can use up to 90k for terminal.
 pub struct ContextBuilder {
-    profile: ContextProfile,
-    // Future: total_budget: usize,
+    /// Available token budget for terminal context (0 = disabled)
+    available_tokens: usize,
 }
 
 impl ContextBuilder {
-    pub fn new(profile: ContextProfile) -> Self {
-        Self { profile }
+    /// Create builder with available token budget
+    /// 
+    /// Example: If max_context is 100k and current_usage is 10k, 
+    /// pass available_tokens = 90k
+    pub fn with_budget(available_tokens: usize) -> Self {
+        Self { available_tokens }
     }
 
     /// Build a terminal context pack from the raw screen buffer string
     /// 
-    /// The content is sanitized to remove ANSI escape sequences and patterns
-    /// that might trigger WAF/content filtering (e.g., shell commands in prompts).
+    /// Uses UP TO available token budget. If terminal is smaller, uses less.
+    /// The content is sanitized to remove ANSI escape sequences.
     pub fn build_terminal_pack(&self, terminal_content: &str) -> Option<ContextPack> {
-        let (max_chars, label) = match self.profile {
-            ContextProfile::Minimal => return None,
-            ContextProfile::Balanced => (3000, "Terminal Snapshot (Recent)"),
-            ContextProfile::Verbose => (12000, "Terminal Snapshot (Extended)"),
-        };
+        if self.available_tokens == 0 {
+            return None;
+        }
+        
+        // Convert token budget to char limit (approx 4 chars per token)
+        let max_chars = self.available_tokens * 4;
+        let label = "Terminal Snapshot";
 
         // Sanitize terminal content to avoid WAF triggering
         let sanitized = self.sanitize_terminal_content(terminal_content);
@@ -68,9 +75,12 @@ impl ContextBuilder {
         let cmd_subst_regex = regex::Regex::new(r"\$\([^)]+\)|`[^`]+`|\$\{[^}]+\}").unwrap();
         let without_cmd_subst = cmd_subst_regex.replace_all(&without_ansi, " ... ");
 
-        // Step 3: Remove shell prompt patterns
-        let shell_prompt_regex = regex::Regex::new(r"[a-zA-Z0-9_-]+@[a-zA-Z0-9_-]+:[^$]+\$\s*>?\s*|[a-zA-Z0-9_-]+@[a-zA-Z0-9_-]+\$\s*").unwrap();
-        let without_shell_prompts = shell_prompt_regex.replace_all(&without_cmd_subst, " ");
+        // Step 3: Simplify shell prompt patterns - keep the directory path!
+        // Before: edward@Debian:~$ cd hebbian
+        // After:  [~/hebbian] cd hebbian
+        // This preserves directory context for the LLM
+        let shell_prompt_regex = regex::Regex::new(r"[a-zA-Z0-9_-]+@[a-zA-Z0-9_-]+:([^$]+)\$\s*").unwrap();
+        let without_shell_prompts = shell_prompt_regex.replace_all(&without_cmd_subst, "[$1] ");
 
         // Step 4: Remove the word "command" in JSON keys
         let command_key_regex = regex::Regex::new(r#"\"?command\"?"#).unwrap();

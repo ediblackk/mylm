@@ -533,9 +533,9 @@ impl AppStateContainer {
         }
     }
     
-    /// Handle /pruned command - show pruned message history
+    /// Handle /pruned command - show compressed message history
     fn handle_pruned_command(&mut self) {
-        let output = self.context_manager.pruned_history().format_list();
+        let output = self.context_manager.compression_archive().format_list();
         self.chat_history.push(TimestampedChatMessage::assistant(output));
     }
     
@@ -558,7 +558,7 @@ impl AppStateContainer {
             }
         };
         
-        let segments: Vec<_> = self.context_manager.pruned_history().segments().iter().collect();
+        let segments: Vec<_> = self.context_manager.compression_archive().segments().iter().collect();
         
         if segment_num >= segments.len() {
             self.chat_history.push(TimestampedChatMessage::assistant(format!(
@@ -574,17 +574,11 @@ impl AppStateContainer {
         let message_count = segment.message_count;
         
         // Attempt to restore
-        match self.context_manager.pruned_history_mut().restore(&segment_id) {
+        match self.context_manager.compression_archive_mut().restore(&segment_id) {
             Some(messages) => {
                 // Add restored messages back to context
                 for msg in messages {
-                    let role = match msg.role {
-                        mylm_core::agent::cognition::history::MessageRole::User => "user",
-                        mylm_core::agent::cognition::history::MessageRole::Assistant => "assistant",
-                        mylm_core::agent::cognition::history::MessageRole::System => "system",
-                        mylm_core::agent::cognition::history::MessageRole::Tool => "tool",
-                    };
-                    self.context_manager.add_message(role, &msg.content);
+                    self.context_manager.add_message(&msg.role, &msg.content);
                 }
                 
                 self.chat_history.push(TimestampedChatMessage::assistant(format!(

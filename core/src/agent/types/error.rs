@@ -1,4 +1,11 @@
 //! Error types for the agent system
+//!
+//! Central error types used across all agent layers.
+//! These unify error handling between cognition, runtime, and orchestration.
+//!
+//! Links:
+//! - Used by: cognition (CognitiveError wraps these), runtime (RuntimeError), orchestrator
+//! - Defines: `AgentError` enum, `AgentResult` type alias
 
 use super::ids::IntentId;
 

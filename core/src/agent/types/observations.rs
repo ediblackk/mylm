@@ -13,6 +13,7 @@ pub enum Observation {
     /// A tool was executed
     ToolCompleted {
         intent_id: IntentId,
+        tool: String,
         result: ToolResult,
         execution_time_ms: u64,
     },
@@ -105,10 +106,10 @@ impl Observation {
     pub fn into_event(self) -> super::events::KernelEvent {
         use super::events::KernelEvent;
         match self {
-            Observation::ToolCompleted { intent_id, result, .. } => {
+            Observation::ToolCompleted { intent_id, tool, result, .. } => {
                 KernelEvent::ToolCompleted {
                     intent_id,
-                    tool: "unknown".to_string(), // Tool name not stored in observation
+                    tool,
                     result,
                 }
             }

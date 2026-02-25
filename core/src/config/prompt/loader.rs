@@ -221,7 +221,7 @@ impl Default for PromptLoader {
 /// Versatile AI assistant that adapts to any user task
 fn system_prompt_config() -> PromptConfig {
     PromptConfig {
-        version: "2.4".to_string(),
+        version: "2.5".to_string(),
         identity: IdentitySection {
             name: "MYLM".to_string(),
             description: "Versatile AI assistant with tool capabilities and parallel execution".to_string(),
@@ -308,6 +308,54 @@ fn system_prompt_config() -> PromptConfig {
                     4. **Adapt** - Adjust based on user feedback\n\
                     5. **Implement** - Execute the approved approach\n\n\
                     Use the `delegate` tool to spawn parallel workers for complex multi-step tasks. Workers can operate simultaneously on different aspects of a problem.
+
+
+
+### File Reading Tools
+
+**read_file** - Read file contents with smart strategies:
+
+```json
+// Simple read
+{\"t\":\"Reading file\",\"a\":\"read_file\",\"i\":{\"path\":\"src/main.rs\"}}
+
+// Partial read (line numbers are 1-based)
+{\"t\":\"Reading specific lines\",\"a\":\"read_file\",\"i\":{\"path\":\"src/main.rs\",\"line_offset\":100,\"n_lines\":50}}
+
+// Large file - uses parallel chunk workers
+{\"t\":\"Reading large file\",\"a\":\"read_file\",\"i\":{\"path\":\"big.log\",\"strategy\":\"chunked\"}}
+
+// Search-first - uses Tantivy index if available
+{\"t\":\"Searching then reading\",\"a\":\"read_file\",\"i\":{\"path\":\"big.log\",\"strategy\":\"search\",\"query\":\"ERROR\",\"line_offset\":1,\"n_lines\":100}}
+```
+
+Strategies:
+- `auto` (default): Picks best method based on file size (<10KB direct, <100KB direct with warning, >1MB chunked)
+- `direct`: Read entire file directly (limited to 100KB max)
+- `chunked`: Spawn parallel workers for large files (each chunk processed in parallel, 3 retries per chunk)
+- `search`: Use Tantivy full-text search first, then read matching regions
+
+PDF Support:
+- PDFs are automatically detected and text is extracted
+- Works with all strategies (partial reads by page, chunked for large PDFs)
+
+**search_files** - Full-text search across indexed files:
+
+```json
+// Basic search
+{\"t\":\"Searching code\",\"a\":\"search_files\",\"i\":{\"query\":\"function main\"}}
+
+// With path filter
+{\"t\":\"Searching in src\",\"a\":\"search_files\",\"i\":{\"query\":\"TODO\",\"path_filter\":\"src/\"}}
+
+// Multiple terms (implicit AND)
+{\"t\":\"Finding auth code\",\"a\":\"search_files\",\"i\":{\"query\":\"auth token validation\"}}
+```
+
+Best Practices:
+- Use `search_files` first to locate relevant files, then `read_file` with partial reads
+- For files >100KB, prefer `chunked` or `search` strategy to avoid hitting limits
+- When investigating issues, use `search_files` with error keywords before reading
 
 
 

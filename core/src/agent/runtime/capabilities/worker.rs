@@ -74,8 +74,8 @@ impl LocalWorkerCapability {
         let results_clone = results.clone();
         
         let handle = tokio::spawn(async move {
-            // Worker execution logic
-            let result = execute_worker_objective(&spec.objective).await;
+            // Worker execution logic - pass context from spec
+            let result = execute_worker_objective(&spec.objective, &spec.context).await;
             
             // Store result
             let status = match result {
@@ -125,10 +125,17 @@ impl WorkerCapability for LocalWorkerCapability {
     }
 }
 
-/// Execute a worker's objective
-async fn execute_worker_objective(objective: &str) -> Result<String, String> {
+/// Execute a worker's objective with context
+/// 
+/// The context parameter contains key facts from parent that worker needs
+async fn execute_worker_objective(objective: &str, context: &str) -> Result<String, String> {
     // For now, workers are simple task executors
     // In production, this would create a nested Session with its own engine
+    
+    // Log that we received context (for debugging)
+    if !context.is_empty() {
+        crate::debug_log!("[WORKER] Executing with context: {}", context);
+    }
     
     // Simulate work
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -140,6 +147,7 @@ async fn execute_worker_objective(objective: &str) -> Result<String, String> {
 pub struct WorkerSession {
     worker_id: WorkerId,
     objective: String,
+    context: String,
     result_tx: mpsc::Sender<WorkerResult>,
 }
 
@@ -148,17 +156,23 @@ pub struct WorkerResult {
     pub worker_id: WorkerId,
     pub output: String,
     pub success: bool,
+    /// What the worker learned (key facts, discoveries)
+    pub context_diff: Vec<String>,
+    /// Reasoning trace - how worker arrived at conclusion
+    pub reasoning_trace: Vec<String>,
 }
 
 impl WorkerSession {
     pub fn new(
         worker_id: WorkerId,
         objective: String,
+        context: String,
         result_tx: mpsc::Sender<WorkerResult>,
     ) -> Self {
         Self {
             worker_id,
             objective,
+            context,
             result_tx,
         }
     }
@@ -170,19 +184,23 @@ impl WorkerSession {
         // - Its own RuntimeContext
         // - Access to same capabilities (or subset)
         
-        // For now, simple execution
-        let result = execute_worker_objective(&self.objective).await;
+        // For now, simple execution with context
+        let result = execute_worker_objective(&self.objective, &self.context).await;
         
         let worker_result = match result {
             Ok(output) => WorkerResult {
                 worker_id: self.worker_id,
                 output,
                 success: true,
+                context_diff: vec![], // Stub - would extract from session
+                reasoning_trace: vec![],
             },
             Err(e) => WorkerResult {
                 worker_id: self.worker_id,
                 output: e,
                 success: false,
+                context_diff: vec![],
+                reasoning_trace: vec![],
             },
         };
         

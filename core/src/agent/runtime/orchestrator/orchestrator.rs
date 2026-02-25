@@ -70,6 +70,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::Duration;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use crate::agent::cognition::kernel::{GraphEngine};
 use crate::agent::runtime::core::{AgencyRuntimeError, AgencyRuntime};
@@ -207,6 +208,12 @@ pub enum OutputEvent {
         usage: Option<crate::agent::types::events::TokenUsage>,
     },
     
+    /// Worker is thinking/processing (isolated from main agent thinking state)
+    WorkerThinking {
+        worker_id: crate::agent::types::events::WorkerId,
+        job_id: crate::agent::runtime::orchestrator::commonbox::JobId,
+    },
+    
     /// Error occurred
     Error { message: String },
     
@@ -317,6 +324,11 @@ where
     #[allow(dead_code)]
     memory_manager: Option<std::sync::Arc<crate::agent::memory::AgentMemoryManager>>,
     
+    // Chunk pool for managing persistent file chunk workers
+    // The session owns this, tools hold references to it
+    #[allow(dead_code)]
+    chunk_pool: Option<std::sync::Arc<crate::agent::tools::ChunkPool>>,
+    
     // INVARIANT: Transport identity check - ensures transport is never swapped
     #[allow(dead_code)]
     transport_instance_id: u64,
@@ -350,6 +362,21 @@ where
         output_tx: broadcast::Sender<OutputEvent>,
         memory_manager: Option<std::sync::Arc<crate::agent::memory::AgentMemoryManager>>,
     ) -> Self {
+        Self::new_full(kernel, runtime, transport, output_tx, memory_manager, None)
+    }
+    
+    /// Create a new session with both memory manager and chunk pool
+    /// 
+    /// This is the full constructor that allows passing all optional components.
+    /// The session owns these components and keeps them alive for its lifetime.
+    pub fn new_full(
+        kernel: K, 
+        runtime: R, 
+        transport: T, 
+        output_tx: broadcast::Sender<OutputEvent>,
+        memory_manager: Option<std::sync::Arc<crate::agent::memory::AgentMemoryManager>>,
+        chunk_pool: Option<std::sync::Arc<crate::agent::tools::ChunkPool>>,
+    ) -> Self {
         let (input_tx, input_rx) = mpsc::channel(100);
         let transport_instance_id = transport.instance_id();
         crate::info_log!("[SESSION] Creating session with transport instance_id: {}", transport_instance_id);
@@ -370,6 +397,7 @@ where
             consecutive_errors: 0,
             max_consecutive_errors: 3,
             memory_manager,
+            chunk_pool,
             transport_instance_id,
         }
     }
@@ -386,6 +414,11 @@ where
     /// Used to verify transport identity across session moves
     pub fn transport_instance_id(&self) -> u64 {
         self.transport.instance_id()
+    }
+    
+    /// Get a reference to the chunk pool (if configured)
+    pub fn chunk_pool(&self) -> Option<&Arc<crate::agent::tools::ChunkPool>> {
+        self.chunk_pool.as_ref()
     }
 
     /// Generate next event ID

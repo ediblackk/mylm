@@ -42,15 +42,23 @@ pub use extraction::{MemoryExtractor, ExtractedMemory, extract_memories};
 /// 
 /// Implementors provide relevant memories based on the current conversation context.
 /// This is called proactively BEFORE the LLM generates a response.
+/// 
+/// # Note
+/// This trait is async - implementors should use normal async/await patterns.
+/// The previous sync version used `block_in_place` which could deadlock.
+/// 
+/// # Migration Note
+/// Uses canonical `conversation::manager::Message` instead of deprecated intents::Message.
+#[async_trait::async_trait]
 pub trait MemoryProvider: Send + Sync {
     /// Get relevant memory context for the given user message
     /// 
     /// Returns a formatted string to be injected into the system prompt.
-    fn get_context(&self, user_message: &str) -> String;
+    async fn get_context(&self, user_message: &str) -> String;
     
     /// Save a memory fire-and-forget style
     /// 
-    /// This should not block - the save happens asynchronously.
+    /// This spawns a task to save asynchronously - does not block.
     fn remember(&self, content: &str);
     
     /// Build memory context from full conversation state
@@ -65,5 +73,5 @@ pub trait MemoryProvider: Send + Sync {
     /// 
     /// # Returns
     /// Formatted memory context string, or empty string if no relevant memories
-    fn build_context(&self, history: &[crate::agent::types::intents::Message], scratchpad: &str, system_prompt: &str) -> String;
+    async fn build_context(&self, history: &[crate::conversation::manager::Message], scratchpad: &str, system_prompt: &str) -> String;
 }

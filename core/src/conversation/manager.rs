@@ -1,6 +1,6 @@
 //! Context Manager Module
 //!
-//! Encapsulates all context logic including token counting, pruning, condensation,
+//! Encapsulates all context logic including token counting, compression, condensation,
 //! and UI formatting for conversation history management.
 
 use crate::provider::chat::{ChatMessage, MessageRole};
@@ -26,6 +26,127 @@ pub struct ContextConfig {
     /// Maximum total byte size for the context (API safety limit)
     /// Default is 3MB to stay safely under typical 4MB API limits
     pub max_bytes: usize,
+}
+
+/// Context transformation metrics for debugging and monitoring
+/// 
+/// Tracks how context changes during preparation (compression, condensation)
+#[derive(Debug, Clone)]
+pub struct ContextMetrics {
+    /// Original number of messages before processing
+    pub original_messages: usize,
+    /// Final number of messages after processing
+    pub pruned_messages: usize,
+    /// Original token count
+    pub original_tokens: usize,
+    /// Final token count
+    pub pruned_tokens: usize,
+    /// Original byte size
+    pub original_bytes: usize,
+    /// Final byte size
+    pub pruned_bytes: usize,
+    /// Whether compression occurred
+    pub was_compressed: bool,
+    /// Whether condensation occurred
+    pub was_condensed: bool,
+    /// Timestamp of the operation
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+impl ContextMetrics {
+    /// Create new metrics from before/after state
+    pub fn new(
+        original_messages: usize,
+        pruned_messages: usize,
+        original_tokens: usize,
+        pruned_tokens: usize,
+        original_bytes: usize,
+        pruned_bytes: usize,
+        was_condensed: bool,
+    ) -> Self {
+        Self {
+            original_messages,
+            pruned_messages,
+            original_tokens,
+            pruned_tokens,
+            original_bytes,
+            pruned_bytes,
+            was_compressed: original_messages > pruned_messages,
+            was_condensed,
+            timestamp: chrono::Utc::now(),
+        }
+    }
+    
+    /// Messages removed
+    pub fn messages_removed(&self) -> usize {
+        self.original_messages.saturating_sub(self.pruned_messages)
+    }
+    
+    /// Tokens saved
+    pub fn tokens_saved(&self) -> usize {
+        self.original_tokens.saturating_sub(self.pruned_tokens)
+    }
+    
+    /// Bytes saved
+    pub fn bytes_saved(&self) -> usize {
+        self.original_bytes.saturating_sub(self.pruned_bytes)
+    }
+    
+    /// Format for logging
+    pub fn format_log(&self) -> String {
+        format!(
+            "ContextMetrics: {}→{} msgs ({} removed), {}→{} tokens ({} saved), {}→{} bytes ({} saved), condensed={}",
+            self.original_messages,
+            self.pruned_messages,
+            self.messages_removed(),
+            self.original_tokens,
+            self.pruned_tokens,
+            self.tokens_saved(),
+            self.original_bytes,
+            self.pruned_bytes,
+            self.bytes_saved(),
+            self.was_condensed
+        )
+    }
+}
+
+/// History inspection snapshot for debugging
+#[derive(Debug, Clone)]
+pub struct HistorySnapshot {
+    /// Total messages in history
+    pub message_count: usize,
+    /// Total tokens
+    pub total_tokens: usize,
+    /// Total bytes
+    pub total_bytes: usize,
+    /// Breakdown by role
+    pub by_role: std::collections::HashMap<String, usize>,
+    /// Recent message previews (last 5)
+    pub recent_previews: Vec<(String, String)>, // (role, preview)
+}
+
+impl HistorySnapshot {
+    /// Format for display/logging
+    pub fn format(&self) -> String {
+        let mut output = format!(
+            "HistorySnapshot: {} messages, {} tokens, {} bytes\n",
+            self.message_count, self.total_tokens, self.total_bytes
+        );
+        
+        output.push_str("By role:\n");
+        for (role, count) in &self.by_role {
+            output.push_str(&format!("  {}: {}\n", role, count));
+        }
+        
+        if !self.recent_previews.is_empty() {
+            output.push_str("Recent messages:\n");
+            for (i, (role, preview)) in self.recent_previews.iter().enumerate() {
+                output.push_str(&format!("  [{}] {}: {}...\n", i, role, preview));
+            }
+        }
+        
+        output
+    }
 }
 
 impl ContextConfig {
@@ -93,7 +214,7 @@ impl Default for ContextConfig {
 }
 
 /// A message in the conversation history with token tracking
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     /// Role of the message sender ("system", "user", "assistant", "tool")
     pub role: String,
@@ -143,6 +264,13 @@ impl Message {
             }
             _ => ChatMessage::user(&self.content),
         }
+    }
+}
+
+/// Convert from ChatMessage to canonical Message
+impl From<ChatMessage> for Message {
+    fn from(msg: ChatMessage) -> Self {
+        Self::from_chat_message(&msg)
     }
 }
 
@@ -229,7 +357,7 @@ impl TokenBreakdown {
     }
 }
 
-/// Manages conversation context including pruning and condensation
+/// Manages conversation context including compression and condensation
 /// 
 /// Context structure for each request:
 /// - System prompt (always included, not shown in conversation)
@@ -253,8 +381,10 @@ pub struct ContextManager {
     pub action_stamps: ActionStampRegistry,
     /// Current conversation topic/focus (to prevent context jumping)
     pub conversation_topic: Option<String>,
-    /// Archive of pruned segments for recovery
-    pruned_history: crate::conversation::pruning::PrunedHistory,
+    /// Archive of compressed segments for recovery
+    compression_archive: crate::conversation::context_compression::CompressionArchive,
+    /// Metrics from last prepare_context call (for debugging)
+    last_metrics: Option<ContextMetrics>,
 }
 
 impl ContextManager {
@@ -267,9 +397,10 @@ impl ContextManager {
             history: Vec::new(),
             ephemeral_context: Vec::new(),
             pending_user_message: None,
+            last_metrics: None,
             action_stamps: ActionStampRegistry::new(50),
             conversation_topic: None,
-            pruned_history: crate::conversation::pruning::PrunedHistory::new(10),
+            compression_archive: crate::conversation::context_compression::CompressionArchive::new(10),
         }
     }
 
@@ -411,72 +542,55 @@ impl ContextManager {
         Self::new(config)
     }
     
-    /// Get the pruned history archive
-    pub fn pruned_history(&self) -> &crate::conversation::pruning::PrunedHistory {
-        &self.pruned_history
+    /// Get the compression archive
+    pub fn compression_archive(&self) -> &crate::conversation::context_compression::CompressionArchive {
+        &self.compression_archive
     }
     
-    /// Get mutable pruned history
-    pub fn pruned_history_mut(&mut self) -> &mut crate::conversation::pruning::PrunedHistory {
-        &mut self.pruned_history
+    /// Get mutable compression archive
+    pub fn compression_archive_mut(&mut self) -> &mut crate::conversation::context_compression::CompressionArchive {
+        &mut self.compression_archive
     }
     
-    /// Perform smart pruning and return a segment for UI indicator
+    /// Perform context compression and return a segment for UI indicator
     /// 
     /// This method:
     /// 1. Identifies important messages (with remember markers, etc.)
-    /// 2. Extracts memories before pruning
-    /// 3. Archives pruned content
+    /// 2. Extracts memories before compression
+    /// 3. Archives compressed content
     /// 4. Returns a segment for UI display
-    pub fn smart_prune_with_indicator(&mut self) -> Option<crate::conversation::pruning::PrunedSegment> {
-        use crate::conversation::pruning::{smart_prune, SmartPruningConfig};
+    pub fn compress_with_indicator(&mut self) -> Option<crate::conversation::context_compression::CompressedSegment> {
+        use crate::conversation::context_compression::{compress_context, CompressionConfig};
         
-        let config = SmartPruningConfig::default();
+        let config = CompressionConfig::default();
         let limit = self.config.effective_limit();
         
-        // Convert to cognition messages for pruning
-        let messages: Vec<crate::agent::cognition::history::Message> = self.history
-            .iter()
-            .map(|m| crate::agent::cognition::history::Message {
-                role: match m.role.as_str() {
-                    "system" => crate::agent::cognition::history::MessageRole::System,
-                    "user" => crate::agent::cognition::history::MessageRole::User,
-                    "assistant" => crate::agent::cognition::history::MessageRole::Assistant,
-                    "tool" => crate::agent::cognition::history::MessageRole::Tool,
-                    _ => crate::agent::cognition::history::MessageRole::User,
-                },
-                content: m.content.clone(),
-            })
-            .collect();
+        let result = compress_context(self.history.clone(), limit, &config);
         
-        let result = smart_prune(messages, limit, &config);
-        
-        if !result.was_pruned {
+        if !result.was_compressed {
             return None;
         }
         
-        // Convert back to context messages
-        self.history = result.kept.iter().map(|m| {
-            let role = match m.role {
-                crate::agent::cognition::history::MessageRole::System => "system",
-                crate::agent::cognition::history::MessageRole::User => "user",
-                crate::agent::cognition::history::MessageRole::Assistant => "assistant",
-                crate::agent::cognition::history::MessageRole::Tool => "tool",
-            };
-            Message::new(role, &m.content)
-        }).collect();
+        // Log metrics before moving
+        let kept_len = result.kept.len();
+        let trimmed_len = result.trimmed.len();
+        let tokens_saved = result.segment.tokens_saved;
+        let segment = result.segment.clone();
+        
+        // Update history with kept messages
+        self.history = result.kept;
         
         // Archive the segment
-        self.pruned_history.push(result.segment.clone());
+        self.compression_archive.push(result.segment);
         
         crate::info_log!(
-            "[CONTEXT] Smart pruning: kept {} messages, pruned {} messages, saved ~{} tokens",
-            result.kept.len(),
-            result.pruned.len(),
-            result.segment.tokens_saved
+            "[CONTEXT] Context compression: kept {} messages, trimmed {} messages, saved ~{} tokens",
+            kept_len,
+            trimmed_len,
+            tokens_saved
         );
         
-        Some(result.segment)
+        Some(segment)
     }
 
     // ===== Context Building Methods =====
@@ -503,9 +617,31 @@ impl ContextManager {
     }
 
     /// Add a message to the persistent history
+    /// Automatically prunes history if token limit is exceeded
     pub fn add_message(&mut self, role: &str, content: &str) {
         let message = Message::new(role, content);
         self.history.push(message);
+        
+        // Auto-prune if over token limit
+        let total_tokens: usize = self.history.iter().map(|m| m.token_count).sum();
+        if total_tokens > self.config.effective_limit() {
+            crate::info_log!(
+                "[CONTEXT] Auto-pruning after add: {} tokens > {} limit",
+                total_tokens,
+                self.config.effective_limit()
+            );
+            self.prune_history();
+        }
+        
+        // Auto-prune if over byte limit
+        if self.exceeds_byte_limit() {
+            crate::info_log!(
+                "[CONTEXT] Auto-pruning after add: {} bytes > {} limit",
+                self.total_byte_size(),
+                self.config.max_bytes
+            );
+            self.prune_to_byte_limit();
+        }
     }
 
     /// Add a ChatMessage to the persistent history
@@ -523,6 +659,7 @@ impl ContextManager {
     /// - Adds assistant response to history
     /// - Clears ephemeral context (one-turn only)
     /// - Clears pending user message
+    /// - Auto-prunes if over limits
     pub fn on_llm_complete(&mut self, assistant_content: &str) {
         // Add assistant response to persistent history
         self.history.push(Message::new("assistant", assistant_content));
@@ -532,6 +669,27 @@ impl ContextManager {
         
         // Clear pending user message (now in history)
         self.pending_user_message = None;
+        
+        // Auto-prune if over token limit
+        let total_tokens: usize = self.history.iter().map(|m| m.token_count).sum();
+        if total_tokens > self.config.effective_limit() {
+            crate::info_log!(
+                "[CONTEXT] Auto-pruning after LLM response: {} tokens > {} limit",
+                total_tokens,
+                self.config.effective_limit()
+            );
+            self.prune_history();
+        }
+        
+        // Auto-prune if over byte limit
+        if self.exceeds_byte_limit() {
+            crate::info_log!(
+                "[CONTEXT] Auto-pruning after LLM response: {} bytes > {} limit",
+                self.total_byte_size(),
+                self.config.max_bytes
+            );
+            self.prune_to_byte_limit();
+        }
     }
 
     // ===== Token Counting Methods =====
@@ -622,8 +780,11 @@ impl ContextManager {
         &mut self,
         llm_client: Option<&Arc<LlmClient>>,
     ) -> Result<Vec<ChatMessage>, ContextError> {
+        // Capture before state for metrics
+        let messages_before = self.history.len();
         let byte_size_before = self.total_byte_size();
         let token_count_before = self.total_tokens();
+        let mut was_condensed = false;
         
         // CRITICAL: Check byte size limit first - this is a hard API limit
         if self.exceeds_byte_limit() {
@@ -644,10 +805,11 @@ impl ContextManager {
                 match self.condense_history(client).await {
                     Ok(condensed) => {
                         self.history = condensed.iter().map(Message::from_chat_message).collect();
+                        was_condensed = true;
                     }
                 Err(e) => {
-                    // Log and continue with pruning only
-                    crate::info_log!("Context condensation failed: {}. Continuing with pruning only.", e);
+                    // Log and continue with compression only
+                    crate::info_log!("Context condensation failed: {}. Continuing with compression only.", e);
                 }
                 }
             }
@@ -656,17 +818,27 @@ impl ContextManager {
         // Final prune to ensure we're within limits
         let pruned = self.prune_history();
         
-        // Log if we made significant changes
+        // Capture after state for metrics
+        let messages_after = self.history.len();
         let byte_size_after = self.total_byte_size();
         let token_count_after = self.total_tokens();
+        
+        // Store metrics
+        self.last_metrics = Some(ContextMetrics::new(
+            messages_before,
+            messages_after,
+            token_count_before,
+            token_count_after,
+            byte_size_before,
+            byte_size_after,
+            was_condensed,
+        ));
+        
+        // Log if we made significant changes
         if byte_size_before != byte_size_after || token_count_before != token_count_after {
-            crate::info_log!(
-                "Context pruned: {} -> {} tokens, {:.1}MB -> {:.1}MB",
-                token_count_before,
-                token_count_after,
-                byte_size_before as f64 / (1024.0 * 1024.0),
-                byte_size_after as f64 / (1024.0 * 1024.0)
-            );
+            if let Some(ref metrics) = self.last_metrics {
+                crate::info_log!("{}", metrics.format_log());
+            }
         }
         
         Ok(pruned.iter().map(|m| m.to_chat_message()).collect())
@@ -733,7 +905,7 @@ impl ContextManager {
     }
 
     /// Prune history to fit within byte size limit
-    /// This is a more aggressive pruning that prioritizes recent messages
+    /// This is a more aggressive compression that prioritizes recent messages
     /// and is used when we hit the hard API byte size limit
     pub fn prune_to_byte_limit(&mut self) -> Vec<Message> {
         if self.history.is_empty() {
@@ -978,70 +1150,102 @@ impl ContextManager {
     pub fn set_config(&mut self, config: ContextConfig) {
         self.config = config;
     }
+    
+    // ===== Debugging and Inspection Methods =====
+    
+    /// Generate metrics for the last context preparation
+    /// 
+    /// Call this after prepare_context() to get detailed metrics
+    pub fn get_last_metrics(&self) -> Option<&ContextMetrics> {
+        self.last_metrics.as_ref()
+    }
+    
+    /// Take a snapshot of current history state for debugging
+    pub fn inspect_history(&self) -> HistorySnapshot {
+        use std::collections::HashMap;
+        
+        let mut by_role: HashMap<String, usize> = HashMap::new();
+        for msg in &self.history {
+            *by_role.entry(msg.role.clone()).or_insert(0) += 1;
+        }
+        
+        let recent_previews: Vec<(String, String)> = self.history
+            .iter()
+            .rev()
+            .take(5)
+            .map(|m| {
+                let preview = if m.content.len() > 50 {
+                    format!("{}...", &m.content[..50])
+                } else {
+                    m.content.clone()
+                };
+                (m.role.clone(), preview)
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        
+        HistorySnapshot {
+            message_count: self.history.len(),
+            total_tokens: self.total_tokens(),
+            total_bytes: self.total_byte_size(),
+            by_role,
+            recent_previews,
+        }
+    }
+    
+    /// Log current context state at debug level
+    pub fn log_state(&self, label: &str) {
+        let snapshot = self.inspect_history();
+        crate::debug_log!("[ContextManager:{}] {}", label, snapshot.format());
+    }
 }
 
-/// Implement SmartPruning trait for ContextManager
-impl crate::conversation::pruning::SmartPruning for ContextManager {
-    fn smart_prune_with_indicator(&mut self, config: &crate::conversation::pruning::SmartPruningConfig) -> Option<crate::conversation::pruning::PrunedSegment> {
-        use crate::conversation::pruning::smart_prune;
+/// Implement ContextCompression trait for ContextManager
+impl crate::conversation::context_compression::ContextCompression for ContextManager {
+    fn compress_with_indicator(&mut self, config: &crate::conversation::context_compression::CompressionConfig) -> Option<crate::conversation::context_compression::CompressedSegment> {
+        use crate::conversation::context_compression::compress_context;
         
         let limit = self.config.effective_limit();
         
-        // Convert to cognition messages for pruning
-        let messages: Vec<crate::agent::cognition::history::Message> = self.history
-            .iter()
-            .map(|m| crate::agent::cognition::history::Message {
-                role: match m.role.as_str() {
-                    "system" => crate::agent::cognition::history::MessageRole::System,
-                    "user" => crate::agent::cognition::history::MessageRole::User,
-                    "assistant" => crate::agent::cognition::history::MessageRole::Assistant,
-                    "tool" => crate::agent::cognition::history::MessageRole::Tool,
-                    _ => crate::agent::cognition::history::MessageRole::User,
-                },
-                content: m.content.clone(),
-            })
-            .collect();
+        let result = compress_context(self.history.clone(), limit, config);
         
-        let result = smart_prune(messages, limit, config);
-        
-        if !result.was_pruned {
+        if !result.was_compressed {
             return None;
         }
         
-        // Convert back to context messages
-        self.history = result.kept.iter().map(|m| {
-            let role = match m.role {
-                crate::agent::cognition::history::MessageRole::System => "system",
-                crate::agent::cognition::history::MessageRole::User => "user",
-                crate::agent::cognition::history::MessageRole::Assistant => "assistant",
-                crate::agent::cognition::history::MessageRole::Tool => "tool",
-            };
-            Message::new(role, &m.content)
-        }).collect();
+        let kept_len = result.kept.len();
+        let trimmed_len = result.trimmed.len();
+        let tokens_saved = result.segment.tokens_saved;
+        let segment = result.segment.clone();
+        
+        // Update history with kept messages
+        self.history = result.kept;
         
         // Archive the segment
-        self.pruned_history.push(result.segment.clone());
+        self.compression_archive.push(result.segment);
         
         crate::info_log!(
-            "[CONTEXT] Smart pruning: kept {} messages, pruned {} messages, saved ~{} tokens",
-            result.kept.len(),
-            result.pruned.len(),
-            result.segment.tokens_saved
+            "[CONTEXT] Context compression: kept {} messages, trimmed {} messages, saved ~{} tokens",
+            kept_len,
+            trimmed_len,
+            tokens_saved
         );
         
-        Some(result.segment)
+        Some(segment)
     }
     
-    fn pruned_history(&self) -> &crate::conversation::pruning::PrunedHistory {
-        &self.pruned_history
+    fn compression_archive(&self) -> &crate::conversation::context_compression::CompressionArchive {
+        &self.compression_archive
     }
     
-    fn pruned_history_mut(&mut self) -> &mut crate::conversation::pruning::PrunedHistory {
-        &mut self.pruned_history
+    fn compression_archive_mut(&mut self) -> &mut crate::conversation::context_compression::CompressionArchive {
+        &mut self.compression_archive
     }
     
-    fn check_auto_restore(&self, user_message: &str) -> crate::conversation::pruning::AutoRestoreResult {
-        crate::conversation::pruning::check_auto_restore(user_message, &self.pruned_history)
+    fn check_auto_restore(&self, user_message: &str) -> crate::conversation::context_compression::AutoRestoreResult {
+        crate::conversation::context_compression::check_auto_restore(user_message, &self.compression_archive)
     }
 }
 

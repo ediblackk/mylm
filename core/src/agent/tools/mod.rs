@@ -4,7 +4,8 @@
 //! actions on behalf of the agent. All tools implement the `ToolCapability` trait.
 
 pub mod shell;
-pub mod fs;
+pub mod read_file;
+pub mod write_file;
 pub mod list_files;
 pub mod git;
 pub mod web_search;
@@ -13,9 +14,11 @@ pub mod delegate;
 pub mod scratchpad;
 pub mod worker_shell;
 pub mod commonboard;
+pub mod search_files;
 
 pub use shell::ShellTool;
-pub use fs::{ReadFileTool, WriteFileTool};
+pub use read_file::{ReadFileTool, ChunkPool};
+pub use write_file::WriteFileTool;
 pub use list_files::ListFilesTool;
 pub use git::{GitStatusTool, GitLogTool, GitDiffTool};
 pub use web_search::{WebSearchTool, WebSearchConfig, SearchProvider};
@@ -24,8 +27,10 @@ pub use delegate::DelegateTool;
 pub use scratchpad::{ScratchpadTool, create_shared_scratchpad, SharedScratchpad};
 pub use worker_shell::{WorkerShellTool, WorkerShellPermissions, EscalationRequest, EscalationResponse};
 pub use commonboard::CommonboardTool;
+pub use search_files::SearchFilesTool;
 
 use std::sync::Arc;
+use std::path::Path;
 use crate::agent::runtime::core::{Capability, ToolCapability, RuntimeContext, ToolError};
 use crate::agent::runtime::core::terminal::{TerminalExecutor, DefaultTerminalExecutor};
 use crate::agent::types::intents::ToolCall;
@@ -50,6 +55,8 @@ pub struct ToolRegistry {
     scratchpad: Option<ScratchpadTool>,
     /// Commonboard tool for inter-agent coordination (optional)
     commonboard: Option<CommonboardTool>,
+    /// Search tool for full-text file search (optional)
+    search_files: Option<SearchFilesTool>,
 }
 
 impl ToolRegistry {
@@ -63,7 +70,7 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             shell: ShellTool::new(),
-            read_file: ReadFileTool::new(),
+            read_file: ReadFileTool::simple(),
             write_file: WriteFileTool::new(),
             list_files: ListFilesTool::new(),
             git_status: GitStatusTool::new(),
@@ -75,6 +82,30 @@ impl ToolRegistry {
             delegate: None,
             scratchpad: None,
             commonboard: None,
+            search_files: None,
+        }
+    }
+    
+    /// Create a new tool registry with a chunk pool for large file reading
+    /// 
+    /// The chunk pool manages persistent workers for chunked file reading.
+    /// This allows follow-up queries to already-analyzed file chunks.
+    pub fn with_chunk_pool(chunk_pool: Arc<ChunkPool>) -> Self {
+        Self {
+            shell: ShellTool::new(),
+            read_file: ReadFileTool::new(Arc::clone(&chunk_pool), None),
+            write_file: WriteFileTool::new(),
+            list_files: ListFilesTool::new(),
+            git_status: GitStatusTool::new(),
+            git_log: GitLogTool::new(),
+            git_diff: GitDiffTool::new(),
+            web_search: WebSearchTool::new(),
+            memory: None,
+            terminal: Arc::new(DefaultTerminalExecutor::new()),
+            delegate: None,
+            scratchpad: None,
+            commonboard: None,
+            search_files: None,
         }
     }
     
@@ -96,6 +127,21 @@ impl ToolRegistry {
         self
     }
     
+    /// Enable search_files tool for full-text file search
+    /// 
+    /// # Arguments
+    /// * `index_path` - Optional path for persistent index storage.
+    ///                  If None, an in-memory index is used.
+    pub fn with_search_files(mut self, index_path: Option<&Path>) -> Result<Self, ToolError> {
+        let tool = if let Some(path) = index_path {
+            SearchFilesTool::with_index_path(path)?
+        } else {
+            SearchFilesTool::new()?
+        };
+        self.search_files = Some(tool);
+        Ok(self)
+    }
+    
     /// Set a custom terminal executor
     /// 
     /// This allows the TUI to provide a PTY-based terminal executor
@@ -109,6 +155,11 @@ impl ToolRegistry {
     pub fn with_memory(mut self, store: Arc<VectorStore>) -> Self {
         self.memory = Some(MemoryTool::new(store));
         self
+    }
+    
+    /// Get a reference to the read_file tool (for chunk pool access)
+    pub fn read_file_tool(&self) -> &ReadFileTool {
+        &self.read_file
     }
     
     /// Get a reference to the terminal executor
@@ -131,6 +182,7 @@ impl ToolRegistry {
             "delegate" => self.delegate.as_ref().map(|d| d.as_ref() as &dyn ToolCapability),
             "scratchpad" => self.scratchpad.as_ref().map(|s| s as &dyn ToolCapability),
             "commonboard" => self.commonboard.as_ref().map(|c| c as &dyn ToolCapability),
+            "search_files" => self.search_files.as_ref().map(|s| s as &dyn ToolCapability),
             _ => None,
         }
     }
@@ -164,6 +216,9 @@ impl ToolRegistry {
         if self.commonboard.is_some() {
             tools.push("commonboard".to_string());
         }
+        if self.search_files.is_some() {
+            tools.push("search_files".to_string());
+        }
         tools
     }
 
@@ -177,8 +232,8 @@ impl ToolRegistry {
             },
             ToolDescription {
                 name: "read_file",
-                description: "Read file contents",
-                usage: "{\"a\": \"read_file\", \"i\": {\"path\": \"<path>\"}}",
+                description: "Read file contents. Supports partial reads (line_offset, n_lines) and automatic chunking for large files",
+                usage: r#"Simple: {"a": "read_file", "i": {"path": "<path>"}} | Partial: {"a": "read_file", "i": {"path": "<path>", "line_offset": 1, "n_lines": 100}} | Large file: {"a": "read_file", "i": {"path": "<path>", "strategy": "chunked"}}"#,
             },
             ToolDescription {
                 name: "write_file",
@@ -241,6 +296,14 @@ impl ToolRegistry {
                 name: "commonboard",
                 description: "Inter-agent coordination (claims, progress, completion)",
                 usage: "{\"a\": \"commonboard\", \"i\": {\"action\": \"claim\", \"resource\": \"file.rs\"}} or {\"a\": \"commonboard\", \"i\": {\"action\": \"query\"}}",
+            });
+        }
+        
+        if self.search_files.is_some() {
+            descriptions.push(ToolDescription {
+                name: "search_files",
+                description: "Full-text search across indexed files",
+                usage: "{\"a\": \"search_files\", \"i\": {\"query\": \"function main\"}} or {\"a\": \"search_files\", \"i\": {\"query\": \"TODO\", \"path_filter\": \"src/\"}}",
             });
         }
         
@@ -325,4 +388,38 @@ pub fn parse_str_args<T: serde::de::DeserializeOwned>(args: &str) -> Result<T, T
             e
         ))),
     }
+}
+
+/// Expand tilde (~) to home directory in a path
+/// 
+/// This handles:
+/// - `~/path` -> `/home/user/path`
+/// - `~user/path` -> `/home/user/path` (if user's home can be determined)
+/// - `/absolute/path` -> unchanged
+/// - `relative/path` -> unchanged
+pub fn expand_tilde(path: &str) -> String {
+    if !path.starts_with('~') {
+        return path.to_string();
+    }
+    
+    // Get home directory
+    let home = dirs::home_dir();
+    
+    if path == "~" {
+        // Just tilde - return home directory
+        return home.map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string());
+    }
+    
+    if path.starts_with("~/") {
+        // Tilde with path after it
+        return home.map(|h| {
+            let rest = &path[2..]; // Skip "~/"
+            h.join(rest).to_string_lossy().to_string()
+        }).unwrap_or_else(|| path.to_string());
+    }
+    
+    // ~user/... format - we don't handle other users' home directories
+    // Just return as-is, the OS will resolve it if possible
+    path.to_string()
 }

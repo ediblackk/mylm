@@ -28,6 +28,9 @@ pub struct AgentConfig {
     
     /// Telemetry configuration
     pub telemetry: TelemetryConfig,
+    
+    /// Security configuration (sandbox, restrictions)
+    pub security: SecurityConfig,
 }
 
 impl Default for AgentConfig {
@@ -40,6 +43,7 @@ impl Default for AgentConfig {
             memory: MemoryConfig::default(),
             workers: WorkerConfig::default(),
             telemetry: TelemetryConfig::default(),
+            security: SecurityConfig::default(),
         }
     }
 }
@@ -81,6 +85,7 @@ impl AgentConfig {
         self.memory.merge(other.memory);
         self.workers.merge(other.workers);
         self.telemetry.merge(other.telemetry);
+        self.security.merge(other.security);
     }
 }
 
@@ -225,6 +230,154 @@ impl RetryConfig {
     }
 }
 
+/// User profile - evolves based on interactions
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UserProfile {
+    /// User preferences (response style, etc.)
+    #[serde(default)]
+    pub preferences: std::collections::HashMap<String, String>,
+    
+    /// Known facts about user (birthday, favorites, etc.)
+    #[serde(default)]
+    pub facts: std::collections::HashMap<String, String>,
+    
+    /// Detected patterns ("evening_worker", "prefers_vim", etc.)
+    #[serde(default)]
+    pub patterns: Vec<String>,
+    
+    /// Active goals/projects
+    #[serde(default)]
+    pub active_goals: Vec<String>,
+    
+    /// Recent session summaries (last N sessions)
+    #[serde(default)]
+    pub session_summaries: Vec<SessionSummary>,
+}
+
+/// Summary of a session for profile context
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub timestamp: i64,
+    pub topic: String,
+    pub key_points: Vec<String>,
+}
+
+impl UserProfile {
+    /// Load profile from disk or create default
+    pub fn load() -> anyhow::Result<Self> {
+        let path = Self::profile_path()?;
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)?;
+            let profile: UserProfile = serde_json::from_str(&content)?;
+            Ok(profile)
+        } else {
+            Ok(Self::default())
+        }
+    }
+    
+    /// Save profile to disk
+    pub fn save(&self) -> anyhow::Result<()> {
+        let path = Self::profile_path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let content = serde_json::to_string_pretty(self)?;
+        std::fs::write(&path, content)?;
+        Ok(())
+    }
+    
+    /// Get profile storage path
+    fn profile_path() -> anyhow::Result<std::path::PathBuf> {
+        Ok(dirs::data_dir()
+            .ok_or_else(|| anyhow::anyhow!("Could not find data directory"))?
+            .join("mylm")
+            .join("user_profile.json"))
+    }
+    
+    /// Format profile for prompt injection
+    pub fn format_for_prompt(&self) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+        
+        let mut sections = vec![];
+        
+        if !self.preferences.is_empty() {
+            let prefs: Vec<String> = self.preferences
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, v))
+                .collect();
+            sections.push(format!("Preferences:\n- {}", prefs.join("\n- ")));
+        }
+        
+        if !self.facts.is_empty() {
+            let facts: Vec<String> = self.facts
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k, v))
+                .collect();
+            sections.push(format!("Known Facts:\n- {}", facts.join("\n- ")));
+        }
+        
+        if !self.patterns.is_empty() {
+            sections.push(format!("Behavioral Patterns:\n- {}", self.patterns.join("\n- ")));
+        }
+        
+        if !self.active_goals.is_empty() {
+            sections.push(format!("Active Goals:\n- {}", self.active_goals.join("\n- ")));
+        }
+        
+        format!("## User Profile\n\n{}\n", sections.join("\n\n"))
+    }
+    
+    /// Check if profile has any data
+    pub fn is_empty(&self) -> bool {
+        self.preferences.is_empty() 
+            && self.facts.is_empty()
+            && self.patterns.is_empty()
+            && self.active_goals.is_empty()
+            && self.session_summaries.is_empty()
+    }
+    
+    /// Add or update a preference
+    pub fn set_preference(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.preferences.insert(key.into(), value.into());
+    }
+    
+    /// Add or update a fact
+    pub fn set_fact(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.facts.insert(key.into(), value.into());
+    }
+    
+    /// Add a pattern if not already present
+    pub fn add_pattern(&mut self, pattern: impl Into<String>) {
+        let pattern = pattern.into();
+        if !self.patterns.contains(&pattern) {
+            self.patterns.push(pattern);
+        }
+    }
+    
+    /// Add an active goal
+    pub fn add_goal(&mut self, goal: impl Into<String>) {
+        let goal = goal.into();
+        if !self.active_goals.contains(&goal) {
+            self.active_goals.push(goal);
+        }
+    }
+    
+    /// Complete/remove a goal
+    pub fn complete_goal(&mut self, goal: &str) {
+        self.active_goals.retain(|g| g != goal);
+    }
+    
+    /// Add session summary (keep last 10)
+    pub fn add_session_summary(&mut self, summary: SessionSummary) {
+        self.session_summaries.push(summary);
+        if self.session_summaries.len() > 10 {
+            self.session_summaries.remove(0);
+        }
+    }
+}
+
 /// Memory configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
@@ -307,6 +460,10 @@ pub struct WorkerConfig {
     pub max_concurrent: usize,
     /// Worker timeout in seconds
     pub timeout_secs: u64,
+    /// Maximum persistent chunk workers for large file reading (1-50)
+    pub max_persistent_workers: usize,
+    /// Enable Tantivy search indexing
+    pub tantivy_enabled: bool,
 }
 
 impl Default for WorkerConfig {
@@ -315,6 +472,8 @@ impl Default for WorkerConfig {
             enabled: true,
             max_concurrent: 3,
             timeout_secs: 300,
+            max_persistent_workers: 5,
+            tantivy_enabled: true,
         }
     }
 }
@@ -324,6 +483,8 @@ impl WorkerConfig {
         self.enabled = other.enabled;
         self.max_concurrent = other.max_concurrent;
         self.timeout_secs = other.timeout_secs;
+        self.max_persistent_workers = other.max_persistent_workers.clamp(1, 50);
+        self.tantivy_enabled = other.tantivy_enabled;
     }
 }
 
@@ -363,6 +524,62 @@ impl TelemetryConfig {
             self.log_file_path = other.log_file_path;
         }
         self.enable_metrics = other.enable_metrics;
+    }
+}
+
+/// Security configuration (sandbox, restrictions)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityConfig {
+    /// Sandbox root directory - commands cannot escape above this path
+    /// None = no restriction (default)
+    /// Example: "/home/edward/workspace" restricts commands to this directory and below
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox_root: Option<PathBuf>,
+    
+    /// Enforce sandbox on all shell commands (including main agent)
+    /// If false, sandbox only applies to workers
+    #[serde(default = "default_true")]
+    pub sandbox_all: bool,
+    
+    /// Allow commands to escape sandbox with explicit user confirmation
+    #[serde(default)]
+    pub allow_escalation: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            sandbox_root: None,
+            sandbox_all: true,
+            allow_escalation: false,
+        }
+    }
+}
+
+impl SecurityConfig {
+    fn merge(&mut self, other: Self) {
+        if other.sandbox_root.is_some() {
+            self.sandbox_root = other.sandbox_root;
+        }
+        self.sandbox_all = other.sandbox_all;
+        self.allow_escalation = other.allow_escalation;
+    }
+    
+    /// Check if sandbox is enabled
+    pub fn sandbox_enabled(&self) -> bool {
+        self.sandbox_root.is_some()
+    }
+    
+    /// Get the effective sandbox root for a given context
+    /// Returns None if sandbox is disabled
+    pub fn effective_sandbox(&self, for_workers: bool) -> Option<&PathBuf> {
+        if self.sandbox_root.is_none() {
+            return None;
+        }
+        if !for_workers && !self.sandbox_all {
+            return None;
+        }
+        self.sandbox_root.as_ref()
     }
 }
 

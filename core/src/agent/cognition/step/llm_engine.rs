@@ -74,32 +74,42 @@ impl LlmEngine {
         }).collect()
     }
     
-    /// Parse LLM response to extract decision
+    /// Parse LLM response to extract decision (Y-SWITCH)
+    /// 
+    /// Note: This is a simplified Y-switch for the LLM Engine.
+    /// The full Y-switch routing happens in the Planner where multiple intents
+    /// can be created. Here we return a single decision.
     fn parse_response(&self, _state: &AgentState, response: &str) -> Result<AgentDecision, String> {
         match self.parser.parse_to_response(response) {
-            Ok(ParsedResponse::ToolCalls(calls)) => {
-                if let Some(call) = calls.into_iter().next() {
-                    Ok(AgentDecision::CallTool(call))
-                } else {
-                    Ok(AgentDecision::EmitResponse("No tool calls found".to_string()))
+            Ok(ParsedResponse::ShortKey(extracted)) => {
+                // Y-SWITCH logic for single decision:
+                // Priority: Tool > Remember > Final Answer
+                
+                if let Some(tool) = extracted.tool_call {
+                    if extracted.confirm {
+                        return Ok(AgentDecision::RequestApproval(ApprovalRequest {
+                            tool: tool.name,
+                            args: tool.arguments.to_string(),
+                            reason: "Tool requires confirmation".to_string(),
+                        }));
+                    }
+                    return Ok(AgentDecision::CallTool(tool));
                 }
-            }
-            Ok(ParsedResponse::FinalAnswer(answer)) => {
-                Ok(AgentDecision::EmitResponse(answer))
-            }
-            Ok(ParsedResponse::Remember { content, .. }) => {
-                Ok(AgentDecision::Remember { content })
-            }
-            Ok(ParsedResponse::RememberAndCall { content: _, tool }) => {
-                // For now, prioritize the tool call - memory happens in background
-                Ok(AgentDecision::CallTool(tool))
-            }
-            Ok(ParsedResponse::ConfirmRequest { tool, .. }) => {
-                Ok(AgentDecision::RequestApproval(ApprovalRequest {
-                    tool: tool.name,
-                    args: tool.arguments.to_string(),
-                    reason: "Tool requires confirmation".to_string(),
-                }))
+                
+                if let Some(content) = extracted.remember {
+                    return Ok(AgentDecision::Remember { content });
+                }
+                
+                if let Some(answer) = extracted.final_answer {
+                    return Ok(AgentDecision::EmitResponse(answer));
+                }
+                
+                // Fallback to thought if nothing else
+                if !extracted.thought.is_empty() {
+                    return Ok(AgentDecision::EmitResponse(extracted.thought));
+                }
+                
+                Ok(AgentDecision::EmitResponse("No actionable content found".to_string()))
             }
             Ok(ParsedResponse::Malformed { error, .. }) => {
                 Err(format!("Parse error: {}", error))
@@ -153,15 +163,12 @@ impl StepEngine for LlmEngine {
             // User message - request LLM to decide
             Some(InputEvent::UserMessage(msg)) => {
                 let state_with_message = state.clone()
-                    .with_message(crate::agent::cognition::kernel::Message {
-                        role: crate::agent::types::intents::Role::User,
-                        content: msg.clone(),
-                    });
+                    .with_message("user", msg.clone());
                 
                 let scratchpad = format!("User: {}\n\nWhat should I do?", msg);
                 
                 // History is already the correct type now that AgentState is unified
-                let history: Vec<crate::agent::types::intents::Message> = state_with_message.history.clone();
+                let history = state_with_message.history.clone();
                 
                 let context = crate::agent::types::intents::Context::new(scratchpad)
                     .with_system(self.system_prompt.clone())
@@ -186,10 +193,7 @@ impl StepEngine for LlmEngine {
             // LLM response - parse and act
             Some(InputEvent::LLMResponse(llm_resp)) => {
                 let state_with_response = state.clone()
-                    .with_message(crate::agent::cognition::kernel::Message {
-                        role: crate::agent::types::intents::Role::Assistant,
-                        content: llm_resp.content.clone(),
-                    });
+                    .with_message("assistant", llm_resp.content.clone());
                 
                 match self.parse_response(state, &llm_resp.content) {
                     Ok(decision) => {
@@ -237,13 +241,10 @@ impl StepEngine for LlmEngine {
                 
                 let tool_content = format!("Tool '{}' {}: {}", tool, status, output);
                 let state_with_tool = state.clone()
-                    .with_message(crate::agent::cognition::kernel::Message {
-                        role: crate::agent::types::intents::Role::Tool,
-                        content: tool_content,
-                    });
+                    .with_message("tool", tool_content);
                 
                 // History is already the correct type
-                let history: Vec<crate::agent::types::intents::Message> = state_with_tool.history.clone();
+                let history = state_with_tool.history.clone();
                 
                 let scratchpad = format!(
                     "Tool '{}' {} with output: {}\n\nWhat should I do next?",

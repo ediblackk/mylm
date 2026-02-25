@@ -30,10 +30,9 @@ pub mod input;
 pub mod decision;
 pub mod engine;
 pub mod error;
-pub mod history;
 
 // Re-exports
-pub use kernel::{GraphEngine, AgentState, KernelError, TokenUsage, PendingApproval, StubGraphEngine};
+pub use kernel::{GraphEngine, AgentState, KernelError, TokenUsage, PendingApproval, StubGraphEngine, Message};
 pub use planner::Planner;
 pub use step::llm_engine::LlmEngine;
 pub use prompts::system::{ToolDescription, build_system_prompt, build_tool_defs};
@@ -44,4 +43,4 @@ pub use input::{InputEvent, WorkerId, ApprovalOutcome, LLMResponse};
 pub use decision::{Transition, AgentDecision, AgentExitReason};
 pub use engine::{StepEngine, StubEngine};
 pub use error::CognitiveError;
-pub use history::Message;
+

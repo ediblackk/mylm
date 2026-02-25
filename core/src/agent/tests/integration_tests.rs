@@ -237,7 +237,9 @@ mod tests {
         };
         
         let client = Arc::new(LlmClient::new(config).expect("Failed to create LLM client"));
-        let llm_cap = Arc::new(LlmClientCapability::new(client));
+        let context_config = crate::conversation::ContextConfig::default();
+        let context_manager = Arc::new(tokio::sync::Mutex::new(crate::conversation::ContextManager::new(context_config)));
+        let llm_cap = Arc::new(LlmClientCapability::new(client, context_manager));
         
         let mut session = AgentBuilder::new()
             .with_llm(llm_cap)
@@ -280,7 +282,10 @@ mod tests {
         
         // Verify that context was tracked in ContextManager
         let context_manager = session.context_manager();
-        let history = context_manager.history();
+        let history = {
+            let cm = context_manager.lock().await;
+            cm.history().to_vec()
+        };
         
         // Should have at least user message and assistant response
         assert!(

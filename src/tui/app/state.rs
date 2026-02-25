@@ -11,6 +11,7 @@ pub use crate::tui::app::types::{
     TimestampedChatMessage,
 };
 use mylm_core::agent::{OutputEvent, UserInput};
+use mylm_core::agent::memory::AgentMemoryManager;
 use mylm_core::conversation::ContextManager;
 use mylm_core::memory::graph::MemoryGraph;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -119,6 +120,10 @@ pub struct AppStateContainer {
     pub show_job_detail: bool,
     #[allow(dead_code)]
     pub job_scroll: usize,
+    /// Scroll offset for the jobs list panel (separate from job detail scroll)
+    pub jobs_list_scroll: usize,
+    /// Track active worker count to filter worker events from main chat
+    pub active_worker_count: usize,
 
     // Mouse selection state
     pub selection_start: Option<(u16, u16)>,
@@ -243,6 +248,18 @@ pub struct AppStateContainer {
     #[allow(dead_code)]
     pub terminal_delegate: Option<Arc<TerminalDelegate>>,
     
+    /// Shared memory manager for F3 view and agent (initialized once)
+    pub memory_manager: Option<Arc<AgentMemoryManager>>,
+    
+    /// Original unfiltered memory graph (preserved for filter clear)
+    pub memory_graph_original: Option<MemoryGraph>,
+    
+    /// Memory pagination: page size
+    pub memory_page_size: usize,
+    
+    /// Memory pagination: current page number (0-indexed)
+    pub memory_current_page: usize,
+    
     /// Pending approval for tool execution (intent_id, tool_name, args)
     pub pending_approval: Option<(u64, String, String)>,
     
@@ -267,7 +284,9 @@ pub struct AppStateContainer {
 
 impl AppStateContainer {
     /// Create new AppStateContainer - simplified for new architecture
-    pub fn new(
+    /// 
+    /// This is now async because memory manager initialization requires async.
+    pub async fn new(
         pty_manager: PtyManager,
         config: mylm_core::config::Config,
         job_registry: JobRegistry,
@@ -295,8 +314,31 @@ impl AppStateContainer {
             .with_pricing(input_price, output_price);
         let context_manager = ContextManager::new(ctx_config);
 
+        // Initialize shared memory manager (if memory feature enabled and not incognito)
+        let memory_manager = if config.features.memory && !incognito {
+            use mylm_core::config::agent::MemoryConfig;
+            let memory_config = MemoryConfig {
+                enabled: true,
+                incognito: false,
+                ..MemoryConfig::default()
+            };
+            match AgentMemoryManager::new(memory_config).await {
+                Ok(mm) => {
+                    mylm_core::info_log!("[STATE] Memory manager initialized successfully");
+                    Some(Arc::new(mm))
+                }
+                Err(e) => {
+                    mylm_core::warn_log!("[STATE] Failed to initialize memory manager: {}", e);
+                    None
+                }
+            }
+        } else {
+            mylm_core::debug_log!("[STATE] Memory disabled or incognito mode, skipping memory manager init");
+            None
+        };
+
         let app = Self {
-            terminal_parser: vt100::Parser::new(24, 80, 0),
+            terminal_parser: vt100::Parser::new(24, 80, 5000), // 5000 lines scrollback
             pty_manager,
             config,
             agent_session_factory: None,
@@ -362,6 +404,8 @@ impl AppStateContainer {
             job_registry,
             show_job_detail: false,
             job_scroll: 0,
+            jobs_list_scroll: 0,
+            active_worker_count: 0,
             chat_width_percent: 30,
             show_terminal: true,
             selection_start: None,
@@ -397,6 +441,11 @@ impl AppStateContainer {
             // Memory provider - currently initialized on-demand in event_loop.rs
             memory_provider: None,
             status_animation_frame: 0,
+            // Phase 1-4: Shared memory manager and pagination
+            memory_manager,
+            memory_graph_original: None,
+            memory_page_size: 50,  // Default page size
+            memory_current_page: 0,
         };
         
         app
@@ -438,7 +487,7 @@ impl AppStateContainer {
         self.terminal_size = (height, width);
         let _ = self.pty_manager.resize(height, width);
         // Always recreate the parser with correct size, reprocess buffer if we have content
-        let mut new_parser = vt100::Parser::new(height, width, 0);
+        let mut new_parser = vt100::Parser::new(height, width, 5000); // 5000 lines scrollback
         if !self.raw_buffer.is_empty() {
             new_parser.process(&self.raw_buffer);
         }

@@ -342,13 +342,30 @@ impl WorkerShellTool {
     /// Execute command directly
     async fn execute_direct(
         &self,
+        ctx: &RuntimeContext,
         command: &str,
         terminal: Option<&dyn TerminalExecutor>,
     ) -> Result<ToolResult, ToolError> {
+        // Validate sandbox
+        let cwd = ctx.current_dir().await;
+        if let Some(sandbox) = ctx.sandbox_root() {
+            if !ctx.is_within_sandbox(&cwd) {
+                return Ok(ToolResult::Error {
+                    message: format!(
+                        "Working directory '{}' is outside sandbox '{}'",
+                        cwd.display(),
+                        sandbox.display()
+                    ),
+                    code: Some("SANDBOX_VIOLATION".to_string()),
+                    retryable: false,
+                });
+            }
+        }
+        
         if let Some(term) = terminal {
             self.execute_with_terminal(term, command).await
         } else {
-            self.execute_standalone(command).await
+            self.execute_standalone(command, &cwd).await
         }
     }
     
@@ -388,7 +405,11 @@ impl WorkerShellTool {
     }
     
     /// Execute standalone (no terminal)
-    async fn execute_standalone(&self, command: &str) -> Result<ToolResult, ToolError> {
+    async fn execute_standalone(
+        &self, 
+        command: &str, 
+        cwd: &std::path::Path
+    ) -> Result<ToolResult, ToolError> {
         use tokio::process::Command;
         use tokio::time::timeout;
         
@@ -398,11 +419,13 @@ impl WorkerShellTool {
                 if cfg!(target_os = "windows") {
                     Command::new("cmd")
                         .args(["/C", command])
+                        .current_dir(cwd)
                         .output()
                         .await
                 } else {
                     Command::new("sh")
                         .args(["-c", command])
+                        .current_dir(cwd)
                         .output()
                         .await
                 }
@@ -538,7 +561,7 @@ impl ToolCapability for WorkerShellTool {
                     "WorkerShellTool [{}]: Executing allowed command: {}",
                     self.worker_id, command
                 );
-                self.execute_direct(command, ctx.terminal()).await
+                self.execute_direct(ctx, command, ctx.terminal()).await
             }
 
             CommandClassification::Restricted => {
@@ -554,7 +577,7 @@ impl ToolCapability for WorkerShellTool {
                             "WorkerShellTool [{}]: AllowAll mode - executing restricted command",
                             self.worker_id
                         );
-                        self.execute_direct(command, ctx.terminal()).await
+                        self.execute_direct(ctx, command, ctx.terminal()).await
                     }
                     EscalationMode::BlockRestricted => {
                         Ok(ToolResult::Error {
@@ -575,7 +598,7 @@ impl ToolCapability for WorkerShellTool {
                                     "WorkerShellTool [{}]: Escalation approved for: {}",
                                     self.worker_id, command
                                 );
-                                self.execute_direct(command, ctx.terminal()).await
+                                self.execute_direct(ctx, command, ctx.terminal()).await
                             }
                             Ok(false) => {
                                 crate::info_log!(

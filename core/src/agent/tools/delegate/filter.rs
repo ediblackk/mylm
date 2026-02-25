@@ -83,11 +83,11 @@ impl WorkerEventFilter {
                 FilterDecision::Forward(event)
             }
             
-            // PRESERVE SEMANTICS: Thinking events
-            // Don't flatten to Status - keep the semantic type
-            OutputEvent::Thinking { intent_id: _ } => {
-                // Forward Thinking as-is (with worker_id in message prefix from forwarder)
-                FilterDecision::Forward(event)
+            // DROP: Worker Thinking events - these should NOT appear in main chat
+            // Workers have their own UI in the job panel, so worker thinking is tracked there
+            // Only main agent thinking should appear in the main chat
+            OutputEvent::Thinking { .. } => {
+                FilterDecision::Drop("worker_thinking_isolated")
             }
             
             // COALESCE: Response chunks
@@ -109,8 +109,9 @@ impl WorkerEventFilter {
             OutputEvent::WorkerSpawned { .. } => FilterDecision::Forward(event),
             OutputEvent::WorkerFailed { .. } => FilterDecision::Forward(event),
             
-            // PASS THROUGH: Approval (needs Main attention)
-            OutputEvent::ApprovalRequested { .. } => FilterDecision::Forward(event),
+            // DROP: Worker approvals are handled internally by WorkerRestrictedApprovalCapability
+            // Workers auto-approve/deny based on allowed_commands patterns - no need to forward
+            OutputEvent::ApprovalRequested { .. } => FilterDecision::Drop("worker_auto_approved"),
             
             // PASS THROUGH: Context pruning
             OutputEvent::ContextPruned { .. } => FilterDecision::Forward(event),

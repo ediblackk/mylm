@@ -17,7 +17,7 @@ pub fn render_jobs_panel(frame: &mut Frame, app: &mut App, area: Rect) {
     // Show different title when focused
     let title = if app.focus == Focus::Jobs {
         format!(
-            " Background Jobs [{} active] | ↑↓:select | c:cancel | a:cancel-all | Enter:journey | Esc:close ",
+            " Jobs [{} active] ↑↓:sel S-↑↓:scroll Enter:view c:cancel a:cancel-all Esc:close ",
             jobs.iter().filter(|j| matches!(j.status, JobStatus::Running)).count()
         )
     } else {
@@ -43,8 +43,33 @@ pub fn render_jobs_panel(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    // Calculate visible range based on scroll offset
+    // Each job takes 1-2 lines, estimate average 1.5 lines for scroll calculation
+    let visible_height = area.height as usize;
+    let total_jobs = jobs.len();
+    
+    // Clamp scroll to valid range
+    let max_scroll = total_jobs.saturating_sub(1);
+    let scroll = app.jobs_list_scroll.min(max_scroll);
+    app.jobs_list_scroll = scroll; // Update app state if we clamped it
+    
+    // Ensure selected job is visible (auto-scroll to selection)
+    if let Some(selected_idx) = app.selected_job_index {
+        if selected_idx < scroll {
+            // Selection is above visible area - scroll up
+            app.jobs_list_scroll = selected_idx;
+        } else if selected_idx >= scroll + visible_height {
+            // Selection is below visible area - scroll down
+            app.jobs_list_scroll = selected_idx.saturating_sub(visible_height - 1);
+        }
+    }
+    
+    // Apply scroll offset
+    let start_idx = app.jobs_list_scroll;
+    let visible_jobs: Vec<_> = jobs.iter().enumerate().skip(start_idx).collect();
+    
     let mut items = Vec::new();
-    for (idx, job) in jobs.iter().enumerate() {
+    for (idx, job) in visible_jobs {
         let short_id = &job.id[..8.min(job.id.len())];
         let status_str = match job.status {
             JobStatus::Running => "●",

@@ -12,7 +12,7 @@ use crate::tui::app::types::{AppState, TuiEvent, TimestampedChatMessage};
 
 use mylm_core::agent::UserInput;
 use mylm_core::environment::ContextBuilder;
-use mylm_core::conversation::SmartPruning;
+use mylm_core::conversation::ContextCompression;
 use mylm_core::provider::chat::ChatMessage;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -56,19 +56,12 @@ impl AppStateContainer {
             // Restore the segments to both context_manager and chat_history
             for segment in auto_restore_result.segments {
                 for msg in segment.messages {
-                    let chat_msg = match msg.role {
-                        mylm_core::agent::cognition::history::MessageRole::User => {
-                            TimestampedChatMessage::user(&msg.content)
-                        }
-                        mylm_core::agent::cognition::history::MessageRole::Assistant => {
-                            TimestampedChatMessage::assistant(&msg.content)
-                        }
-                        mylm_core::agent::cognition::history::MessageRole::System => {
-                            TimestampedChatMessage::system(&msg.content)
-                        }
-                        mylm_core::agent::cognition::history::MessageRole::Tool => {
-                            TimestampedChatMessage::assistant(format!("🔧 Tool: {}", &msg.content))
-                        }
+                    let chat_msg = match msg.role.as_str() {
+                        "user" => TimestampedChatMessage::user(&msg.content),
+                        "assistant" => TimestampedChatMessage::assistant(&msg.content),
+                        "system" => TimestampedChatMessage::system(&msg.content),
+                        "tool" => TimestampedChatMessage::assistant(format!("🔧 Tool: {}", &msg.content)),
+                        _ => TimestampedChatMessage::user(&msg.content),
                     };
                     self.chat_history.push(chat_msg);
                 }
@@ -100,14 +93,26 @@ impl AppStateContainer {
 
         // Build context with terminal snapshot deduplication
         mylm_core::debug_log!("[APP] Building terminal snapshot");
-        let history_height = 5000;
-        let width = self.terminal_size.1;
-        let mut temp_parser = vt100::Parser::new(history_height, width, 0);
-        temp_parser.process(&self.raw_buffer);
-        let terminal_content = temp_parser.screen().contents();
+        // Use the persistent terminal_parser which has full scrollback history
+        // instead of creating a new temp parser
+        let terminal_content = self.terminal_parser.screen().contents();
         mylm_core::debug_log!("[APP] Terminal content length: {}", terminal_content.len());
 
-        let builder = ContextBuilder::new(mylm_core::config::ContextProfile::Balanced);
+        // INTELLIGENT ALLOCATION: Calculate available token budget for terminal context
+        // Formula: available = max_context - (system_prompt + chat_history + input)
+        let max_context = self.config.active_profile().context_window;
+        let system_prompt_estimate = 1000; // ~800 for tools/instructions + margin
+        let chat_history_tokens: usize = self.chat_history.iter()
+            .map(|m| m.message.content.len() / 4)
+            .sum();
+        let input_tokens = input.len() / 4;
+        let used_tokens = system_prompt_estimate + chat_history_tokens + input_tokens;
+        let available_tokens = max_context.saturating_sub(used_tokens);
+        
+        mylm_core::debug_log!("[APP] Context budget: max={}, used={}, available={}", 
+            max_context, used_tokens, available_tokens);
+
+        let builder = ContextBuilder::with_budget(available_tokens);
         let mut final_message = input.clone();
 
         // Only include terminal snapshot if it has changed from the last one

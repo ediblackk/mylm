@@ -12,7 +12,7 @@ use crate::agent::{
     runtime::orchestrator::orchestrator::AgencySession,
     runtime::orchestrator::ContractRuntime,
     runtime::capabilities::InMemoryTransport,
-    tools::{ToolRegistry, DelegateTool},
+    tools::{ToolRegistry, DelegateTool, ChunkPool},
     runtime::core::terminal::TerminalExecutor,
     runtime::core::ApprovalCapability,
     runtime::core::LLMCapability,
@@ -190,14 +190,36 @@ impl AgentSessionFactory {
         // (needed for both runtime and delegate tool)
         let (output_tx, _) = tokio::sync::broadcast::channel(100);
         
-        // Step 4: Create ToolRegistry with all default tools
-        let tool_registry = ToolRegistry::new();
+        // Step 4: Create ChunkPool for large file reading
+        // Get max_persistent_workers from agent config (default 5)
+        let agent_config = crate::config::agent::AgentConfig::load();
+        let max_persistent_workers = agent_config.workers.max_persistent_workers;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let chunk_pool = Arc::new(ChunkPool::new(&session_id, max_persistent_workers));
+        crate::info_log!("[FACTORY] Created chunk pool with max {} workers for session {}", max_persistent_workers, session_id);
         
-        // Step 4a: Add scratchpad tool for agent-local persistent notes
+        // Step 5: Create ToolRegistry with chunk pool
+        let tool_registry = ToolRegistry::with_chunk_pool(Arc::clone(&chunk_pool));
+        
+        // Step 5a: Add scratchpad tool for agent-local persistent notes
         let scratchpad = crate::agent::tools::ScratchpadTool::new_standalone();
         let tool_registry = tool_registry.with_scratchpad(scratchpad);
         
-        // Step 4b: Add delegate tool if commonbox is configured (enables worker spawning)
+        // Step 5b: Add search_files tool for full-text file search
+        let tool_registry = match ToolRegistry::with_chunk_pool(Arc::clone(&chunk_pool))
+            .with_scratchpad(crate::agent::tools::ScratchpadTool::new_standalone())
+            .with_search_files(None) {
+            Ok(registry) => {
+                crate::info_log!("[FACTORY] Enabled search_files tool");
+                registry
+            }
+            Err(e) => {
+                crate::warn_log!("[FACTORY] Failed to enable search_files: {}", e);
+                tool_registry
+            }
+        };
+        
+        // Step 5c: Add delegate tool if commonbox is configured (enables worker spawning)
         let tool_registry = if let Some(ref commonbox) = self.commonbox {
             crate::info_log!("[FACTORY] Enabling delegate tool for worker spawning");
             
@@ -216,8 +238,8 @@ impl AgentSessionFactory {
                 worker_factory,
             ).with_output_sender(crate::agent::runtime::orchestrator::OutputSender::Broadcast(output_tx.clone()));
             
-            // Create new registry with delegate and scratchpad enabled
-            ToolRegistry::new()
+            // Create new registry with delegate and scratchpad enabled (with chunk pool)
+            ToolRegistry::with_chunk_pool(Arc::clone(&chunk_pool))
                 .with_scratchpad(crate::agent::tools::ScratchpadTool::new_standalone())
                 .with_delegate(Arc::new(delegate))
         } else {
@@ -294,10 +316,10 @@ impl AgentSessionFactory {
         // Step 11: Create in-memory transport
         let transport = InMemoryTransport::new(100);
         
-        // Step 12: Assemble the session with shared output channel and memory manager
-        // CRITICAL: memory_manager is passed to session which owns it for the session lifetime
-        // The runtime's MemoryProvider holds a Weak reference - this ensures the Arc stays alive
-        let session = AgencySession::new_with_memory(kernel, runtime, transport, output_tx, memory_manager);
+        // Step 12: Assemble the session with shared output channel, memory manager, and chunk pool
+        // CRITICAL: memory_manager and chunk_pool are passed to session which owns them for its lifetime
+        // The runtime's MemoryProvider and tools hold references - this ensures the Arcs stay alive
+        let session = AgencySession::new_full(kernel, runtime, transport, output_tx, memory_manager, Some(chunk_pool));
         
         Ok(session)
     }

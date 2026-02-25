@@ -35,3 +35,4 @@ debug.log
 # ML model cache
 .fastembed_cache/
 .fastembed/
+.tasks/

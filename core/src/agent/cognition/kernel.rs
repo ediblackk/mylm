@@ -19,8 +19,8 @@ use crate::agent::cognition::decision::ToolCall;
 use std::collections::HashMap;
 
 
-// Re-use Message type from intents
-pub use crate::agent::types::intents::Message;
+/// Canonical Message type from conversation module
+pub type Message = crate::conversation::manager::Message;
 
 /// The AgencyKernel trait - pure cognitive core
 ///
@@ -170,7 +170,7 @@ pub struct AgentState {
     pub max_steps: usize,
 
     /// Conversation history (messages)
-    pub history: Vec<Message>,
+    pub history: Vec<crate::conversation::manager::Message>,
 
     /// Working memory / scratchpad
     pub scratchpad: String,
@@ -308,8 +308,8 @@ impl AgentState {
     }
 
     /// Add message to history
-    pub fn with_message(mut self, message: Message) -> Self {
-        self.history.push(message);
+    pub fn with_message(mut self, role: &str, content: impl Into<String>) -> Self {
+        self.history.push(crate::conversation::manager::Message::new(role, content));
         self
     }
 

@@ -280,6 +280,12 @@ impl StatusTracker {
                 // Worker tool completed - just update activity
                 self.last_activity = Instant::now();
             }
+            
+            OutputEvent::WorkerThinking { .. } => {
+                // Worker thinking - doesn't affect main agent status
+                // Just update activity timestamp
+                self.last_activity = Instant::now();
+            }
         }
     }
 

@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use super::ids::IntentId;
+use crate::conversation::manager::Message;
 
 /// An intent - a request to perform a side effect
 /// 
@@ -129,7 +130,7 @@ impl LLMRequest {
 /// Context for LLM request
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Context {
-    /// Conversation history
+    /// Conversation history (canonical type from conversation module)
     pub history: Vec<Message>,
     /// System prompt
     pub system_prompt: String,
@@ -170,22 +171,6 @@ impl Context {
         self.available_tools = tools;
         self
     }
-}
-
-/// Message in conversation history
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Message {
-    pub role: Role,
-    pub content: String,
-}
-
-/// Message role
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum Role {
-    User,
-    Assistant,
-    System,
-    Tool,
 }
 
 /// Tool definition for available tools

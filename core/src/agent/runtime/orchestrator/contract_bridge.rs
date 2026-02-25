@@ -32,6 +32,7 @@ use crate::agent::runtime::core::terminal::{TerminalExecutor, DefaultTerminalExe
 
 use crate::agent::runtime::core::RuntimeContext;
 use crate::agent::memory::MemoryProvider;
+use crate::conversation::ContextManager;
 use crate::provider::LlmClient;
 
 /// Output sender enum to support both broadcast (main session) and mpsc (workers)
@@ -74,6 +75,8 @@ pub struct ContractRuntime {
     approval: Arc<dyn ApprovalCapability>,
     /// Telemetry
     telemetry: Arc<ConsoleTelemetry>,
+    /// Memory provider for saving/retrieving memories
+    memory_provider: Option<Arc<dyn MemoryProvider>>,
     /// Telemetry sender
     telemetry_tx: broadcast::Sender<TelemetryEvent>,
     /// Output sender for streaming events (optional)
@@ -92,7 +95,9 @@ impl ContractRuntime {
     /// Use `with_terminal()` and `with_approval()` for custom configuration.
     pub fn new(llm_client: Arc<LlmClient>) -> Self {
         let tools = Arc::new(ToolRegistry::new());
-        let llm: Arc<dyn LLMCapability> = Arc::new(LlmClientCapability::new(llm_client));
+        let context_config = crate::conversation::ContextConfig::default();
+        let context_manager = Arc::new(tokio::sync::Mutex::new(ContextManager::new(context_config)));
+        let llm: Arc<dyn LLMCapability> = Arc::new(LlmClientCapability::new(llm_client, context_manager));
         let workers = Arc::new(LocalWorkerCapability::new());
         let approval: Arc<dyn ApprovalCapability> = Arc::new(AutoApproveCapability::new());
         let telemetry = Arc::new(ConsoleTelemetry::new());
@@ -104,6 +109,7 @@ impl ContractRuntime {
             workers,
             approval,
             telemetry,
+            memory_provider: None,
             telemetry_tx,
             output_tx: None,
             terminal: Arc::new(DefaultTerminalExecutor::new()),
@@ -116,7 +122,9 @@ impl ContractRuntime {
     /// Uses a default terminal executor (std::process::Command).
     /// Uses auto-approve for approval.
     pub fn with_tools(llm_client: Arc<LlmClient>, tools: Arc<ToolRegistry>) -> Self {
-        let llm: Arc<dyn LLMCapability> = Arc::new(LlmClientCapability::new(llm_client));
+        let context_config = crate::conversation::ContextConfig::default();
+        let context_manager = Arc::new(tokio::sync::Mutex::new(ContextManager::new(context_config)));
+        let llm: Arc<dyn LLMCapability> = Arc::new(LlmClientCapability::new(llm_client, context_manager));
         let workers = Arc::new(LocalWorkerCapability::new());
         let approval: Arc<dyn ApprovalCapability> = Arc::new(AutoApproveCapability::new());
         let telemetry = Arc::new(ConsoleTelemetry::new());
@@ -128,6 +136,7 @@ impl ContractRuntime {
             workers,
             approval,
             telemetry,
+            memory_provider: None,
             telemetry_tx,
             output_tx: None,
             terminal: Arc::new(DefaultTerminalExecutor::new()),
@@ -145,11 +154,13 @@ impl ContractRuntime {
         tools: Arc<ToolRegistry>,
         memory_provider: Option<Arc<dyn MemoryProvider>>,
     ) -> Self {
-        let llm_capability = LlmClientCapability::new(llm_client);
+        let context_config = crate::conversation::ContextConfig::default();
+        let context_manager = Arc::new(tokio::sync::Mutex::new(ContextManager::new(context_config)));
+        let llm_capability = LlmClientCapability::new(llm_client, context_manager);
         
         // Inject memory provider if available
-        let llm: Arc<dyn LLMCapability> = if let Some(provider) = memory_provider {
-            Arc::new(llm_capability.with_memory_provider(provider))
+        let llm: Arc<dyn LLMCapability> = if let Some(ref provider) = memory_provider {
+            Arc::new(llm_capability.with_memory_provider(provider.clone()))
         } else {
             Arc::new(llm_capability)
         };
@@ -165,6 +176,7 @@ impl ContractRuntime {
             workers,
             approval,
             telemetry,
+            memory_provider,
             telemetry_tx,
             output_tx: None,
             terminal: Arc::new(DefaultTerminalExecutor::new()),
@@ -187,6 +199,7 @@ impl ContractRuntime {
             workers,
             approval,
             telemetry,
+            memory_provider: None,
             telemetry_tx,
             output_tx: None,
             terminal: Arc::new(DefaultTerminalExecutor::new()),
@@ -267,6 +280,7 @@ impl ContractRuntime {
                         ClaimEnforcement::Deny { resource, claimed_by } => {
                             return Ok(Observation::ToolCompleted {
                                 intent_id,
+                                tool: call.name.clone(),
                                 result: crate::agent::types::events::ToolResult::Error {
                                     message: format!(
                                         "Access denied: '{}' is claimed by {}. \
@@ -282,6 +296,7 @@ impl ContractRuntime {
                         ClaimEnforcement::RequiresClaim { resource } => {
                             return Ok(Observation::ToolCompleted {
                                 intent_id,
+                                tool: call.name.clone(),
                                 result: crate::agent::types::events::ToolResult::Error {
                                     message: format!(
                                         "You must claim '{}' before modifying it. \
@@ -317,6 +332,7 @@ impl ContractRuntime {
                 
                 Ok(Observation::ToolCompleted {
                     intent_id,
+                    tool: call.name.clone(),
                     result,
                     execution_time_ms,
                 })
@@ -537,8 +553,15 @@ impl ContractRuntime {
             }
             Intent::Remember { content } => {
                 crate::info_log!("[RUNTIME] Remember intent executed: content={}", content);
-                // TODO: Hook up to actual memory system via memory capability
-                // For now, just acknowledge the remember operation
+                
+                // Save to memory via memory provider
+                if let Some(ref provider) = self.memory_provider {
+                    provider.remember(&content);
+                    crate::info_log!("[RUNTIME] Memory saved via provider: {}", &content[..content.len().min(50)]);
+                } else {
+                    crate::warn_log!("[RUNTIME] No memory provider available, cannot save memory");
+                }
+                
                 Ok(Observation::Remembered {
                     intent_id,
                     content,
@@ -656,6 +679,7 @@ impl Clone for ContractRuntime {
             workers: self.workers.clone(),
             approval: self.approval.clone(),
             telemetry: self.telemetry.clone(),
+            memory_provider: self.memory_provider.clone(),
             telemetry_tx: self.telemetry_tx.clone(),
             output_tx: self.output_tx.clone(),
             terminal: Arc::clone(&self.terminal),

@@ -7,7 +7,7 @@ use crate::agent::runtime::core::{Capability, ToolCapability};
 use crate::agent::runtime::core::RuntimeContext;
 use crate::agent::runtime::core::ToolError;
 use crate::agent::runtime::tools::{
-    ShellTool, ReadFileTool, WriteFileTool, ListFilesTool,
+    ShellTool, ReadFileTool, WriteFileTool, ListFilesTool, ChunkPool,
     GitStatusTool, GitLogTool, GitDiffTool, WebSearchTool, MemoryTool,
     ScratchpadTool, WorkerShellTool, WorkerShellPermissions, EscalationRequest, EscalationResponse,
 };
@@ -84,7 +84,8 @@ impl RestrictedToolRegistry {
             },
             
             read_file: if allowed_set.contains("read_file") {
-                Some(ReadFileTool::new())
+                let pool = Arc::new(ChunkPool::new("worker", 3));
+                Some(ReadFileTool::new(pool, None))
             } else {
                 None
             },
@@ -205,8 +206,8 @@ impl RestrictedToolRegistry {
         if self.read_file.is_some() {
             descriptions.push(super::ToolDescription {
                 name: "read_file",
-                description: "Read file contents",
-                usage: "read_file <path>",
+                description: "Read file contents. Supports partial reads (line_offset, n_lines)",
+                usage: r#"{"a": "read_file", "i": {"path": "<path>"}} or {"a": "read_file", "i": {"path": "<path>", "line_offset": 1, "n_lines": 100}}"#,
             });
         }
         
@@ -214,7 +215,7 @@ impl RestrictedToolRegistry {
             descriptions.push(super::ToolDescription {
                 name: "write_file",
                 description: "Write content to file",
-                usage: "write_file <path> <content> or {\"path\": \"<path>\", \"content\": \"<content>\"}",
+                usage: r#"{"a": "write_file", "i": {"path": "<path>", "content": "<content>"}}"#,
             });
         }
         
@@ -222,7 +223,7 @@ impl RestrictedToolRegistry {
             descriptions.push(super::ToolDescription {
                 name: "list_files",
                 description: "List directory contents",
-                usage: "list_files <path> or {\"path\": \"<path>\"}",
+                usage: r#"{"a": "list_files", "i": {"path": "<path>"}}"#,
             });
         }
         

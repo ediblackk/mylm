@@ -1,4 +1,12 @@
 //! Session input handlers
+//!
+//! Translates external input (chat, tasks, worker events) into SessionInput.
+//! The Session consumes these and feeds them to the cognitive engine.
+//!
+//! Links:
+//! - Used by: session (Session receives these as input)
+//! - Uses: types (JobId, WorkerId)
+//! - Handlers: chat.rs, task.rs, worker.rs
 
 pub mod chat;
 pub mod task;

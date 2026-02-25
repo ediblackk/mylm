@@ -28,8 +28,13 @@ impl ShellTool {
         Self
     }
 
-    /// Execute a shell command
-    async fn execute_shell(&self, command: &str, _background: bool) -> Result<ToolResult, ToolError> {
+    /// Execute a shell command with context
+    async fn execute_shell(
+        &self, 
+        ctx: &RuntimeContext, 
+        command: &str, 
+        _background: bool
+    ) -> Result<ToolResult, ToolError> {
         // SECURITY: Basic command validation
         let dangerous_patterns = ["rm -rf /", "> /dev/sda", "dd if=/dev/zero"];
         for pattern in &dangerous_patterns {
@@ -42,10 +47,28 @@ impl ShellTool {
             }
         }
 
+        // Get current working directory from context
+        let cwd = ctx.current_dir().await;
+        
+        // Validate sandbox if configured
+        if let Some(sandbox) = ctx.sandbox_root() {
+            if !ctx.is_within_sandbox(&cwd) {
+                return Ok(ToolResult::Error {
+                    message: format!(
+                        "Working directory '{}' is outside sandbox '{}'",
+                        cwd.display(),
+                        sandbox.display()
+                    ),
+                    code: Some("SANDBOX_VIOLATION".to_string()),
+                    retryable: false,
+                });
+            }
+        }
+
         // Execute with timeout
         let result = timeout(
             Duration::from_secs(DEFAULT_TIMEOUT_SECS),
-            self.run_command(command),
+            self.run_command(command, &cwd),
         )
         .await;
 
@@ -67,18 +90,20 @@ impl ShellTool {
         }
     }
 
-    /// Run the actual command
-    async fn run_command(&self, command: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    /// Run the actual command with given working directory
+    async fn run_command(&self, command: &str, cwd: &std::path::Path) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         use tokio::process::Command;
         
         let output = if cfg!(target_os = "windows") {
             Command::new("cmd")
                 .args(["/C", command])
+                .current_dir(cwd)
                 .output()
                 .await?
         } else {
             Command::new("sh")
                 .args(["-c", command])
+                .current_dir(cwd)
                 .output()
                 .await?
         };
@@ -122,6 +147,7 @@ impl ShellTool {
     /// allowing the agent to see the terminal state.
     async fn execute_shell_with_terminal(
         &self,
+        ctx: &RuntimeContext,
         terminal: &dyn TerminalExecutor,
         command: &str,
         _background: bool,
@@ -133,6 +159,24 @@ impl ShellTool {
                 return Ok(ToolResult::Error {
                     message: format!("Command blocked for safety: contains '{}'", pattern),
                     code: Some("SAFETY_BLOCK".to_string()),
+                    retryable: false,
+                });
+            }
+        }
+
+        // Get current working directory from context
+        let cwd = ctx.current_dir().await;
+        
+        // Validate sandbox if configured
+        if let Some(sandbox) = ctx.sandbox_root() {
+            if !ctx.is_within_sandbox(&cwd) {
+                return Ok(ToolResult::Error {
+                    message: format!(
+                        "Working directory '{}' is outside sandbox '{}'",
+                        cwd.display(),
+                        sandbox.display()
+                    ),
+                    code: Some("SANDBOX_VIOLATION".to_string()),
                     retryable: false,
                 });
             }
@@ -252,9 +296,9 @@ impl ToolCapability for ShellTool {
 
         // Use terminal executor from context if available
         if let Some(terminal) = ctx.terminal() {
-            self.execute_shell_with_terminal(terminal, &args_str, background).await
+            self.execute_shell_with_terminal(ctx, terminal, &args_str, background).await
         } else {
-            self.execute_shell(&args_str, background).await
+            self.execute_shell(ctx, &args_str, background).await
         }
     }
 }

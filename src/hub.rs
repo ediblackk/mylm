@@ -65,6 +65,7 @@ pub enum SettingsMenuChoice {
     TestMainConnection,   // Test Main LLM connection
     TestWorkerConnection, // Test Worker LLM connection
     WebSearchSettings,    // Web search provider config
+    MemoryManagement,     // Export, delete, import memory
     ApplicationSettings,  // Global application settings (tmux, alias, etc)
     Back,
 }
@@ -78,8 +79,9 @@ impl std::fmt::Display for SettingsMenuChoice {
             SettingsMenuChoice::TestMainConnection => write!(f, "🧪 [4] Test Main Connection"),
             SettingsMenuChoice::TestWorkerConnection => write!(f, "🧪 [5] Test Worker Connection"),
             SettingsMenuChoice::WebSearchSettings => write!(f, "🌐 [6] Web Search"),
-            SettingsMenuChoice::ApplicationSettings => write!(f, "🔧 [7] Application Settings"),
-            SettingsMenuChoice::Back => write!(f, "⬅️  [8] Back"),
+            SettingsMenuChoice::MemoryManagement => write!(f, "🧠 [7] Memory Management"),
+            SettingsMenuChoice::ApplicationSettings => write!(f, "🔧 [8] Application Settings"),
+            SettingsMenuChoice::Back => write!(f, "⬅️  [9] Back"),
         }
     }
 }
@@ -138,6 +140,8 @@ impl std::fmt::Display for WorkerLLMSettingsChoice {
 pub enum ApplicationSettingsChoice {
     ToggleTmuxAutostart,
     SetPreferredAlias,
+    SetSandboxDirectory,
+    ToggleSandboxForMain,
     Back,
 }
 
@@ -146,7 +150,34 @@ impl std::fmt::Display for ApplicationSettingsChoice {
         match self {
             ApplicationSettingsChoice::ToggleTmuxAutostart => write!(f, "🔄 Toggle Tmux Autostart"),
             ApplicationSettingsChoice::SetPreferredAlias => write!(f, "🏷️  Set Preferred Alias"),
+            ApplicationSettingsChoice::SetSandboxDirectory => write!(f, "🔒 Set Sandbox Directory"),
+            ApplicationSettingsChoice::ToggleSandboxForMain => write!(f, "🔒 Toggle Sandbox for Main Agent"),
             ApplicationSettingsChoice::Back => write!(f, "⬅️  Back"),
+        }
+    }
+}
+
+/// ============================================================================
+/// MEMORY MANAGEMENT SUBMENU
+/// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MemoryManagementChoice {
+    ViewMemoryStats,      // Show memory count, size, etc
+    ExportArchive,        // Export all memories to JSON file
+    DeleteAll,            // Delete all memories (with confirmation)
+    ImportMemories,       // Import memories from JSON file
+    Back,
+}
+
+impl std::fmt::Display for MemoryManagementChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemoryManagementChoice::ViewMemoryStats => write!(f, "📊 View Memory Statistics"),
+            MemoryManagementChoice::ExportArchive => write!(f, "💾 Export/Archive Memories"),
+            MemoryManagementChoice::DeleteAll => write!(f, "🗑️  Delete All Memories"),
+            MemoryManagementChoice::ImportMemories => write!(f, "📥 Import Memories"),
+            MemoryManagementChoice::Back => write!(f, "⬅️  Back"),
         }
     }
 }
@@ -311,6 +342,7 @@ pub fn show_settings_dashboard(config: &Config) -> Result<SettingsMenuChoice> {
         SettingsMenuChoice::TestMainConnection,
         SettingsMenuChoice::TestWorkerConnection,
         SettingsMenuChoice::WebSearchSettings,
+        SettingsMenuChoice::MemoryManagement,
         SettingsMenuChoice::ApplicationSettings,
         SettingsMenuChoice::Back,
     ];
@@ -380,16 +412,72 @@ pub fn show_worker_llm_settings_menu(_config: &Config) -> Result<WorkerLLMSettin
 /// APPLICATION SETTINGS MENU
 /// ============================================================================
 
-pub fn show_application_settings_menu() -> Result<ApplicationSettingsChoice> {
+pub fn show_application_settings_menu(config: &Config) -> Result<ApplicationSettingsChoice> {
     print!("\x1B[2J\x1B[1;1H");
     
     println!("\n{}", Style::new().bold().apply_to("Application Settings"));
     println!("{}", Style::new().dim().apply_to("─".repeat(40)));
     
+    // Show current sandbox status
+    let agent_config = mylm_core::config::agent::AgentConfig::load();
+    if let Some(ref sandbox) = agent_config.security.sandbox_root {
+        println!("\n🔒 Current sandbox: {}", sandbox.display());
+        println!("   Apply to main agent: {}", if agent_config.security.sandbox_all { "✓" } else { "✗" });
+    } else {
+        println!("\n🔒 Sandbox: disabled");
+    }
+    println!();
+    
     let choices = vec![
         ApplicationSettingsChoice::ToggleTmuxAutostart,
         ApplicationSettingsChoice::SetPreferredAlias,
+        ApplicationSettingsChoice::SetSandboxDirectory,
+        ApplicationSettingsChoice::ToggleSandboxForMain,
         ApplicationSettingsChoice::Back,
+    ];
+    
+    let selection = Select::new()
+        .with_prompt("Select option")
+        .items(&choices)
+        .default(0)
+        .interact()?;
+    
+    Ok(choices[selection])
+}
+
+/// ============================================================================
+/// MEMORY MANAGEMENT MENU
+/// ============================================================================
+
+pub fn show_memory_management_menu() -> Result<MemoryManagementChoice> {
+    print!("\x1B[2J\x1B[1;1H");
+    
+    println!("\n{}", Style::new().bold().apply_to("Memory Management"));
+    println!("{}", Style::new().dim().apply_to("─".repeat(40)));
+    
+    // Show memory path
+    let memory_path = dirs::data_dir()
+        .map(|d| d.join("mylm").join("memory"))
+        .unwrap_or_else(|| std::path::PathBuf::from("unknown"));
+    println!("\n📁 Memory storage: {}", memory_path.display());
+    
+    // Try to get memory count
+    let memory_count = std::fs::read_dir(&memory_path)
+        .ok()
+        .map(|entries| entries.filter(|e| e.is_ok()).count())
+        .unwrap_or(0);
+    
+    if memory_count > 0 {
+        println!("   Storage files: ~{}", memory_count);
+    }
+    println!();
+    
+    let choices = vec![
+        MemoryManagementChoice::ViewMemoryStats,
+        MemoryManagementChoice::ExportArchive,
+        MemoryManagementChoice::DeleteAll,
+        MemoryManagementChoice::ImportMemories,
+        MemoryManagementChoice::Back,
     ];
     
     let selection = Select::new()
@@ -1768,6 +1856,138 @@ fn print_hub_banner() {
     );
     println!("  {}", dim.apply_to("Terminal AI Assistant"));
     println!();
+}
+
+/// ============================================================================
+/// SANDBOX SETTINGS HANDLERS
+/// ============================================================================
+
+/// Set sandbox directory
+pub fn set_sandbox_directory() -> Result<()> {
+    use std::path::PathBuf;
+    
+    print!("\x1B[2J\x1B[1;1H");
+    
+    println!("\n{}", Style::new().bold().apply_to("🔒 Sandbox Directory"));
+    println!("{}", Style::new().dim().apply_to("─".repeat(50)));
+    
+    // Load current agent config
+    let mut agent_config = mylm_core::config::agent::AgentConfig::load();
+    
+    let current = agent_config.security.sandbox_root
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "(not set - sandbox disabled)".to_string());
+    
+    println!("\n  Current: {}", Style::new().green().apply_to(&current));
+    println!("\n  {}", Style::new().dim().apply_to(
+        "The sandbox restricts shell commands to this directory and below.\n\
+         Leave empty to disable sandbox (no restrictions).\n\
+         Example: /home/edward/workspace"
+    ));
+    println!();
+    
+    let input: String = Input::new()
+        .with_prompt("Sandbox directory (empty to disable)")
+        .allow_empty(true)
+        .interact()?;
+    
+    let new_path = if input.trim().is_empty() {
+        None
+    } else {
+        let path = PathBuf::from(input.trim());
+        // Expand ~ to home directory
+        let path = if path.starts_with("~") {
+            dirs::home_dir()
+                .map(|home| home.join(path.strip_prefix("~").unwrap_or(&path)))
+                .unwrap_or(path)
+        } else {
+            path
+        };
+        
+        // Validate path exists
+        if !path.exists() {
+            println!("\n⚠️  Warning: Directory does not exist yet: {}", path.display());
+            if !dialoguer::Confirm::new()
+                .with_prompt("Create this directory?")
+                .default(true)
+                .interact()? 
+            {
+                return Ok(());
+            }
+            std::fs::create_dir_all(&path)?;
+        }
+        
+        Some(path)
+    };
+    
+    agent_config.security.sandbox_root = new_path;
+    
+    // Save to agent.toml
+    if let Some(config_dir) = dirs::config_dir() {
+        let path = config_dir.join("mylm").join("agent.toml");
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        agent_config.to_file(&path)?;
+    }
+    
+    let status = if agent_config.security.sandbox_root.is_some() {
+        "enabled"
+    } else {
+        "disabled"
+    };
+    println!("\n✅ Sandbox {}", Style::new().green().apply_to(status));
+    
+    Ok(())
+}
+
+/// Toggle sandbox for main agent
+pub fn toggle_sandbox_for_main() -> Result<()> {
+    use std::path::PathBuf;
+    
+    print!("\x1B[2J\x1B[1;1H");
+    
+    println!("\n{}", Style::new().bold().apply_to("🔒 Sandbox for Main Agent"));
+    println!("{}", Style::new().dim().apply_to("─".repeat(50)));
+    
+    // Load current agent config
+    let mut agent_config = mylm_core::config::agent::AgentConfig::load();
+    
+    // Check if sandbox is configured
+    if agent_config.security.sandbox_root.is_none() {
+        println!("\n⚠️  No sandbox directory configured.");
+        println!("   Please set a sandbox directory first.\n");
+        
+        dialoguer::Input::<String>::new()
+            .with_prompt("Press Enter to continue")
+            .allow_empty(true)
+            .interact()?;
+        return Ok(());
+    }
+    
+    let current = agent_config.security.sandbox_all;
+    let status = if current { "enabled" } else { "disabled" };
+    
+    println!("\n  Current: {}", Style::new().green().apply_to(status));
+    println!("\n  {}", Style::new().dim().apply_to(
+        "When enabled, the main agent is also restricted by the sandbox.\n\
+         When disabled, only workers are sandboxed (main agent has full access)."
+    ));
+    println!();
+    
+    let new_value = !current;
+    agent_config.security.sandbox_all = new_value;
+    
+    // Save to agent.toml
+    if let Some(config_dir) = dirs::config_dir() {
+        let path = config_dir.join("mylm").join("agent.toml");
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        agent_config.to_file(&path)?;
+    }
+    
+    let new_status = if new_value { "enabled" } else { "disabled" };
+    println!("\n✅ Sandbox for main agent {}", Style::new().green().apply_to(new_status));
+    
+    Ok(())
 }
 
 /// Print config banner

@@ -16,7 +16,7 @@ mod tests {
         AgentSessionFactory,
         WorkerSessionConfig,
         runtime::orchestrator::commonbox::{Commonbox, JobResult},
-        runtime::orchestrator::{OutputEvent, UserInput},
+        runtime::orchestrator::{OutputEvent, UserInput, Session},
         runtime::core::{LLMCapability, Capability, RuntimeContext, LLMError, StreamChunk},
         tools::ToolRegistry,
         types::intents::LLMRequest,

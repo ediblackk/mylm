@@ -123,8 +123,115 @@ impl std::fmt::Display for Memory {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A memory with its relevance score
+#[derive(Debug, Clone)]
+pub struct ScoredMemory {
+    pub memory: Memory,
+    pub score: f32,
+}
 
+/// Calculate lexical score between query and content
+/// 
+/// Returns a value from 0.0 (no word matches) to 1.0 (all words match)
+fn lexical_score(query: &str, content: &str) -> f32 {
+    const STOP_WORDS: &[&str] = &[
+        "the", "a", "an", "is", "are", "was", "were", "be", "been",
+        "have", "has", "had", "do", "does", "did", "will", "would",
+        "this", "that", "these", "those", "and", "or", "but", "in",
+        "on", "at", "to", "for", "of", "with", "by", "from",
+        "it", "its", "it's", "they", "them", "their", "i", "you", "he", "she",
+        "we", "us", "our", "me", "him", "her", "my", "your",
+    ];
+    
+    let query_lower = query.to_lowercase();
+    let content_lower = content.to_lowercase();
+    
+    // Extract meaningful words from query (3+ chars, not stop words)
+    let query_words: Vec<&str> = query_lower
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| w.len() >= 3 && !STOP_WORDS.contains(w))
+        .collect();
+    
+    if query_words.is_empty() {
+        return 0.0;
+    }
+    
+    // Count matches
+    let matches = query_words.iter()
+        .filter(|&&word| content_lower.contains(word))
+        .count();
+    
+    matches as f32 / query_words.len() as f32
+}
+
+/// Calculate recency score based on memory age
+/// 
+/// Returns 1.0 for very recent, decaying to 0.2 for old memories
+fn recency_score(created_at: i64) -> f32 {
+    let now = chrono::Utc::now().timestamp();
+    let age_hours = (now - created_at).max(0) as f32 / 3600.0;
+    
+    // Step function decay
+    match age_hours {
+        h if h < 1.0 => 1.0,      // < 1 hour
+        h if h < 24.0 => 0.8,     // < 1 day
+        h if h < 168.0 => 0.6,    // < 1 week
+        h if h < 720.0 => 0.4,    // < 1 month
+        _ => 0.2,                  // older
+    }
+}
+
+/// Calculate importance score based on memory type and content
+/// 
+/// Returns 0.0 to 1.0, higher for more important memories
+fn importance_score(memory: &Memory) -> f32 {
+    // Base score by memory type
+    let base = match memory.r#type {
+        MemoryType::Bugfix => 1.0,
+        MemoryType::Decision => 0.9,
+        MemoryType::Discovery => 0.7,
+        MemoryType::UserNote => 0.6,
+        MemoryType::Command => 0.5,
+        MemoryType::SshExecution => 0.5,
+    };
+    
+    let content_lower = memory.content.to_lowercase();
+    let mut boost = 0.0;
+    
+    // User corrections (high value)
+    if content_lower.contains("wrong") 
+        || content_lower.contains("incorrect")
+        || content_lower.contains("not correct")
+        || content_lower.contains("actually,") {
+        boost += 0.2;
+    }
+    
+    // User preferences
+    if content_lower.contains("prefer") 
+        || content_lower.contains("i like")
+        || content_lower.contains("i want")
+        || content_lower.contains("always")
+        || content_lower.contains("never") {
+        boost += 0.15;
+    }
+    
+    // Problem resolution
+    if content_lower.contains("error") && content_lower.contains("fix") {
+        boost += 0.1;
+    }
+    
+    // Check metadata for explicit importance
+    if let Some(ref metadata) = memory.metadata {
+        if let Some(imp) = metadata.get("importance").and_then(|v| v.as_f64()) {
+            boost += imp as f32 * 0.1;
+        }
+    }
+    
+    (base + boost).min(1.0)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryCategory {
     pub id: String,
     pub name: String,
@@ -460,7 +567,9 @@ impl VectorStore {
         self.add_memory_typed_with_id(id, content, memory_type, session_id, metadata, category_id, summary).await
     }
 
-    pub async fn add_memory_typed_with_id(
+    /// Internal method: Add memory directly without deduplication
+    /// Use `add_memory_typed_with_id` for automatic deduplication
+    async fn add_memory_typed_with_id_internal(
         &self,
         id: i64,
         content: &str,
@@ -528,8 +637,181 @@ impl VectorStore {
 
         Ok(())
     }
+    
+    /// Add memory with automatic deduplication (DEFAULT behavior)
+    /// 
+    /// # Deduplication Logic
+    /// - Similarity > 0.95: Skip as duplicate
+    /// - Similarity > 0.85: Reinforce existing memory
+    /// - Similarity < 0.85: Add as new memory
+    pub async fn add_memory_typed_with_id(
+        &self,
+        id: i64,
+        content: &str,
+        memory_type: MemoryType,
+        session_id: Option<String>,
+        metadata: Option<serde_json::Value>,
+        category_id: Option<String>,
+        summary: Option<String>,
+    ) -> Result<()> {
+        // Use deduplication logic
+        match self.add_memory_deduplicated(
+            content,
+            memory_type,
+            session_id,
+            metadata,
+            category_id,
+            summary,
+        ).await? {
+            Some(_) => Ok(()),
+            None => Ok(()), // Duplicate skipped
+        }
+    }
+    
+    /// Calculate cosine similarity between two vectors
+    fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+        let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+        dot / (norm_a * norm_b)
+    }
+    
+    /// Add memory with deduplication check
+    /// 
+    /// # Deduplication Logic
+    /// - Similarity > 0.95: Skip as duplicate
+    /// - Similarity > 0.85: Update existing memory (reinforce)
+    /// - Similarity < 0.85: Add as new memory
+    /// 
+    /// # Returns
+    /// - Ok(None): Memory was skipped as duplicate
+    /// - Ok(Some(id)): ID of new or updated memory
+    pub async fn add_memory_deduplicated(
+        &self,
+        content: &str,
+        memory_type: MemoryType,
+        session_id: Option<String>,
+        metadata: Option<serde_json::Value>,
+        category_id: Option<String>,
+        summary: Option<String>,
+    ) -> Result<Option<i64>> {
+        // Generate embedding for the new content
+        let model = self.embedding_model.clone();
+        let text = summary.clone().unwrap_or_else(|| content.to_string());
+        
+        let embeddings = task::spawn_blocking(move || {
+            let mut model = model.blocking_lock();
+            model.embed(vec![text], None)
+        }).await.context("Join error during embedding")?
+        .context("Embedding failed")?;
+        
+        let new_embedding = embeddings.first().context("No embedding generated")?;
+        
+        // Search for similar existing memories
+        let similar = self.search_memory_semantic(content, 5).await?;
+        
+        // Check for duplicates
+        for memory in similar {
+            if let Some(ref mem_embedding) = memory.embedding {
+                let similarity = Self::cosine_similarity(new_embedding, mem_embedding);
+                
+                if similarity > 0.95 {
+                    // High similarity - skip as duplicate
+                    info!("[DEDUP] Skipping duplicate memory (similarity: {:.3})", similarity);
+                    return Ok(None);
+                } else if similarity > 0.85 {
+                    // Medium similarity - reinforce existing memory
+                    info!("[DEDUP] Reinforcing existing memory {} (similarity: {:.3})", memory.id, similarity);
+                    
+                    // Update metadata to track reinforcement
+                    let mut updated_metadata = memory.metadata.clone().unwrap_or_default();
+                    if let Some(obj) = updated_metadata.as_object_mut() {
+                        let count = obj.get("reinforcement_count")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) + 1;
+                        obj.insert("reinforcement_count".to_string(), serde_json::json!(count));
+                        obj.insert("last_reinforced".to_string(), serde_json::json!(chrono::Utc::now().timestamp()));
+                    }
+                    
+                    // Note: LanceDB doesn't support easy updates, so we just log for now
+                    // In production, would: delete old + insert updated
+                    return Ok(Some(memory.id));
+                }
+            }
+        }
+        
+        // No similar memory found - add new
+        let id = chrono::Utc::now().timestamp_nanos_opt()
+            .unwrap_or_else(|| chrono::Utc::now().timestamp());
+        
+        self.add_memory_typed_with_id_internal(
+            id,
+            content,
+            memory_type,
+            session_id,
+            metadata,
+            category_id,
+            summary,
+        ).await?;
+        
+        Ok(Some(id))
+    }
 
+    /// Search memories using hybrid scoring (semantic + lexical + recency + importance)
+    /// 
+    /// # Arguments
+    /// * `query` - Search query
+    /// * `limit` - Maximum number of results to return
+    /// 
+    /// # Returns
+    /// Memories ranked by combined relevance score
     pub async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<Memory>> {
+        // Get more candidates for re-ranking
+        let candidates = self.search_memory_semantic(query, limit * 3).await?;
+        
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // Score and re-rank candidates
+        let mut scored: Vec<ScoredMemory> = candidates
+            .into_iter()
+            .enumerate()
+            .map(|(rank, memory)| {
+                // Semantic score: 1.0 for first, decaying by rank
+                let semantic_score = 1.0 / (1.0 + rank as f32 * 0.1);
+                
+                // Lexical score: word match ratio
+                let lexical_score = lexical_score(query, &memory.content);
+                
+                // Recency score: newer is better
+                let recency_score = recency_score(memory.created_at);
+                
+                // Importance score: based on memory type and content
+                let importance_score = importance_score(&memory);
+                
+                // Combined score with weights
+                let final_score = 
+                    semantic_score * 0.50 +
+                    lexical_score * 0.25 +
+                    recency_score * 0.15 +
+                    importance_score * 0.10;
+                
+                ScoredMemory { memory, score: final_score }
+            })
+            .collect();
+        
+        // Sort by score descending
+        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        
+        // Take top N
+        scored.truncate(limit);
+        
+        Ok(scored.into_iter().map(|s| s.memory).collect())
+    }
+    
+    /// Pure semantic search via LanceDB (internal use)
+    async fn search_memory_semantic(&self, query: &str, limit: usize) -> Result<Vec<Memory>> {
         let model = self.embedding_model.clone();
         let text = query.to_string();
         
@@ -617,7 +899,8 @@ impl VectorStore {
         memory_type: MemoryType,
         limit: usize,
     ) -> Result<Vec<Memory>> {
-        let all_results = self.search_memory(query, limit * 3).await?;
+        // Get results from hybrid search, then filter by type
+        let all_results = self.search_memory(query, limit * 2).await?;
         Ok(all_results.into_iter().filter(|r| r.r#type == memory_type).take(limit).collect())
     }
 
@@ -795,6 +1078,15 @@ impl VectorStore {
 
     /// Get recent memories ordered by created_at (newest first)
     pub async fn get_recent_memories(&self, limit: usize) -> Result<Vec<Memory>> {
+        self.get_recent_memories_with_offset(limit, 0).await
+    }
+    
+    /// Get recent memories with offset pagination support
+    /// 
+    /// # Arguments
+    /// * `limit` - Maximum number of memories to return
+    /// * `offset` - Number of memories to skip (for pagination)
+    pub async fn get_recent_memories_with_offset(&self, limit: usize, offset: usize) -> Result<Vec<Memory>> {
         let table = self.get_or_create_table("memories", self.get_memory_schema()).await?;
         
         // Query all memories and sort by created_at descending
@@ -853,9 +1145,12 @@ impl VectorStore {
         // Sort by created_at descending (newest first)
         memories.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         
-        // Limit results
-        memories.truncate(limit);
-        Ok(memories)
+        // Apply offset and limit
+        let start = offset.min(memories.len());
+        let end = (offset + limit).min(memories.len());
+        let paginated: Vec<Memory> = memories.into_iter().skip(start).take(limit).collect();
+        
+        Ok(paginated)
     }
 
     /// Get a single memory by ID

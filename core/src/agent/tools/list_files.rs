@@ -5,6 +5,7 @@ use crate::agent::runtime::core::RuntimeContext;
 use crate::agent::runtime::core::ToolError;
 use crate::agent::types::intents::ToolCall;
 use crate::agent::types::events::ToolResult;
+use crate::agent::tools::expand_tilde;
 
 use std::path::Path;
 
@@ -19,7 +20,8 @@ impl ListFilesTool {
 
     async fn list_files(&self, path: &str) -> Result<ToolResult, ToolError> {
         let path = if path.is_empty() { "." } else { path };
-        let dir_path = Path::new(path);
+        let path = expand_tilde(path);
+        let dir_path = Path::new(&path);
 
         // Validate it's a directory
         if !dir_path.is_dir() {

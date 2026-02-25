@@ -6,6 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKi
 
 use crate::tui::app::state::{AppState, AppStateContainer, Focus};
 use crate::tui::app::types::TimestampedChatMessage;
+use mylm_core::memory::graph::MemoryGraph;
 
 /// Handle key events
 pub async fn handle_key_event(app: &mut AppStateContainer, key: KeyEvent) -> LoopAction {
@@ -150,20 +151,70 @@ pub async fn handle_key_event(app: &mut AppStateContainer, key: KeyEvent) -> Loo
             app.set_state(AppState::ConfirmExit);
             return LoopAction::Continue;
         }
-        // Memory view: real-time filter input
-        KeyCode::Char(c) if app.show_memory_view => {
+        // Memory view: ACTION KEYS (must come BEFORE filter input)
+        // 'r' to reload memories
+        KeyCode::Char('r') if app.show_memory_view => {
+            app.memory_search_query.clear();
+            app.memory_current_page = 0;
+            app.memory_graph_scroll = 0;
+            load_memory_graph(app).await;
+            return LoopAction::Continue;
+        }
+        // 'd' to delete selected memory
+        KeyCode::Char('d') if app.show_memory_view => {
+            delete_selected_memory(app).await;
+            return LoopAction::Continue;
+        }
+        // 'D' (shift+d) to delete all filtered memories (bulk cleanup)
+        KeyCode::Char('D') if app.show_memory_view => {
+            delete_all_filtered_memories(app).await;
+            return LoopAction::Continue;
+        }
+        // 's' to star/unstar selected memory
+        KeyCode::Char('s') if app.show_memory_view => {
+            star_selected_memory(app).await;
+            return LoopAction::Continue;
+        }
+        // 'e' to export selected memory
+        KeyCode::Char('e') if app.show_memory_view => {
+            export_selected_memory(app);
+            return LoopAction::Continue;
+        }
+        // Memory view: real-time filter input (lowercase letters only, not action keys)
+        KeyCode::Char(c) if app.show_memory_view && c.is_lowercase() && !matches!(c, 'r' | 'd' | 's' | 'e') => {
             app.memory_search_query.push(c);
-            // Apply filter in real-time
+            filter_memory_graph(app).await;
+            return LoopAction::Continue;
+        }
+        KeyCode::Char(c) if app.show_memory_view && (c.is_numeric() || c.is_uppercase() || matches!(c, '-' | '_' | ' ' | '.' | '/')) => {
+            app.memory_search_query.push(c);
             filter_memory_graph(app).await;
             return LoopAction::Continue;
         }
         KeyCode::Backspace if app.show_memory_view => {
             app.memory_search_query.pop();
-            // Apply filter in real-time (or reload all if empty)
             if app.memory_search_query.is_empty() {
                 load_memory_graph(app).await;
             } else {
                 filter_memory_graph(app).await;
+            }
+            return LoopAction::Continue;
+        }
+        // Memory view: SHIFT+PageUp/Down for pagination
+        KeyCode::PageUp if app.show_memory_view && key.modifiers.contains(KeyModifiers::SHIFT) => {
+            if app.memory_current_page > 0 {
+                app.memory_current_page -= 1;
+                app.memory_graph_scroll = 0; // Reset scroll to top of new page
+                load_memory_graph(app).await;
+            }
+            return LoopAction::Continue;
+        }
+        KeyCode::PageDown if app.show_memory_view && key.modifiers.contains(KeyModifiers::SHIFT) => {
+            let total_pages = (app.memory_total_count + app.memory_page_size - 1) / app.memory_page_size;
+            if app.memory_current_page + 1 < total_pages {
+                app.memory_current_page += 1;
+                app.memory_graph_scroll = 0; // Reset scroll to top of new page
+                load_memory_graph(app).await;
             }
             return LoopAction::Continue;
         }
@@ -188,12 +239,6 @@ pub async fn handle_key_event(app: &mut AppStateContainer, key: KeyEvent) -> Loo
         KeyCode::PageDown if app.show_memory_view => {
             let max_scroll = app.memory_graph.nodes.len().saturating_sub(1);
             app.memory_graph_scroll = (app.memory_graph_scroll + 10).min(max_scroll);
-            return LoopAction::Continue;
-        }
-        // Memory view: 'r' to reload memories
-        KeyCode::Char('r') if app.show_memory_view => {
-            app.memory_search_query.clear();
-            load_memory_graph(app).await;
             return LoopAction::Continue;
         }
         _ => {}
@@ -359,45 +404,82 @@ fn handle_terminal_focus(app: &mut AppStateContainer, key: KeyEvent) -> LoopActi
 }
 
 fn handle_jobs_focus(app: &mut AppStateContainer, key: KeyEvent) -> LoopAction {
-    match key.code {
-        KeyCode::Up => {
-            if let Some(idx) = app.selected_job_index {
-                if idx > 0 {
-                    app.selected_job_index = Some(idx - 1);
+    // When job detail is shown, handle scrolling instead of selection
+    if app.show_job_detail {
+        match key.code {
+            KeyCode::Up => {
+                app.job_scroll = app.job_scroll.saturating_sub(1);
+                LoopAction::Continue
+            }
+            KeyCode::Down => {
+                app.job_scroll += 1;
+                LoopAction::Continue
+            }
+            KeyCode::PageUp => {
+                app.job_scroll = app.job_scroll.saturating_sub(10);
+                LoopAction::Continue
+            }
+            KeyCode::PageDown => {
+                app.job_scroll += 10;
+                LoopAction::Continue
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                app.show_job_detail = false;
+                app.job_scroll = 0; // Reset scroll when closing
+                LoopAction::Continue
+            }
+            _ => LoopAction::Continue,
+        }
+    } else {
+        match key.code {
+            KeyCode::Up => {
+                if let Some(idx) = app.selected_job_index {
+                    if idx > 0 {
+                        app.selected_job_index = Some(idx - 1);
+                    }
+                } else {
+                    let jobs = app.job_registry.list_all_jobs();
+                    if !jobs.is_empty() {
+                        app.selected_job_index = Some(0);
+                    }
                 }
-            } else {
+                LoopAction::Continue
+            }
+            KeyCode::Down => {
                 let jobs = app.job_registry.list_all_jobs();
-                if !jobs.is_empty() {
+                if let Some(idx) = app.selected_job_index {
+                    if idx + 1 < jobs.len() {
+                        app.selected_job_index = Some(idx + 1);
+                    }
+                } else if !jobs.is_empty() {
                     app.selected_job_index = Some(0);
                 }
+                LoopAction::Continue
             }
-            LoopAction::Continue
-        }
-        KeyCode::Down => {
-            let jobs = app.job_registry.list_all_jobs();
-            if let Some(idx) = app.selected_job_index {
-                if idx + 1 < jobs.len() {
-                    app.selected_job_index = Some(idx + 1);
+            KeyCode::Enter => {
+                app.show_job_detail = true;
+                LoopAction::Continue
+            }
+            // Shift+Up/Down scrolls the jobs list without changing selection
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                app.jobs_list_scroll = app.jobs_list_scroll.saturating_sub(1);
+                LoopAction::Continue
+            }
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                app.jobs_list_scroll += 1;
+                LoopAction::Continue
+            }
+            KeyCode::Delete | KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(idx) = app.selected_job_index {
+                    let jobs = app.job_registry.list_all_jobs();
+                    if let Some(job) = jobs.get(idx) {
+                        app.job_registry.cancel_job(&job.id);
+                    }
                 }
-            } else if !jobs.is_empty() {
-                app.selected_job_index = Some(0);
+                LoopAction::Continue
             }
-            LoopAction::Continue
+            _ => LoopAction::Continue,
         }
-        KeyCode::Enter => {
-            app.show_job_detail = true;
-            LoopAction::Continue
-        }
-        KeyCode::Delete | KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if let Some(idx) = app.selected_job_index {
-                let jobs = app.job_registry.list_all_jobs();
-                if let Some(job) = jobs.get(idx) {
-                    app.job_registry.cancel_job(&job.id);
-                }
-            }
-            LoopAction::Continue
-        }
-        _ => LoopAction::Continue,
     }
 }
 
@@ -439,34 +521,22 @@ pub fn handle_mouse_event(app: &mut AppStateContainer, mouse: MouseEvent) {
 /// Load memories into the memory graph for display (F3 view)
 /// 
 /// This function is called when F3 is pressed to toggle the memory view.
-/// It loads recent memories from the memory store and populates the graph.
+/// Uses the shared memory manager from app state (initialized once at startup).
 async fn load_memory_graph(app: &mut AppStateContainer) {
     use mylm_core::memory::graph::{MemoryGraph, MemoryGraphNode};
-    use mylm_core::agent::memory::AgentMemoryManager;
-    use mylm_core::config::agent::MemoryConfig;
     
     // Check if memory feature is enabled in config
-    // Note: app.config.features.memory is a bool in the store::Config type
     if !app.config.features.memory {
         mylm_core::debug_log!("[MEMORY_VIEW] Memory feature is disabled in config");
         app.memory_graph = MemoryGraph::default();
         return;
     }
     
-    // Create memory config from the feature flag
-    // TODO: In the future, we should use a unified MemoryConfig throughout the codebase
-    let memory_config = MemoryConfig {
-        enabled: true,
-        ..MemoryConfig::default()
-    };
-    
-    // Create memory manager from config
-    // This is a temporary solution - in the future, the memory manager should be 
-    // shared between the agent and the TUI
-    let memory_manager = match AgentMemoryManager::new(memory_config).await {
-        Ok(mm) => mm,
-        Err(e) => {
-            mylm_core::warn_log!("[MEMORY_VIEW] Failed to create memory manager: {}", e);
+    // Use the shared memory manager from app state (initialized once)
+    let memory_manager = match app.memory_manager.as_ref() {
+        Some(mm) => mm,
+        None => {
+            mylm_core::warn_log!("[MEMORY_VIEW] Memory manager not available");
             app.memory_graph = MemoryGraph::default();
             return;
         }
@@ -475,10 +545,10 @@ async fn load_memory_graph(app: &mut AppStateContainer) {
     // Get total memory count first
     let total_count = memory_manager.stats().await.map(|s| s.total_memories).unwrap_or(0);
     
-    // Load recent memories - load up to 500 for display
-    // This is a trade-off: more memories = slower UI, but users want to see all
-    let limit = 500;
-    let memories = match memory_manager.get_recent_memories(limit).await {
+    // Load recent memories with pagination
+    let limit = app.memory_page_size;
+    let offset = app.memory_current_page * app.memory_page_size;
+    let memories = match memory_manager.get_recent_memories_with_offset(limit, offset).await {
         Ok(m) => m,
         Err(e) => {
             mylm_core::warn_log!("[MEMORY_VIEW] Failed to load memories: {}", e);
@@ -493,15 +563,18 @@ async fn load_memory_graph(app: &mut AppStateContainer) {
         return;
     }
     
-    if memories.len() >= limit && total_count > limit {
-        mylm_core::info_log!("[MEMORY_VIEW] Loaded {} memories ({} total in store - showing first {})", 
-            memories.len(), total_count, limit);
+    let showing_info = if total_count > limit {
+        format!("page {} of ~{} ({} per page)", 
+            app.memory_current_page + 1, 
+            (total_count + limit - 1) / limit,
+            limit)
     } else {
-        mylm_core::info_log!("[MEMORY_VIEW] Loaded {} memories ({} total)", memories.len(), total_count);
-    }
+        format!("{} total", memories.len())
+    };
+    
+    mylm_core::info_log!("[MEMORY_VIEW] Loaded {} memories ({})", memories.len(), showing_info);
     
     // Build simple graph nodes from memories
-    // For now, we don't compute connections - just display as list
     let nodes: Vec<MemoryGraphNode> = memories
         .into_iter()
         .map(|memory| MemoryGraphNode {
@@ -510,28 +583,44 @@ async fn load_memory_graph(app: &mut AppStateContainer) {
         })
         .collect();
     
-    app.memory_graph = MemoryGraph { nodes };
+    let graph = MemoryGraph { nodes };
+    
+    // Store both the display graph and the original for filtering
+    app.memory_graph_original = Some(graph.clone());
+    app.memory_graph = graph;
     app.memory_total_count = total_count;
+    
+    // Reset filter state
+    app.memory_search_query.clear();
 }
 
 /// Filter memory graph based on search query
 /// 
-/// This performs client-side filtering on the loaded memories.
-/// For large memory stores, we might want to use semantic search instead.
+/// This performs client-side filtering on the ORIGINAL loaded memories,
+/// preserving the full dataset so clearing the filter is instant (no DB reload).
 async fn filter_memory_graph(app: &mut AppStateContainer) {
     use mylm_core::memory::graph::{MemoryGraph, MemoryGraphNode};
     
     let query = app.memory_search_query.to_lowercase();
     if query.is_empty() {
-        // Reload all memories
-        load_memory_graph(app).await;
+        // Clear filter: restore from original (no DB hit!)
+        if let Some(original) = app.memory_graph_original.as_ref() {
+            app.memory_graph = original.clone();
+            mylm_core::debug_log!("[MEMORY_VIEW] Filter cleared, restored {} memories from cache", 
+                app.memory_graph.nodes.len());
+        }
+        app.memory_graph_scroll = 0;
         return;
     }
     
     mylm_core::info_log!("[MEMORY_VIEW] Filtering memories with query: '{}'", query);
     
+    // Get source: if we have original, filter from that; otherwise use current
+    let source = app.memory_graph_original.as_ref()
+        .unwrap_or(&app.memory_graph);
+    
     // Filter nodes that match the query
-    let filtered_nodes: Vec<MemoryGraphNode> = app.memory_graph.nodes
+    let filtered_nodes: Vec<MemoryGraphNode> = source.nodes
         .iter()
         .filter(|node| {
             let content_match = node.memory.content.to_lowercase().contains(&query);
@@ -546,13 +635,154 @@ async fn filter_memory_graph(app: &mut AppStateContainer) {
         .collect();
     
     let filtered_count = filtered_nodes.len();
-    let total_loaded = app.memory_graph.nodes.len();
+    let total_loaded = source.nodes.len();
     
     mylm_core::info_log!("[MEMORY_VIEW] Filtered {} -> {} memories", total_loaded, filtered_count);
     
-    // Replace with filtered graph
+    // Replace display graph with filtered results (original is preserved)
     app.memory_graph = MemoryGraph { nodes: filtered_nodes };
     app.memory_graph_scroll = 0; // Reset scroll to top
+}
+
+/// Delete the currently selected memory
+async fn delete_selected_memory(app: &mut AppStateContainer) {
+    if app.memory_graph.nodes.is_empty() {
+        return;
+    }
+    
+    let idx = app.memory_graph_scroll.clamp(0, app.memory_graph.nodes.len() - 1);
+    let memory_id = app.memory_graph.nodes[idx].memory.id;
+    
+    // Get memory manager
+    let Some(manager) = app.memory_manager.as_ref() else {
+        mylm_core::warn_log!("[MEMORY_VIEW] Cannot delete: memory manager not available");
+        return;
+    };
+    
+    match manager.delete_memory(memory_id).await {
+        Ok(_) => {
+            mylm_core::info_log!("[MEMORY_VIEW] Deleted memory {}", memory_id);
+            // Remove from local graph
+            app.memory_graph.nodes.remove(idx);
+            // Also remove from original if present
+            if let Some(ref mut original) = app.memory_graph_original {
+                original.nodes.retain(|n| n.memory.id != memory_id);
+            }
+            // Adjust scroll if needed
+            if app.memory_graph_scroll >= app.memory_graph.nodes.len() && app.memory_graph_scroll > 0 {
+                app.memory_graph_scroll -= 1;
+            }
+            app.memory_total_count = app.memory_total_count.saturating_sub(1);
+        }
+        Err(e) => {
+            mylm_core::warn_log!("[MEMORY_VIEW] Failed to delete memory {}: {}", memory_id, e);
+        }
+    }
+}
+
+/// Star or unstar the currently selected memory
+async fn star_selected_memory(app: &mut AppStateContainer) {
+    if app.memory_graph.nodes.is_empty() {
+        return;
+    }
+    
+    let idx = app.memory_graph_scroll.clamp(0, app.memory_graph.nodes.len() - 1);
+    let node = &mut app.memory_graph.nodes[idx];
+    let memory_id = node.memory.id;
+    
+    // Toggle star by adding/removing "starred" category
+    let is_starred = node.memory.category_id.as_ref() == Some(&"starred".to_string());
+    let new_category = if is_starred { "" } else { "starred" };
+    
+    // Get memory manager
+    let Some(manager) = app.memory_manager.as_ref() else {
+        mylm_core::warn_log!("[MEMORY_VIEW] Cannot star: memory manager not available");
+        return;
+    };
+    
+    match manager.vector_store().update_memory_category(memory_id, new_category.to_string()).await {
+        Ok(_) => {
+            mylm_core::info_log!("[MEMORY_VIEW] {} memory {}", 
+                if is_starred { "Unstarred" } else { "Starred" }, memory_id);
+            // Update local copy
+            node.memory.category_id = if is_starred { None } else { Some("starred".to_string()) };
+            // Also update original if present
+            if let Some(ref mut original) = app.memory_graph_original {
+                if let Some(orig_node) = original.nodes.iter_mut().find(|n| n.memory.id == memory_id) {
+                    orig_node.memory.category_id = node.memory.category_id.clone();
+                }
+            }
+        }
+        Err(e) => {
+            mylm_core::warn_log!("[MEMORY_VIEW] Failed to star memory {}: {}", memory_id, e);
+        }
+    }
+}
+
+/// Export the currently selected memory to clipboard
+fn export_selected_memory(app: &mut AppStateContainer) {
+    if app.memory_graph.nodes.is_empty() {
+        return;
+    }
+    
+    let idx = app.memory_graph_scroll.clamp(0, app.memory_graph.nodes.len() - 1);
+    let memory = &app.memory_graph.nodes[idx].memory;
+    
+    let export_text = format!(
+        "Memory ID: {}\nType: {}\nTime: {}\n\nContent:\n{}",
+        memory.id,
+        memory.r#type,
+        chrono::DateTime::from_timestamp(memory.created_at, 0)
+            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+        memory.content
+    );
+    
+    // Copy to clipboard if available
+    if let Some(ref mut clipboard) = app.clipboard {
+        if clipboard.set_text(export_text).is_ok() {
+            mylm_core::info_log!("[MEMORY_VIEW] Exported memory {} to clipboard", memory.id);
+        } else {
+            mylm_core::warn_log!("[MEMORY_VIEW] Failed to copy to clipboard");
+        }
+    } else {
+        // Fallback: print to log
+        mylm_core::info_log!("[MEMORY_VIEW] Memory {} content:\n{}", memory.id, export_text);
+    }
+}
+
+/// Delete ALL memories matching the current filter (bulk cleanup)
+async fn delete_all_filtered_memories(app: &mut AppStateContainer) {
+    if app.memory_graph.nodes.is_empty() {
+        return;
+    }
+    
+    let Some(manager) = app.memory_manager.as_ref() else {
+        mylm_core::warn_log!("[MEMORY_VIEW] Cannot bulk delete: memory manager not available");
+        return;
+    };
+    
+    let count = app.memory_graph.nodes.len();
+    mylm_core::info_log!("[MEMORY_VIEW] Bulk deleting {} memories", count);
+    
+    let mut deleted = 0;
+    let mut failed = 0;
+    
+    // Delete all currently visible memories
+    for node in &app.memory_graph.nodes {
+        match manager.delete_memory(node.memory.id).await {
+            Ok(_) => deleted += 1,
+            Err(_) => failed += 1,
+        }
+    }
+    
+    mylm_core::info_log!("[MEMORY_VIEW] Bulk delete complete: {} deleted, {} failed", deleted, failed);
+    
+    // Clear the graph and reload
+    app.memory_graph = MemoryGraph::default();
+    app.memory_graph_original = None;
+    app.memory_graph_scroll = 0;
+    app.memory_total_count = app.memory_total_count.saturating_sub(deleted);
 }
 
 /// Action to take after handling an event

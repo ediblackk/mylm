@@ -10,9 +10,11 @@ use mylm_core::config::Config;
 use mylm_core::agent::runtime::orchestrator::commonbox::Commonbox;
 
 mod hub;
+mod settings;
 mod tui;
 
-use hub::{HubChoice, SettingsMenuChoice, show_hub, show_settings_dashboard};
+use hub::HubChoice;
+use hub::show_hub;
 
 /// ============================================================================
 /// MAIN ENTRY
@@ -140,7 +142,7 @@ async fn run_hub_menu(config: &mut Config) -> Result<()> {
                 run_background_jobs_manager(config).await?;
             }
             HubChoice::Configuration => {
-                run_settings_dashboard(config).await?;
+                settings::run_settings_dashboard(config).await?;
             }
             HubChoice::Exit => {
                 println!("\n👋 Goodbye!\n");
@@ -149,249 +151,6 @@ async fn run_hub_menu(config: &mut Config) -> Result<()> {
         }
     }
     
-    Ok(())
-}
-
-/// ============================================================================
-/// SETTINGS DASHBOARD - REVISED with Main/Worker LLM comprehensive settings
-/// ============================================================================
-
-async fn run_settings_dashboard(config: &mut Config) -> Result<()> {
-    loop {
-        match show_settings_dashboard(config)? {
-            SettingsMenuChoice::ManageProviders => {
-                run_provider_menu(config).await?;
-            }
-            SettingsMenuChoice::MainLLMSettings => {
-                run_main_llm_settings(config).await?;
-            }
-            SettingsMenuChoice::WorkerLLMSettings => {
-                run_worker_llm_settings(config).await?;
-            }
-            SettingsMenuChoice::TestMainConnection => {
-                hub::test_profile_connection(config, &config.active_profile.clone()).await?;
-            }
-            SettingsMenuChoice::TestWorkerConnection => {
-                hub::test_profile_connection(config, "worker").await?;
-            }
-            SettingsMenuChoice::WebSearchSettings => {
-                run_web_search_menu(config).await?;
-            }
-            SettingsMenuChoice::ApplicationSettings => {
-                run_application_settings(config).await?;
-            }
-            SettingsMenuChoice::Back => break,
-        }
-    }
-    Ok(())
-}
-
-/// ============================================================================
-/// MAIN LLM SETTINGS - Comprehensive settings menu
-/// ============================================================================
-
-async fn run_main_llm_settings(config: &mut Config) -> Result<()> {
-    use hub::{MainLLMSettingsChoice, ContextSettingsChoice, AgenticSettingsChoice, PaCoReSubSettingsChoice};
-    
-    loop {
-        match hub::show_main_llm_settings_menu(config)? {
-            MainLLMSettingsChoice::SelectModel => {
-                hub::handle_select_main_model(config).await?;
-            }
-            MainLLMSettingsChoice::ContextSettings => {
-                loop {
-                    match hub::show_context_settings_menu(true)? {
-                        ContextSettingsChoice::SetMaxTokens => {
-                            hub::set_max_tokens(config, true)?;
-                        }
-                        ContextSettingsChoice::SetCondenseThreshold => {
-                            hub::set_condense_threshold(config, true)?;
-                        }
-                        ContextSettingsChoice::SetInputPrice => {
-                            hub::set_input_price(config, true)?;
-                        }
-                        ContextSettingsChoice::SetOutputPrice => {
-                            hub::set_output_price(config, true)?;
-                        }
-                        ContextSettingsChoice::SetRateLimit => {
-                            hub::set_rate_limit_rpm(config, true)?;
-                        }
-                        ContextSettingsChoice::Back => break,
-                    }
-                }
-            }
-            MainLLMSettingsChoice::AgenticSettings => {
-                loop {
-                    match hub::show_agentic_settings_menu(true)? {
-                        AgenticSettingsChoice::SetAllowedCommands => {
-                            hub::set_allowed_commands(config, true)?;
-                        }
-                        AgenticSettingsChoice::SetRestrictedCommands => {
-                            hub::set_restricted_commands(config, true)?;
-                        }
-                        AgenticSettingsChoice::SetMaxActionsBeforeStall => {
-                            hub::set_max_actions_before_stall(config, true)?;
-                        }
-                        AgenticSettingsChoice::PaCoReSettings => {
-                            loop {
-                                match hub::show_pacore_sub_settings_menu()? {
-                                    PaCoReSubSettingsChoice::ToggleEnabled => {
-                                        hub::toggle_pacore_enabled(config, true)?;
-                                    }
-                                    PaCoReSubSettingsChoice::SetRounds => {
-                                        hub::set_pacore_rounds(config, true)?;
-                                    }
-                                    PaCoReSubSettingsChoice::Back => break,
-                                }
-                            }
-                        }
-                        AgenticSettingsChoice::Back => break,
-                    }
-                }
-            }
-            MainLLMSettingsChoice::Back => break,
-        }
-    }
-    Ok(())
-}
-
-/// ============================================================================
-/// WORKER LLM SETTINGS - Comprehensive settings menu
-/// ============================================================================
-
-async fn run_worker_llm_settings(config: &mut Config) -> Result<()> {
-    use hub::{WorkerLLMSettingsChoice, ContextSettingsChoice, AgenticSettingsChoice, PaCoReSubSettingsChoice};
-    
-    loop {
-        match hub::show_worker_llm_settings_menu(config)? {
-            WorkerLLMSettingsChoice::SelectModel => {
-                hub::handle_select_worker_model(config).await?;
-            }
-            WorkerLLMSettingsChoice::ContextSettings => {
-                loop {
-                    match hub::show_context_settings_menu(false)? {
-                        ContextSettingsChoice::SetMaxTokens => {
-                            hub::set_max_tokens(config, false)?;
-                        }
-                        ContextSettingsChoice::SetCondenseThreshold => {
-                            hub::set_condense_threshold(config, false)?;
-                        }
-                        ContextSettingsChoice::SetInputPrice => {
-                            hub::set_input_price(config, false)?;
-                        }
-                        ContextSettingsChoice::SetOutputPrice => {
-                            hub::set_output_price(config, false)?;
-                        }
-                        ContextSettingsChoice::SetRateLimit => {
-                            hub::set_rate_limit_rpm(config, false)?;
-                        }
-                        ContextSettingsChoice::Back => break,
-                    }
-                }
-            }
-            WorkerLLMSettingsChoice::AgenticSettings => {
-                loop {
-                    match hub::show_agentic_settings_menu(false)? {
-                        AgenticSettingsChoice::SetAllowedCommands => {
-                            hub::set_allowed_commands(config, false)?;
-                        }
-                        AgenticSettingsChoice::SetRestrictedCommands => {
-                            hub::set_restricted_commands(config, false)?;
-                        }
-                        AgenticSettingsChoice::SetMaxActionsBeforeStall => {
-                            hub::set_max_actions_before_stall(config, false)?;
-                        }
-                        AgenticSettingsChoice::PaCoReSettings => {
-                            loop {
-                                match hub::show_pacore_sub_settings_menu()? {
-                                    PaCoReSubSettingsChoice::ToggleEnabled => {
-                                        hub::toggle_pacore_enabled(config, false)?;
-                                    }
-                                    PaCoReSubSettingsChoice::SetRounds => {
-                                        hub::set_pacore_rounds(config, false)?;
-                                    }
-                                    PaCoReSubSettingsChoice::Back => break,
-                                }
-                            }
-                        }
-                        AgenticSettingsChoice::Back => break,
-                    }
-                }
-            }
-            WorkerLLMSettingsChoice::Back => break,
-        }
-    }
-    Ok(())
-}
-
-/// ============================================================================
-/// PROVIDER MENU
-/// ============================================================================
-
-async fn run_provider_menu(config: &mut Config) -> Result<()> {
-    use hub::ProviderMenuChoice;
-    
-    loop {
-        match hub::show_provider_menu()? {
-            ProviderMenuChoice::AddProvider => {
-                hub::handle_add_provider(config).await?;
-            }
-            ProviderMenuChoice::EditProvider => {
-                hub::handle_edit_provider(config).await?;
-            }
-            ProviderMenuChoice::RemoveProvider => {
-                hub::handle_remove_provider(config)?;
-            }
-            ProviderMenuChoice::Back => break,
-        }
-    }
-    Ok(())
-}
-
-/// ============================================================================
-/// WEB SEARCH MENU
-/// ============================================================================
-
-async fn run_web_search_menu(config: &mut Config) -> Result<()> {
-    // Sync features.web_search with profile.web_search.enabled on entry
-    let profile_enabled = config.active_profile().web_search.enabled;
-    if config.features.web_search != profile_enabled {
-        log::debug!("[CONFIG] Syncing web_search: features={} profile={}", 
-            config.features.web_search, profile_enabled);
-        config.features.web_search = profile_enabled;
-    }
-    
-    // Use the unified web search settings handler
-    hub::handle_web_search_settings(config).await?;
-    Ok(())
-}
-
-/// ============================================================================
-/// APPLICATION SETTINGS - Global settings (tmux, alias, etc)
-/// ============================================================================
-
-async fn run_application_settings(config: &mut Config) -> Result<()> {
-    use hub::ApplicationSettingsChoice;
-    
-    loop {
-        match hub::show_application_settings_menu()? {
-            ApplicationSettingsChoice::ToggleTmuxAutostart => {
-                config.app.tmux_enabled = !config.app.tmux_enabled;
-                config.save_default()?;
-                println!("\n✅ Tmux autostart {}", 
-                    if config.app.tmux_enabled { "enabled" } else { "disabled" });
-            }
-            ApplicationSettingsChoice::SetPreferredAlias => {
-                let alias: String = dialoguer::Input::new()
-                    .with_prompt("Enter preferred alias")
-                    .default(config.active_profile.clone())
-                    .interact()?;
-                // Store alias in config (would need custom field)
-                println!("\n[STUB] Set preferred alias to: {}\n", alias);
-            }
-            ApplicationSettingsChoice::Back => break,
-        }
-    }
     Ok(())
 }
 
@@ -523,12 +282,13 @@ async fn run_tui_with_session(config: &Config) -> Result<tui::TuiResult> {
     let job_registry = tui::app::types::JobRegistry::new();
     
     // Create App with PTY (but no session yet)
+    // Note: AppStateContainer::new is now async
     let mut app = tui::app::App::new(
         pty_manager,
         config.clone(),
         job_registry,
         false, // not incognito
-    );
+    ).await;
     app.pty_rx = Some(pty_rx);
     
     // Create approval capability for interactive tool approval
