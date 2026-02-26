@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
+use std::time::Duration;
 
 use mylm_core::config::Config;
 use mylm_core::agent::runtime::orchestrator::commonbox::Commonbox;
@@ -67,9 +68,14 @@ async fn run_hub_menu(config: &mut Config) -> Result<()> {
                 println!("\n⚠️  tmux is not installed. Please install tmux to use Pop Terminal.\n");
             }
             HubChoice::ResumeSession => {
-                if hub::session_exists() {
-                    println!("\n🔄 Resuming previous session...\n");
-                    match run_tui_with_session(config, true).await {
+                use crate::tui::app::session_manager::SessionManager;
+                
+                // Load the latest TUI session (not just agent session)
+                if let Some(session) = SessionManager::load_latest().await {
+                    println!("\n🔄 Resuming session from {} with {} messages...\n", 
+                        session.timestamp.format("%Y-%m-%d %H:%M"),
+                        session.history.len());
+                    match run_tui_with_saved_session(config, session).await {
                         Ok(tui::TuiResult::ReturnToHub) => {}
                         Ok(tui::TuiResult::Exit) => {
                             println!("\n👋 Goodbye!\n");
@@ -149,38 +155,107 @@ async fn run_hub_menu(config: &mut Config) -> Result<()> {
 }
 
 /// ============================================================================
-/// SESSION MANAGER - Manage saved TUI Sessions (STUB)
+/// SESSION MANAGER - Manage saved TUI Sessions
 /// ============================================================================
 
-async fn run_session_manager(_config: &Config) -> Result<()> {
-    println!("┌─────────────────────────────────────────────────────────────┐");
-    println!("│                    SESSION MANAGER                          │");
-    println!("├─────────────────────────────────────────────────────────────┤");
-    println!("│                                                             │");
-    println!("│  [STUB] Session management not yet implemented              │");
-    println!("│                                                             │");
-    println!("│  Planned features:                                          │");
-    println!("│  • List saved sessions with metadata (date, cost, tokens)   │");
-    println!("│  • Resume selected session                                  │");
-    println!("│  • Delete old sessions                                      │");
-    println!("│  • Rename sessions                                          │");
-    println!("│  • View session statistics                                  │");
-    println!("│                                                             │");
-    println!("└─────────────────────────────────────────────────────────────┘\n");
+async fn run_session_manager(config: &Config) -> Result<()> {
+    use crate::tui::app::session_manager::SessionManager;
+    use dialoguer::{Select, Confirm};
     
-    // TODO: Implement session manager menu
-    // This would:
-    // 1. Scan ~/.local/share/mylm/sessions/ for saved sessions
-    // 2. Display list with metadata (name, date, cost, message count)
-    // 3. Allow user to select a session to resume
-    // 4. Allow deletion and renaming of sessions
-    
-    dialoguer::Input::<String>::new()
-        .with_prompt("Press Enter to return to hub")
-        .allow_empty(true)
-        .interact()?;
-    
-    Ok(())
+    loop {
+        // Load all sessions
+        let sessions = SessionManager::load_sessions();
+        
+        if sessions.is_empty() {
+            println!("\n┌─────────────────────────────────────────────────────────────┐");
+            println!("│                    SESSION MANAGER                          │");
+            println!("├─────────────────────────────────────────────────────────────┤");
+            println!("│                                                             │");
+            println!("│  No saved sessions found.                                   │");
+            println!("│  Start a new chat session to create one.                    │");
+            println!("│                                                             │");
+            println!("└─────────────────────────────────────────────────────────────┘\n");
+            
+            dialoguer::Input::<String>::new()
+                .with_prompt("Press Enter to return to hub")
+                .allow_empty(true)
+                .interact()?;
+            return Ok(());
+        }
+        
+        // Build menu items
+        let mut items: Vec<String> = sessions.iter().enumerate().map(|(i, s)| {
+            let date = s.timestamp.format("%Y-%m-%d %H:%M");
+            let preview = if s.metadata.last_message_preview.len() > 30 {
+                format!("{}...", &s.metadata.last_message_preview[..30])
+            } else {
+                s.metadata.last_message_preview.clone()
+            };
+            format!("{:2}. [{}] {} msgs, ${:.4} - {}", 
+                i + 1, date, s.metadata.message_count, s.metadata.cost, preview)
+        }).collect();
+        
+        items.push("─".repeat(60));
+        items.push("🗑️  Delete a session".to_string());
+        items.push("✏️  Rename a session".to_string());
+        items.push("🔄 Refresh".to_string());
+        items.push("🔙 Back to hub".to_string());
+        
+        println!("\n");
+        let selection = Select::new()
+            .with_prompt("Select a session to resume, or choose an action")
+            .items(&items)
+            .default(0)
+            .interact()?;
+        
+        let session_count = sessions.len();
+        
+        if selection < session_count {
+            // Resume selected session
+            let session = &sessions[selection];
+            println!("\n📂 Resuming session from {}...", session.timestamp.format("%Y-%m-%d %H:%M"));
+            
+            // Start TUI with resumed session
+            run_tui_with_saved_session(config, session.clone()).await?;
+            return Ok(());
+        } else {
+            match selection - session_count {
+                1 => {
+                    // Delete session
+                    let delete_idx = Select::new()
+                        .with_prompt("Select a session to delete")
+                        .items(&sessions.iter().enumerate().map(|(i, s)| {
+                            format!("{:2}. [{}] {}", i + 1, 
+                                s.timestamp.format("%Y-%m-%d %H:%M"),
+                                s.metadata.message_count)
+                        }).collect::<Vec<_>>())
+                        .interact()?;
+                    
+                    let session_to_delete = &sessions[delete_idx];
+                    if Confirm::new()
+                        .with_prompt(format!("Delete session from {}?", 
+                            session_to_delete.timestamp.format("%Y-%m-%d %H:%M")))
+                        .default(false)
+                        .interact()?
+                    {
+                        if let Err(e) = SessionManager::delete_session(&session_to_delete.id).await {
+                            println!("❌ Failed to delete session: {}", e);
+                        } else {
+                            println!("✅ Session deleted");
+                        }
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                }
+                2 => {
+                    // Rename session - currently just a placeholder
+                    println!("\n✏️  Rename session - feature coming soon!");
+                    tokio::time::sleep(Duration::from_millis(1000)).await;
+                }
+                3 => continue, // Refresh
+                _ => return Ok(()), // Back to hub
+            }
+        }
+    }
 }
 
 /// ============================================================================
@@ -389,6 +464,109 @@ async fn run_tui_with_session(config: &Config, resume: bool) -> Result<tui::TuiR
             Err(e.into())
         }
     }
+}
+
+/// Run TUI with a saved session (restores chat history)
+async fn run_tui_with_saved_session(config: &Config, saved_session: crate::tui::app::session::Session) -> Result<tui::TuiResult> {
+    use mylm_core::agent::runtime::Session;
+    use tokio::sync::mpsc;
+    
+    mylm_core::info_log!("[MAIN] Starting TUI with saved session (id: {}, messages: {})", 
+        saved_session.id, saved_session.history.len());
+    
+    // Create PTY manager
+    let cwd = std::env::current_dir().ok();
+    let (pty_manager, pty_rx) = match cwd {
+        Some(path) => match tui::spawn_pty(Some(path)) {
+            Ok((pm, rx)) => (pm, rx),
+            Err(e) => {
+                mylm_core::error_log!("[MAIN] Failed to spawn PTY: {}", e);
+                eprintln!("❌ Failed to spawn PTY: {}", e);
+                return Ok(tui::TuiResult::ReturnToHub);
+            }
+        },
+        None => {
+            mylm_core::error_log!("[MAIN] Could not determine current directory");
+            eprintln!("❌ Could not determine current directory");
+            return Ok(tui::TuiResult::ReturnToHub);
+        }
+    };
+    
+    // Create job registry
+    let job_registry = tui::app::types::JobRegistry::new();
+    
+    // Create App with PTY
+    let mut app = tui::app::App::new(
+        pty_manager,
+        config.clone(),
+        job_registry,
+        false, // not incognito
+    ).await;
+    app.pty_rx = Some(pty_rx);
+    
+    // Restore chat history from saved session
+    use crate::tui::app::TimestampedChatMessage;
+    app.chat_history = saved_session.history.into_iter()
+        .map(TimestampedChatMessage::from)
+        .collect();
+    app.session_id = saved_session.id;
+    
+    println!("✅ Loaded {} messages from saved session", app.chat_history.len());
+    
+    // Create approval capability
+    let (approval_capability, approval_rx) = tui::app::approval::TuiApprovalCapability::new();
+    
+    // Create commonbox for worker spawning
+    let commonbox = Arc::new(Commonbox::new());
+    
+    // Create agent session factory
+    let factory = tui::agent_setup::create_session_factory(
+        config,
+        None,
+        Some(Arc::new(approval_capability)),
+        Some(commonbox),
+    );
+    
+    // Create new agent session (we don't restore agent state, just UI state)
+    let mut session = match factory.create_default_session().await {
+        Ok(s) => s,
+        Err(e) => {
+            mylm_core::error_log!("[MAIN] Failed to create agent session: {}", e);
+            eprintln!("❌ Failed to create agent session: {}", e);
+            return Ok(tui::TuiResult::ReturnToHub);
+        }
+    };
+    
+    // Get input sender and subscribe to output events
+    let input_tx = session.input_sender();
+    let mut broadcast_rx = session.subscribe_output();
+    
+    // Create mpsc channel to bridge broadcast to unbounded for TUI
+    let (output_tx, output_rx) = mpsc::unbounded_channel::<mylm_core::agent::OutputEvent>();
+    
+    // Spawn bridge task
+    tokio::spawn(async move {
+        loop {
+            match broadcast_rx.recv().await {
+                Ok(event) => {
+                    if output_tx.send(event).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+    
+    app.input_tx = Some(input_tx);
+    
+    let session_handle = tokio::spawn(async move {
+        session.run().await
+    });
+    
+    // Run TUI
+    tui::run_tui_session(app, output_rx, approval_rx, session_handle).await
+        .map_err(|e| e.into())
 }
 
 /// ============================================================================

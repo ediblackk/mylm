@@ -82,8 +82,12 @@ pub async fn run_tui_session(
     terminal.show_cursor()?;
 
     // Save session before returning to hub
-    if !app.incognito && !app.return_to_hub {
-        let _ = app.save_session(None).await;
+    if !app.incognito {
+        mylm_core::info_log!("[TUI] Saving session before exit");
+        let session = app.build_current_session().await;
+        app.session_manager.set_current_session(session);
+        // Give the background task a moment to save
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
     // Determine return result based on app state
@@ -230,6 +234,13 @@ async fn handle_agent_event(
             app.context_manager.on_llm_complete(&response_content);
             let (cached_tokens, max_tokens) = app.context_manager.get_cached_token_usage();
             mylm_core::info_log!("[AGENT_EVENT] Context updated: {}/{} cached tokens", cached_tokens, max_tokens);
+            
+            // CRITICAL: Save session after AI response (includes both user message and AI response)
+            if !app.incognito {
+                mylm_core::debug_log!("[AGENT_EVENT] Auto-saving session after AI response");
+                let session = app.build_current_session().await;
+                app.session_manager.set_current_session(session);
+            }
             
             // Reset all streaming state
             app.current_response.clear();

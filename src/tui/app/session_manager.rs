@@ -10,15 +10,16 @@ use crate::tui::app::session::Session;
 /// It spawns a background task that receives sessions via a channel and
 /// writes them to disk with debouncing to avoid excessive I/O. All writes
 /// are atomic using temp file + rename pattern.
-#[allow(dead_code)]
 pub struct SessionManager {
+    #[allow(dead_code)]
     current_session: Arc<RwLock<Option<Session>>>,
+    #[allow(dead_code)]
     save_sender: mpsc::Sender<Session>,
     _save_task: tokio::task::JoinHandle<()>,
 }
 
-#[allow(dead_code)]
 impl SessionManager {
+    #[allow(dead_code)]
     /// Create a new SessionManager.
     /// 
     /// 1. Determines sessions directory: $XDG_DATA_DIR/mylm/sessions/ or $HOME/.local/share/mylm/sessions/
@@ -73,13 +74,20 @@ impl SessionManager {
                     // Debounce timer tick
                     _ = debounce_interval.tick() => {
                         if let Some(session) = pending_session.take() {
+                            mylm_core::debug_log!("[SessionManager] Debounce expired, saving session {}", session.id);
                             // Save session to disk atomically
-                            if let Err(e) = Self::save_session_atomic(&sessions_dir_clone, &session).await {
-                                mylm_core::error_log!("[SessionManager] Failed to save session {}: {}", session.id, e);
-                            } else {
-                                // Update latest.json atomically
-                                if let Err(e) = Self::update_latest_atomic(&sessions_dir_clone, &session).await {
-                                    mylm_core::error_log!("[SessionManager] Failed to update latest.json: {}", e);
+                            match Self::save_session_atomic(&sessions_dir_clone, &session).await {
+                                Ok(_) => {
+                                    mylm_core::info_log!("[SessionManager] Session {} saved successfully", session.id);
+                                    // Update latest.json atomically
+                                    if let Err(e) = Self::update_latest_atomic(&sessions_dir_clone, &session).await {
+                                        mylm_core::error_log!("[SessionManager] Failed to update latest.json: {}", e);
+                                    } else {
+                                        mylm_core::debug_log!("[SessionManager] latest.json updated");
+                                    }
+                                }
+                                Err(e) => {
+                                    mylm_core::error_log!("[SessionManager] Failed to save session {}: {}", session.id, e);
                                 }
                             }
                         }
@@ -98,8 +106,7 @@ impl SessionManager {
     /// Save a session asynchronously.
     /// Non-blocking, fire-and-forget. The session is cloned and sent to the
     /// background task via channel.
-    /// Reserved for future use (currently using set_current_session instead)
-    
+    #[allow(dead_code)]
     pub async fn save_session_async(&self, session: &Session) {
         let session_clone = session.clone();
         if let Err(e) = self.save_sender.send(session_clone).await {
@@ -110,7 +117,6 @@ impl SessionManager {
     /// Set the current session.
     /// Stores in self.current_session (using RwLock for interior mutability)
     /// and triggers an immediate save via the channel.
-    
     pub fn set_current_session(&self, session: Session) {
         // Update current session
         if let Ok(mut guard) = self.current_session.try_write() {
@@ -122,15 +128,17 @@ impl SessionManager {
         // Trigger immediate save (spawn a task to send async)
         let sender = self.save_sender.clone();
         tokio::spawn(async move {
+            mylm_core::debug_log!("[SessionManager] Sending session to save channel (id: {})", session.id);
             if let Err(e) = sender.send(session).await {
                 mylm_core::error_log!("[SessionManager] Failed to send session in set_current_session: {}", e);
+            } else {
+                mylm_core::debug_log!("[SessionManager] Session sent to save channel successfully");
             }
         });
     }
     
     /// Get the current session (cloned).
-    /// Reserved for future use
-    
+    #[allow(dead_code)]
     pub async fn get_current_session(&self) -> Option<Session> {
         let guard = self.current_session.read().await;
         guard.clone()
@@ -138,7 +146,6 @@ impl SessionManager {
     
     /// Load the latest session from latest.json.
     /// Async method - can be called from sync context via tokio::runtime::Handle::current().block_on()
-    
     pub async fn load_latest() -> Option<Session> {
         let sessions_dir = Self::resolve_sessions_dir();
         let latest_path = sessions_dir.join("latest.json");
@@ -167,16 +174,23 @@ impl SessionManager {
     /// Load all sessions from the sessions directory.
     /// Scans for files matching "session_*.json", excludes "latest.json".
     /// Deserializes each and returns sorted by timestamp descending.
-    
     pub fn load_sessions() -> Vec<Session> {
         let sessions_dir = Self::resolve_sessions_dir();
         let mut sessions: Vec<Session> = Vec::new();
+        
+        // Create directory if it doesn't exist (first run or after deletion)
+        if !sessions_dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(&sessions_dir) {
+                mylm_core::warn_log!("[SessionManager] Failed to create sessions directory: {}", e);
+            }
+            return Vec::new();
+        }
         
         // Read directory entries
         let entries = match std::fs::read_dir(&sessions_dir) {
             Ok(entries) => entries,
             Err(e) => {
-                mylm_core::error_log!("[SessionManager] Failed to read sessions directory: {}", e);
+                mylm_core::warn_log!("[SessionManager] Failed to read sessions directory: {}", e);
                 return Vec::new();
             }
         };
@@ -220,9 +234,6 @@ impl SessionManager {
     
     /// Delete a session by ID.
     /// Deletes session_{id}.json and any associated temp files.
-    /// Returns Result<(), std::io::Error> for caller to handle.
-    /// Reserved for future session management UI
-    
     pub async fn delete_session(id: &str) -> Result<(), std::io::Error> {
         let sessions_dir = Self::resolve_sessions_dir();
         let session_path = sessions_dir.join(format!("session_{}.json", id));
@@ -262,8 +273,13 @@ impl SessionManager {
     }
     
     /// Save session to disk atomically: write to temp file, then rename.
-    
+    #[allow(dead_code)]
     async fn save_session_atomic(dir: &PathBuf, session: &Session) -> Result<(), std::io::Error> {
+        // Ensure directory exists
+        if !dir.exists() {
+            tokio::fs::create_dir_all(dir).await?;
+        }
+        
         let temp_path = dir.join(format!("session_{}.tmp", session.id));
         let final_path = dir.join(format!("session_{}.json", session.id));
         
@@ -281,8 +297,13 @@ impl SessionManager {
     }
     
     /// Update latest.json atomically: write to temp file, then rename.
-    
+    #[allow(dead_code)]
     async fn update_latest_atomic(dir: &PathBuf, session: &Session) -> Result<(), std::io::Error> {
+        // Ensure directory exists
+        if !dir.exists() {
+            tokio::fs::create_dir_all(dir).await?;
+        }
+        
         let temp_path = dir.join("latest.tmp");
         let final_path = dir.join("latest.json");
         

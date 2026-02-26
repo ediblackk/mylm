@@ -66,6 +66,7 @@
 //! - Replay uses persisted event log with original ordering
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::Duration;
 use std::collections::{HashMap, HashSet};
@@ -144,7 +145,10 @@ pub enum UserInput {
 }
 
 /// Output events for UI
-#[derive(Debug, Clone)]
+/// 
+/// These events are serialized for transport to the UI layer (e.g., Tauri).
+/// All variants must be serializable for IPC.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum OutputEvent {
     /// Agent is thinking/processing
     Thinking { intent_id: IntentId },
@@ -239,7 +243,7 @@ pub enum OutputEvent {
 }
 
 /// Session result
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionResult {
     pub completed_successfully: bool,
     pub total_steps: usize,
@@ -248,7 +252,7 @@ pub struct SessionResult {
 }
 
 /// Session status snapshot
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionStatus {
     pub running: bool,
     pub step_count: usize,

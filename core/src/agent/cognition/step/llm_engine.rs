@@ -166,7 +166,23 @@ impl StepEngine for LlmEngine {
                 let state_with_message = state.clone()
                     .with_message("user", msg.clone());
                 
-                let scratchpad = format!("User: {}\n\nWhat should I do?", msg);
+                // Detect chitchat to avoid unnecessary tool calls
+                let lower = msg.trim().to_lowercase();
+                let is_chitchat = lower.starts_with("hi") 
+                    || lower.starts_with("hello") 
+                    || lower.starts_with("hey")
+                    || ["ok", "okay", "got it", "thanks", "thank you", "nice", "great", "cool"]
+                        .iter()
+                        .any(|&s| lower == s || lower.starts_with(s))
+                    || lower.starts_with("how are you")
+                    || lower.starts_with("what's up")
+                    || lower.starts_with("sup");
+                
+                let scratchpad = if is_chitchat {
+                    format!("User: {}\n\nRespond conversationally. Do NOT use tools for greetings or casual chat.", msg)
+                } else {
+                    format!("User: {}\n\nWhat should I do?", msg)
+                };
                 
                 // History is already the correct type now that AgentState is unified
                 let history = state_with_message.history.clone();

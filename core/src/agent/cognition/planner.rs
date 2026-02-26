@@ -137,6 +137,33 @@ impl Planner {
         }
     }
     
+    /// Check if message is casual chitchat (greeting, thanks, etc.)
+    /// 
+    /// Returns true for messages that don't need tool-based investigation
+    fn is_chitchat(content: &str) -> bool {
+        let lower = content.trim().to_lowercase();
+        
+        // Greetings
+        if lower.starts_with("hi") || lower.starts_with("hello") || lower.starts_with("hey") {
+            return true;
+        }
+        
+        // Short acknowledgments/thanks
+        if ["ok", "okay", "got it", "thanks", "thank you", "nice", "great", "cool"]
+            .iter()
+            .any(|&s| lower == s || lower.starts_with(s))
+        {
+            return true;
+        }
+        
+        // Simple questions that don't need investigation
+        if lower.starts_with("how are you") || lower.starts_with("what's up") || lower.starts_with("sup") {
+            return true;
+        }
+        
+        false
+    }
+
     /// Handle user message - requests LLM
     fn handle_user_message(&mut self, content: &str, graph: &mut IntentGraph) -> Result<(), KernelError> {
         if self.check_limits(graph)? {
@@ -149,7 +176,16 @@ impl Planner {
         // Add message to history
         self.state.history.push(Message::new("user", content));
         
-        let context = self.build_context(&format!("User: {}\n\nWhat should I do?", content));
+        // Use different prompt based on message type:
+        // - Chitchat: Just respond conversationally
+        // - Task: Be proactive with "What should I do?"
+        let prompt = if Self::is_chitchat(content) {
+            format!("User: {}\n\nRespond conversationally. Do NOT use tools for greetings or casual chat.", content)
+        } else {
+            format!("User: {}\n\nWhat should I do?", content)
+        };
+        
+        let context = self.build_context(&prompt);
         
         let llm_intent_id = self.next_intent_id();
         crate::info_log!("[PLANNER] Adding LLM intent {} to graph for tool result interpretation", llm_intent_id.0);
@@ -293,13 +329,50 @@ impl Planner {
     /// Maximum retry attempts for format correction
     const MAX_FORMAT_RETRIES: u32 = 2;
 
+    /// Check if content appears to be a plain text/markdown response (not a tool attempt)
+    /// 
+    /// Returns true if the content looks like natural language text that should be
+    /// emitted directly to the user, rather than a malformed tool call.
+    fn is_plain_text_response(content: &str) -> bool {
+        let trimmed = content.trim();
+        
+        // Empty check
+        if trimmed.is_empty() {
+            return false;
+        }
+        
+        // If it contains JSON-like structures, it's likely a tool attempt
+        // Look for patterns like {"key": or {"t": or <function= etc.
+        let has_json_object = trimmed.contains("{") && trimmed.contains("}") && 
+            (trimmed.contains("\"") || trimmed.contains("'"));
+        
+        // Check for XML-style tool calls
+        let has_xml_tool_call = trimmed.contains("<function=") || trimmed.contains("<tool_call>");
+        
+        // If it has JSON or XML structures, treat as a tool attempt (not plain text)
+        if has_json_object || has_xml_tool_call {
+            return false;
+        }
+        
+        // It's plain text if it looks like natural language
+        // - Contains words/sentences
+        // - Has common punctuation
+        // - No code-like structures
+        let word_count = trimmed.split_whitespace().count();
+        let has_sentences = trimmed.contains('.') || trimmed.contains('!') || trimmed.contains('?');
+        let has_markdown = trimmed.contains("##") || trimmed.contains("**") || trimmed.contains("- ");
+        
+        (word_count > 3 && has_sentences) || has_markdown
+    }
+
     /// Handle LLM response - parse and act
     /// 
     /// Implements format validation and retry logic:
     /// 1. Parse response BEFORE adding to history
-    /// 2. If valid JSON format: add to history and proceed
-    /// 3. If XML/invalid and retries left: emit retry intent with corrective message
-    /// 4. If max retries reached: emit error response
+    /// 2. If valid JSON format: add to history and proceed (Y-SWITCH routing)
+    /// 3. If plain text/markdown: accept as final answer (no retry needed)
+    /// 4. If XML/invalid tool format and retries left: emit retry intent
+    /// 5. If max retries reached: emit error response
     fn handle_llm_response(&mut self, content: &str, intent_id: IntentId, graph: &mut IntentGraph) -> Result<(), KernelError> {
         if self.check_limits(graph)? {
             return Ok(());
@@ -313,7 +386,22 @@ impl Planner {
         let retry_count = self.state.llm_retry_counts.get(&intent_id).copied().unwrap_or(0);
 
         if !is_valid && retry_count < Self::MAX_FORMAT_RETRIES {
-            // Format invalid - trigger retry WITHOUT adding to history
+            // Check if this is plain text/markdown - if so, accept as final answer
+            if Self::is_plain_text_response(content) {
+                crate::info_log!("[PLANNER] Plain text/markdown response detected, accepting as final answer");
+                
+                // Add to history and emit directly
+                self.state.history.push(Message::new("assistant", content));
+                self.state.llm_retry_counts.remove(&intent_id);
+                
+                graph.add(IntentNode::new(
+                    self.next_intent_id(),
+                    Intent::EmitResponse(content.trim().to_string()),
+                ));
+                return Ok(());
+            }
+            
+            // Format invalid (likely a malformed tool call) - trigger retry WITHOUT adding to history
             crate::warn_log!("[PLANNER] LLM output invalid format (retry={}/{}), requesting retry", 
                 retry_count + 1, Self::MAX_FORMAT_RETRIES);
 
@@ -595,5 +683,60 @@ mod tests {
         
         let graph = planner.process(&events).unwrap();
         assert!(!graph.is_empty());
+    }
+    
+    #[test]
+    fn test_is_plain_text_response_markdown() {
+        // Markdown responses should be accepted as plain text
+        let markdown = "## Next Steps\n\n1. **Install** the package\n2. Run the command";
+        assert!(Planner::is_plain_text_response(markdown));
+    }
+    
+    #[test]
+    fn test_is_plain_text_response_natural_language() {
+        // Natural language should be accepted
+        let text = "That's a great question! Let me help you with that.";
+        assert!(Planner::is_plain_text_response(text));
+    }
+    
+    #[test]
+    fn test_is_plain_text_response_short_message() {
+        // Very short messages without punctuation might not be plain text
+        let short = "hi there";
+        assert!(!Planner::is_plain_text_response(short));
+    }
+    
+    #[test]
+    fn test_is_plain_text_response_json_tool_call() {
+        // JSON should NOT be plain text (it's a tool attempt)
+        let json = r#"{"t": "Thinking", "a": "shell", "i": {"command": "ls"}}"#;
+        assert!(!Planner::is_plain_text_response(json));
+    }
+    
+    #[test]
+    fn test_is_plain_text_response_json_final_answer() {
+        // JSON with final answer should NOT be plain text
+        let json = r#"{"t": "Done", "f": "Here is the result"}"#;
+        assert!(!Planner::is_plain_text_response(json));
+    }
+    
+    #[test]
+    fn test_is_plain_text_response_xml_tool_call() {
+        // XML-style tool calls should NOT be plain text
+        let xml = r#"<function=shell><parameter=command>ls</parameter></function>"#;
+        assert!(!Planner::is_plain_text_response(xml));
+    }
+    
+    #[test]
+    fn test_is_plain_text_response_empty() {
+        assert!(!Planner::is_plain_text_response(""));
+        assert!(!Planner::is_plain_text_response("   "));
+    }
+    
+    #[test]
+    fn test_is_plain_text_response_bullet_list() {
+        // Markdown bullet lists should be plain text
+        let bullets = "- Item one\n- Item two\n- Item three";
+        assert!(Planner::is_plain_text_response(bullets));
     }
 }

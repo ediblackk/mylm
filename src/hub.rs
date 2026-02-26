@@ -292,9 +292,7 @@ pub async fn show_hub(_config: &Config) -> Result<HubChoice> {
     let mut options = Vec::new();
     
     // Check if session file exists
-    let session_exists = dirs::data_dir()
-        .map(|d| d.join("mylm").join("sessions").join("latest.json").exists())
-        .unwrap_or(false);
+    let session_exists = crate::hub::session_exists();
     
     // Pop Terminal option
     if is_tmux_available() {

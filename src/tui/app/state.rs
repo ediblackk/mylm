@@ -21,17 +21,8 @@ use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
 // Import real Session types from session module
-use crate::tui::app::session::{Session, SessionMonitor};
-
-
-// Stub types for items not yet in contract
-#[derive(Debug, Clone)]
-pub struct SessionManager;
-
-impl SessionManager {
-    pub fn new() -> Self { Self }
-    pub fn set_current_session(&mut self, _session: Session) {}
-}
+use crate::tui::app::session::SessionMonitor;
+use crate::tui::app::session_manager::SessionManager;
 
 #[derive(Debug, Clone)]
 pub struct TerminalDelegate;
@@ -304,7 +295,7 @@ impl AppStateContainer {
         let auto_approve = Arc::new(AtomicBool::new(false));
         let clipboard = arboard::Clipboard::new().ok();
 
-        let session_id = String::new();
+        let session_id = uuid::Uuid::new_v4().to_string();
         let pacore_enabled = config.features.pacore.enabled;
         let pacore_rounds = config.features.pacore.rounds;
 

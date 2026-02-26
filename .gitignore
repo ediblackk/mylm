@@ -9,7 +9,7 @@ Cargo.lock
 *.swp
 *.swo
 *~
-
+.tasks/
 # OS
 .DS_Store
 Thumbs.db
@@ -35,4 +35,4 @@ debug.log
 # ML model cache
 .fastembed_cache/
 .fastembed/
-.tasks/
+

@@ -125,3 +125,58 @@ pub use agent::{
 // Legacy re-exports (will be removed)
 pub use error::{MylmError, Result};
 pub use memory::store::VectorStore as MemoryStore;
+
+/// Prelude module for convenient imports
+/// 
+/// This module re-exports the most commonly used types for building
+/// applications with mylm-core. Use it with:
+/// 
+/// ```rust
+/// use mylm_core::prelude::*;
+/// ```
+/// 
+/// For GUI applications (e.g., Tauri), this includes all types needed
+/// to create sessions, send messages, and receive events.
+pub mod prelude {
+    // Core agent types - Session management
+    pub use crate::agent::{
+        AgentSessionFactory, FactoryError,
+        Session, SessionConfig, SessionError,
+        UserInput, OutputEvent,
+        
+        // Session persistence (for resume)
+        SessionData, SessionPersistence, SessionMetadata,
+        
+        // Configuration
+        AgentConfig, MemoryConfig,
+        
+        // Core types
+        TokenUsage, ToolResult, Approval,
+        TaskId, JobId, SessionId,
+        
+        // Cognition
+        Planner,
+    };
+    
+    // Runtime types (from orchestrator submodule)
+    pub use crate::agent::runtime::{
+        SessionStatus, SessionResult,
+        orchestrator::AgencySession,
+        ContractRuntime,
+    };
+    
+    // Config types
+    pub use crate::config::{
+        Config, ProfileConfig, ProviderConfig, ProviderType,
+        AppConfig, FeatureConfig, WebSearchConfig,
+    };
+    
+    // Provider types
+    pub use crate::provider::{
+        LlmClient, LlmConfig,
+        chat::{ChatMessage, MessageRole},
+    };
+    
+    // Re-export async traits for session
+    pub use async_trait::async_trait;
+}
