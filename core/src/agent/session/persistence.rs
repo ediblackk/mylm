@@ -104,6 +104,22 @@ pub struct AgentStateCheckpoint {
     pub config: crate::agent::SessionConfig,
 }
 
+/// Lightweight session data for UI restoration
+/// 
+/// This is a subset of PersistedSession intended for UI consumption.
+/// It contains only the data needed to restore the chat history and metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionData {
+    /// Unique session ID
+    pub id: String,
+    /// Session creation timestamp
+    pub timestamp: DateTime<Utc>,
+    /// Chat/conversation history
+    pub history: Vec<Message>,
+    /// Session metadata (stats, preview, etc.)
+    pub metadata: SessionMetadata,
+}
+
 impl Default for PersistedSession {
     fn default() -> Self {
         let now = Utc::now();
@@ -304,6 +320,40 @@ impl SessionPersistence {
                     Ok(session) => Some(session),
                     Err(e) => {
                         error!("[SessionPersistence] Failed to deserialize latest.json: {}", e);
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                error!("[SessionPersistence] Failed to read latest.json: {}", e);
+                None
+            }
+        }
+    }
+    
+    /// Load latest session data for UI restoration
+    /// 
+    /// Returns a lightweight SessionData struct containing history and metadata
+    /// without the full internal agent state. This is intended for UI consumption.
+    pub async fn load_latest_data() -> Option<SessionData> {
+        let sessions_dir = Self::resolve_sessions_dir();
+        let latest_path = sessions_dir.join("latest.json");
+        
+        if !latest_path.exists() {
+            return None;
+        }
+        
+        match tokio::fs::read_to_string(&latest_path).await {
+            Ok(content) => {
+                match serde_json::from_str::<PersistedSession>(&content) {
+                    Ok(session) => Some(SessionData {
+                        id: session.id,
+                        timestamp: session.timestamp,
+                        history: session.history,
+                        metadata: session.metadata,
+                    }),
+                    Err(e) => {
+                        error!("[SessionPersistence] Failed to deserialize latest.json for UI: {}", e);
                         None
                     }
                 }

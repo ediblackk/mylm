@@ -24,10 +24,10 @@ pub enum WorkerStatus {
 /// Worker instance
 struct WorkerInstance {
     _handle: JoinHandle<()>,
-    #[allow(dead_code)]
-    status_tx: Option<mpsc::Sender<WorkerStatus>>,
-    #[allow(dead_code)]
-    id: WorkerId,
+    /// Status sender for worker updates (reserved for future use)
+    _status_tx: Option<mpsc::Sender<WorkerStatus>>,
+    /// Worker ID (reserved for future use)
+    _id: WorkerId,
 }
 
 /// Local worker capability - spawns tokio tasks
@@ -92,8 +92,8 @@ impl LocalWorkerCapability {
         // Store worker instance
         let instance = WorkerInstance {
             _handle: handle,
-            status_tx: None,
-            id: worker_id.clone(),
+            _status_tx: None,
+            _id: worker_id.clone(),
         };
         
         self.workers.lock().await.insert(worker_id.clone(), instance);

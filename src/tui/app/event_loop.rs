@@ -432,6 +432,16 @@ fn handle_jobs_focus(app: &mut AppStateContainer, key: KeyEvent) -> LoopAction {
         }
     } else {
         match key.code {
+            // Shift+Up/Down scrolls the jobs list without changing selection
+            // NOTE: These must come BEFORE regular Up/Down to be reachable
+            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                app.jobs_list_scroll = app.jobs_list_scroll.saturating_sub(1);
+                LoopAction::Continue
+            }
+            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                app.jobs_list_scroll += 1;
+                LoopAction::Continue
+            }
             KeyCode::Up => {
                 if let Some(idx) = app.selected_job_index {
                     if idx > 0 {
@@ -458,15 +468,6 @@ fn handle_jobs_focus(app: &mut AppStateContainer, key: KeyEvent) -> LoopAction {
             }
             KeyCode::Enter => {
                 app.show_job_detail = true;
-                LoopAction::Continue
-            }
-            // Shift+Up/Down scrolls the jobs list without changing selection
-            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                app.jobs_list_scroll = app.jobs_list_scroll.saturating_sub(1);
-                LoopAction::Continue
-            }
-            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                app.jobs_list_scroll += 1;
                 LoopAction::Continue
             }
             KeyCode::Delete | KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {

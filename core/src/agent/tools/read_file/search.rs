@@ -82,6 +82,7 @@ impl Default for SearchFilesTool {
 /// Determine if search strategy should be used
 /// 
 /// Based on file size and availability of search index
+#[cfg(test)]
 pub fn should_use_search(file_size: usize, search_available: bool) -> bool {
     use super::types::thresholds;
     

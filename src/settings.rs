@@ -263,7 +263,7 @@ pub async fn run_application_settings(config: &mut Config) -> Result<()> {
 /// MEMORY MANAGEMENT
 /// ============================================================================
 
-pub async fn run_memory_management(config: &mut Config) -> Result<()> {
+pub async fn run_memory_management(_config: &mut Config) -> Result<()> {
     loop {
         match hub::show_memory_management_menu()? {
             MemoryManagementChoice::ViewMemoryStats => {
@@ -500,7 +500,6 @@ async fn delete_all_memories() -> Result<()> {
 async fn import_memories() -> Result<()> {
     use mylm_core::config::agent::MemoryConfig;
     use mylm_core::agent::memory::AgentMemoryManager;
-    use mylm_core::memory::store::MemoryType;
     
     println!("\n📥 Import Memories");
     println!("{}", "─".repeat(40));

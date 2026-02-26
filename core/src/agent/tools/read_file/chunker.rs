@@ -131,6 +131,7 @@ pub async fn get_file_stats(path: &Path) -> Result<(usize, usize), ReadError> {
 /// Check if a file can be read directly based on size
 /// 
 /// Returns true if the file is small enough for direct reading
+#[allow(dead_code)]
 pub fn can_read_directly(file_size: usize) -> bool {
     file_size <= thresholds::MAX_DIRECT
 }

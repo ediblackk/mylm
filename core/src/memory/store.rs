@@ -646,7 +646,7 @@ impl VectorStore {
     /// - Similarity < 0.85: Add as new memory
     pub async fn add_memory_typed_with_id(
         &self,
-        id: i64,
+        _id: i64,
         content: &str,
         memory_type: MemoryType,
         session_id: Option<String>,
@@ -1147,7 +1147,7 @@ impl VectorStore {
         
         // Apply offset and limit
         let start = offset.min(memories.len());
-        let end = (offset + limit).min(memories.len());
+        let _end = (offset + limit).min(memories.len());
         let paginated: Vec<Memory> = memories.into_iter().skip(start).take(limit).collect();
         
         Ok(paginated)

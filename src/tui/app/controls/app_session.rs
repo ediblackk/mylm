@@ -16,6 +16,8 @@ impl AppStateContainer {
         Ok(())
     }
 
+    /// Manual condensation is not supported in the new architecture
+    /// Memory management is handled by the core agent
     #[allow(dead_code)]
     pub async fn trigger_manual_condensation(
         &mut self,

@@ -106,13 +106,13 @@ impl TelemetryCapability for MemoryCapability {
 /// Memory-augmented engine wrapper
 pub struct MemoryAugmentedEngine<E> {
     inner: E,
-    #[allow(dead_code)]
-    memory: Arc<MemoryCapability>,
+    /// Memory capability (reserved for future integration)
+    _memory: Arc<MemoryCapability>,
 }
 
 impl<E> MemoryAugmentedEngine<E> {
     pub fn new(inner: E, memory: Arc<MemoryCapability>) -> Self {
-        Self { inner, memory }
+        Self { inner, _memory: memory }
     }
 }
 

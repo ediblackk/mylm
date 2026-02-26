@@ -109,7 +109,7 @@ impl From<TimestampedChatMessage> for ChatMessage {
 
 /// Application state enum - represents the current state of the TUI
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
+
 pub enum AppState {
     /// Idle - ready for user input
     Idle,
@@ -127,7 +127,8 @@ pub enum AppState {
     Error(String),
     /// Confirming exit
     ConfirmExit,
-    /// Naming session
+    /// Naming session (reserved for future use)
+    #[allow(dead_code)]
     NamingSession,
 }
 
@@ -152,31 +153,44 @@ pub enum Focus {
 
 /// Job status for background jobs display
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
+
 pub enum JobStatus {
     Running,
     Completed,
     Failed,
     Cancelled,
+    /// Timeout pending (reserved for future use)
+    #[allow(dead_code)]
     TimeoutPending,
     Stalled,
 }
 
 /// Action type for job tracking
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[allow(dead_code)]
+
 pub enum ActionType {
+    #[allow(dead_code)]
     Shell,
+    #[allow(dead_code)]
     Read,
+    #[allow(dead_code)]
     Write,
+    #[allow(dead_code)]
     Search,
+    #[allow(dead_code)]
     Ask,
+    #[allow(dead_code)]
     Done,
     ToolCall,
+    #[allow(dead_code)]
     Thought,
     ToolResult,
+    #[allow(dead_code)]
     Error,
+    #[allow(dead_code)]
     FinalAnswer,
+    /// System action (reserved for future use)
+    #[allow(dead_code)]
     System,
 }
 
@@ -196,6 +210,7 @@ pub enum ActionType {
 #[allow(dead_code)]
 pub struct StructuredScratchpad;
 
+
 #[allow(dead_code)]
 impl StructuredScratchpad {
     pub fn new() -> Self {
@@ -212,13 +227,15 @@ impl StructuredScratchpad {
 /// Note: This is a TUI projection of Core's Commonbox Job data.
 /// The Core owns the authoritative state; this struct mirrors it for display.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+
 pub struct Job {
     /// TUI-facing numeric ID (e.g., "1000")
     pub id: String,
     /// Core's UUID job ID (authoritative)
+    #[allow(dead_code)]
     pub job_id: String,
     /// Worker agent ID (e.g., "file_lister")
+    #[allow(dead_code)]
     pub agent_id: String,
     pub status: JobStatus,
     pub description: String,
@@ -233,9 +250,13 @@ pub struct Job {
 }
 
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
+
 pub struct JobMetrics {
+    /// Tokens used (reserved for future use)
+    #[allow(dead_code)]
     pub tokens_used: usize,
+    /// Cost (reserved for future use)
+    #[allow(dead_code)]
     pub cost: f64,
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
@@ -246,7 +267,7 @@ pub struct JobMetrics {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+
 pub struct ActionLogEntry {
     pub action_type: ActionType,
     pub description: String,
@@ -254,13 +275,12 @@ pub struct ActionLogEntry {
     pub timestamp: chrono::DateTime<chrono::Local>,
 }
 
+#[allow(dead_code)]
 impl Job {
-    #[allow(dead_code)]
     pub fn current_action(&self) -> Option<&str> {
         self.action_log.last().map(|e| e.description.as_str())
     }
 
-    #[allow(dead_code)]
     pub fn context_window(&self) -> (usize, usize) {
         // Returns (used_tokens, max_tokens) for display
         // Using total_tokens as used_tokens, with max from config
@@ -337,25 +357,32 @@ impl JobRegistry {
 
 /// TUI event types for the event loop
 #[derive(Debug)]
-#[allow(dead_code)]
+
 pub enum TuiEvent {
     /// Tick event for periodic updates
+    #[allow(dead_code)]
     Tick,
     /// User input event
+    #[allow(dead_code)]
     Input(crossterm::event::Event),
     /// PTY data received
+    #[allow(dead_code)]
     Pty(Vec<u8>),
     /// Agent response event
     AgentResponse(#[allow(dead_code)] ChatMessage, #[allow(dead_code)] TokenUsage),
     /// Tool output event
+    #[allow(dead_code)]
     ToolOutput(#[allow(dead_code)] String),
     /// Tool error event
+    #[allow(dead_code)]
     ToolError(#[allow(dead_code)] String),
     /// Configuration update event
     ConfigUpdate(#[allow(dead_code)] String),
     /// Condensed history after memory management
+    #[allow(dead_code)]
     CondensedHistory(#[allow(dead_code)] Vec<ChatMessage>),
     /// Status update from LLM client
+    #[allow(dead_code)]
     StatusUpdate(String),
 }
 
@@ -369,28 +396,37 @@ pub enum TuiEvent {
 /// - `{"t": "..."` for thought field
 /// - `: "..."` for final answer (after "f" key)
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-#[allow(dead_code)]
+
 pub enum StreamState {
     #[default]
     /// Looking for {"t": pattern
     LookingForThought,
     /// Found {, looking for "t":
+    #[allow(dead_code)]
     SawOpenBrace,
     /// Found {"t, looking for "":
+    #[allow(dead_code)]
     SawThoughtT,
     /// Found {"t":, waiting for thought value
+    #[allow(dead_code)]
     ExpectingThoughtValue,
     /// Streaming thought content
+    #[allow(dead_code)]
     InThoughtValue,
     /// Looking for "f": pattern after thought or at start
+    #[allow(dead_code)]
     LookingForFinal,
     /// Found "f", looking for :
+    #[allow(dead_code)]
     SawFinalF,
     /// Found "f":, waiting for final value
+    #[allow(dead_code)]
     ExpectingFinalValue,
     /// Streaming final answer content
+    #[allow(dead_code)]
     InFinalValue,
     /// Finished streaming final - ignore rest
+    #[allow(dead_code)]
     Done,
 }
 

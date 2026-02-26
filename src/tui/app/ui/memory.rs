@@ -11,7 +11,7 @@ use ratatui::{
 };
 
 /// Render user profile panel
-fn render_profile_panel(profile: &UserProfile) -> Vec<Line> {
+fn render_profile_panel(profile: &UserProfile) -> Vec<Line<'_>> {
     let mut lines = Vec::new();
     
     if profile.is_empty() {

@@ -326,11 +326,11 @@ where
     
     // Chunk pool for managing persistent file chunk workers
     // The session owns this, tools hold references to it
-    #[allow(dead_code)]
+    
     chunk_pool: Option<std::sync::Arc<crate::agent::tools::ChunkPool>>,
     
     // INVARIANT: Transport identity check - ensures transport is never swapped
-    #[allow(dead_code)]
+    
     transport_instance_id: u64,
 }
 

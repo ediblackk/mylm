@@ -59,7 +59,7 @@ async fn run_hub_menu(config: &mut Config) -> Result<()> {
                 println!("\n[STUB] Pop Terminal - Starting TUI with tmux context injection...\n");
                 // TODO: Inject tmux context into TUI session
                 // This would capture the current tmux pane's content and inject it into the terminal parser
-                if let Err(e) = run_tui_with_session(config).await {
+                if let Err(e) = run_tui_with_session(config, false).await {
                     eprintln!("TUI error: {}", e);
                 }
             }
@@ -68,10 +68,8 @@ async fn run_hub_menu(config: &mut Config) -> Result<()> {
             }
             HubChoice::ResumeSession => {
                 if hub::session_exists() {
-                    println!("\n[STUB] Resume Session - Loading last saved TUI session...\n");
-                    // TODO: Load session history and terminal state from disk
-                    // This would restore chat_history, terminal_parser state, and session metadata
-                    match run_tui_with_session(config).await {
+                    println!("\n🔄 Resuming previous session...\n");
+                    match run_tui_with_session(config, true).await {
                         Ok(tui::TuiResult::ReturnToHub) => {}
                         Ok(tui::TuiResult::Exit) => {
                             println!("\n👋 Goodbye!\n");
@@ -84,7 +82,7 @@ async fn run_hub_menu(config: &mut Config) -> Result<()> {
                 }
             }
             HubChoice::StartTui => {
-                match run_tui_with_session(config).await {
+                match run_tui_with_session(config, false).await {
                     Ok(tui::TuiResult::ReturnToHub) => {
                         // Continue to next hub iteration
                     }
@@ -99,12 +97,8 @@ async fn run_hub_menu(config: &mut Config) -> Result<()> {
             }
             HubChoice::StartIncognito => {
                 // Incognito = TUI Session without memory enabled
-                println!("\n[STUB] Incognito Mode - Starting TUI without memory persistence...\n");
-                // TODO: Disable memory features in TUI
-                // - memory_graph should be empty or disabled
-                // - scratchpad should not persist
-                // - session should not auto-save on exit
-                match run_tui_with_session(config).await {
+                println!("\n🕵️  Incognito Mode - Starting TUI without memory persistence...\n");
+                match run_tui_with_session(config, false).await {
                     Ok(tui::TuiResult::ReturnToHub) => {}
                     Ok(tui::TuiResult::Exit) => {
                         println!("\n👋 Goodbye!\n");
@@ -253,12 +247,12 @@ async fn setup_wizard(config: &mut Config) -> Result<()> {
 /// TUI SESSION WRAPPER - Composition root for TUI
 /// ============================================================================
 
-async fn run_tui_with_session(config: &Config) -> Result<tui::TuiResult> {
+async fn run_tui_with_session(config: &Config, resume: bool) -> Result<tui::TuiResult> {
     
     use mylm_core::agent::runtime::Session;
     use tokio::sync::mpsc;
     
-    mylm_core::info_log!("[MAIN] Starting TUI session (profile: {})", config.active_profile);
+    mylm_core::info_log!("[MAIN] Starting TUI session (profile: {}, resume: {})", config.active_profile, resume);
     
     // Create PTY manager FIRST (needed for terminal executor)
     let cwd = std::env::current_dir().ok();
@@ -312,15 +306,32 @@ async fn run_tui_with_session(config: &Config) -> Result<tui::TuiResult> {
         Some(commonbox), // Enable worker spawning
     );
     
-    // Create session for default profile
-    let mut session = match factory.create_default_session().await {
-        Ok(s) => s,
-        Err(e) => {
-            mylm_core::error_log!("[MAIN] Failed to create agent session: {}", e);
-            eprintln!("❌ Failed to create agent session: {}", e);
-            return Ok(tui::TuiResult::ReturnToHub);
+    // Create session - resumable if requested
+    let (mut session, session_data) = if resume {
+        match factory.create_resumable_session().await {
+            Ok((s, data)) => (s, data),
+            Err(e) => {
+                mylm_core::error_log!("[MAIN] Failed to create resumable agent session: {}", e);
+                eprintln!("❌ Failed to create agent session: {}", e);
+                return Ok(tui::TuiResult::ReturnToHub);
+            }
+        }
+    } else {
+        match factory.create_default_session().await {
+            Ok(s) => (s, None),
+            Err(e) => {
+                mylm_core::error_log!("[MAIN] Failed to create agent session: {}", e);
+                eprintln!("❌ Failed to create agent session: {}", e);
+                return Ok(tui::TuiResult::ReturnToHub);
+            }
         }
     };
+    
+    // Restore session data if available (UI stays dumb, just displays what core provides)
+    if let Some(ref data) = session_data {
+        app.restore_from_session(data);
+        println!("✅ Previous session restored with {} messages", data.history.len());
+    }
     
     // Get input sender and subscribe to output events
     let input_tx = session.input_sender();

@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, oneshot};
 /// A restricted tool registry that only exposes allowed tools
 pub struct RestrictedToolRegistry {
     /// Allowed tool names (stored for reference/debugging)
-    #[allow(dead_code)]
+    
     allowed_tools: HashSet<String>,
     /// Shell tool (may be WorkerShellTool for escalation)
     shell: Option<Arc<dyn ToolCapability>>,

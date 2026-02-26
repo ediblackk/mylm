@@ -36,8 +36,8 @@ impl SessionManager {
 #[derive(Debug, Clone)]
 pub struct TerminalDelegate;
 
+#[allow(dead_code)]
 impl TerminalDelegate {
-    #[allow(dead_code)]
     pub fn new() -> Self { Self }
 }
 
@@ -77,7 +77,7 @@ pub struct AppStateContainer {
     pub chat_visible_start_idx: usize,
     pub chat_visible_end_idx: usize,
     pub focus: Focus,
-    #[allow(dead_code)]
+    
     pub chat_input_area: Option<Rect>,
 
     // UI state
@@ -87,12 +87,12 @@ pub struct AppStateContainer {
     pub should_quit: bool,
     pub return_to_hub: bool,
     pub show_memory_view: bool,
-    #[allow(dead_code)]
+    
     pub memory_graph: MemoryGraph,
-    #[allow(dead_code)]
+    
     pub memory_graph_scroll: usize,
     /// Total memory count (may be more than loaded in memory_graph)
-    #[allow(dead_code)]
+    
     pub memory_total_count: usize,
     /// Search query for memory view filtering (real-time)
     pub memory_search_query: String,
@@ -102,7 +102,7 @@ pub struct AppStateContainer {
     pub help_scroll: usize,
     #[allow(dead_code)]
     pub update_available: bool,
-    #[allow(dead_code)]
+    
     pub exit_name_input: String,
     pub chat_width_percent: u16,
     #[allow(dead_code)]
@@ -267,7 +267,7 @@ pub struct AppStateContainer {
     pub pending_approval_with_response: Option<crate::tui::app::approval::PendingApproval>,
     
     /// Pending suggested command for clipboard copy
-    pub pending_suggestion: Option<String>,
+    pub _pending_suggestion: Option<String>,
     
     /// Flag to request session save
     pub save_session_request: bool,
@@ -433,7 +433,7 @@ impl AppStateContainer {
             // Missing fields
             pending_approval: None,
             pending_approval_with_response: None,
-            pending_suggestion: None,
+            _pending_suggestion: None,
             save_session_request: false,
             stream_in_final: false,
             session_active: true,
@@ -482,7 +482,7 @@ impl AppStateContainer {
         self.raw_buffer.extend_from_slice(data);
     }
 
-    #[allow(dead_code)]
+    
     pub fn resize_pty(&mut self, width: u16, height: u16) {
         self.terminal_size = (height, width);
         let _ = self.pty_manager.resize(height, width);
@@ -536,5 +536,57 @@ impl AppStateContainer {
     #[allow(dead_code)]
     pub fn init_terminal_delegate(&mut self, delegate: Arc<TerminalDelegate>) {
         self.terminal_delegate = Some(delegate);
+    }
+    
+    /// Restore chat history from core session data
+    /// 
+    /// This method populates the UI state from the session data provided by the core layer.
+    /// It restores chat history, context manager, session ID, and stats.
+    pub fn restore_from_session(&mut self, session_data: &mylm_core::agent::SessionData) {
+        use mylm_core::provider::chat::ChatMessage;
+        
+        mylm_core::info_log!("[STATE] Restoring session {} with {} messages", 
+            session_data.id, session_data.history.len());
+        
+        // Convert core Message to UI ChatMessage using the role string
+        self.chat_history = session_data.history.iter().map(|m| {
+            let chat_msg = ChatMessage {
+                role: match m.role.as_str() {
+                    "user" => mylm_core::provider::chat::MessageRole::User,
+                    "assistant" => mylm_core::provider::chat::MessageRole::Assistant,
+                    "system" => mylm_core::provider::chat::MessageRole::System,
+                    _ => mylm_core::provider::chat::MessageRole::User,
+                },
+                content: m.content.clone(),
+                name: None,
+                tool_call_id: None,
+                tool_calls: None,
+                reasoning_content: None,
+            };
+            TimestampedChatMessage::new(chat_msg)
+        }).collect();
+        
+        // Update context manager with restored history
+        let chat_msgs: Vec<ChatMessage> = self.chat_history.iter()
+            .map(|m| m.message.clone())
+            .collect();
+        self.context_manager.set_history(&chat_msgs);
+        
+        // Restore session ID for continuity
+        self.session_id = session_data.id.clone();
+        
+        // Update stats from metadata - convert core metadata to UI metadata
+        let metadata = crate::tui::app::session::SessionMetadata {
+            last_message_preview: session_data.metadata.last_message_preview.clone(),
+            message_count: session_data.metadata.message_count,
+            total_tokens: session_data.metadata.total_tokens,
+            input_tokens: session_data.metadata.input_tokens,
+            output_tokens: session_data.metadata.output_tokens,
+            cost: session_data.metadata.cost,
+            elapsed_seconds: session_data.metadata.elapsed_seconds,
+        };
+        self.session_monitor.resume_stats(&metadata, self.config.active_profile().context_window as u32);
+        
+        mylm_core::info_log!("[STATE] Session restored successfully");
     }
 }

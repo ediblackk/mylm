@@ -48,6 +48,7 @@ impl AppStateContainer {
         self.cursor_position += 1;
     }
 
+    
     #[allow(dead_code)]
     pub fn enter_string(&mut self, text: &str) {
         let clean_text = text.replace('\r', "");
@@ -127,6 +128,7 @@ impl AppStateContainer {
     }
 
     // Selection
+    
     #[allow(dead_code)]
     pub fn start_selection(&mut self, x: u16, y: u16, pane: Focus) {
         self.selection_start = Some((x, y));
@@ -149,6 +151,7 @@ impl AppStateContainer {
         // or explicitly clears it (e.g., pressing Escape or after copy/paste)
     }
 
+    
     #[allow(dead_code)]
     pub fn clear_selection(&mut self) {
         self.selection_start = None;
@@ -157,7 +160,7 @@ impl AppStateContainer {
         self.is_selecting = false;
     }
 
-    #[allow(dead_code)]
+    
     pub fn is_in_selection(&self, x: u16, y: u16, pane: Focus) -> bool {
         let (start, end, p) = match (self.selection_start, self.selection_end, self.selection_pane) {
             (Some(s), Some(e), Some(p)) => (s, e, p),
@@ -374,6 +377,7 @@ impl AppStateContainer {
     }
 
     // Streaming
+    
     #[allow(dead_code)]
     pub async fn start_streaming_final_answer(&mut self, _content: String, _usage: TokenUsage) {
         self.chat_history
@@ -389,11 +393,13 @@ impl AppStateContainer {
     }
 
     // History management
+    
     #[allow(dead_code)]
     pub fn set_history(&mut self, history: Vec<mylm_core::provider::chat::ChatMessage>) {
         self.chat_history = history.into_iter().map(TimestampedChatMessage::from).collect();
     }
 
+    
     #[allow(dead_code)]
     pub fn add_assistant_message(&mut self, content: String, usage: TokenUsage) {
         self.chat_history.push(TimestampedChatMessage::assistant(content.clone()));
@@ -412,6 +418,7 @@ impl AppStateContainer {
         }
     }
 
+    
     #[allow(dead_code)]
     pub fn add_system_message(&mut self, content: &str) {
         self.chat_history.push(TimestampedChatMessage::system(content.to_string()));
@@ -426,6 +433,7 @@ impl AppStateContainer {
     }
 
     /// Add assistant message without token usage (for simple UI messages)
+    
     #[allow(dead_code)]
     pub fn add_assistant_message_simple(&mut self, content: &str) {
         self.chat_history.push(TimestampedChatMessage::assistant(content.to_string()));

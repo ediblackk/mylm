@@ -33,8 +33,9 @@ pub struct ToolDescription {
 /// and the Session/runtime layer fulfills it.
 pub struct LlmEngine {
     system_prompt: String,
-    #[allow(dead_code)]
-    max_tool_failures: usize,
+    
+    /// Max tool failures before giving up (reserved for future use)
+    _max_tool_failures: usize,
     /// Dynamic tool descriptions for prompt generation
     tool_descriptions: Vec<ToolDescription>,
     /// Parser for LLM responses
@@ -45,7 +46,7 @@ impl LlmEngine {
     pub fn new() -> Self {
         Self {
             system_prompt: build_system_prompt(),
-            max_tool_failures: 2,
+            _max_tool_failures: 2,
             tool_descriptions: Vec::new(),
             parser: ShortKeyParser::new(),
         }

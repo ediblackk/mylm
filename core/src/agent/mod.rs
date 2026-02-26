@@ -134,6 +134,7 @@ pub use session::{
     SessionInput, WorkerEvent,
     SessionPersistence, PersistedSession, SessionMetadata,
     AgentStateCheckpoint, SessionBuilder,
+    persistence::SessionData,
 };
 
 pub use memory::{

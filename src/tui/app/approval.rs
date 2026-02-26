@@ -27,9 +27,8 @@ pub struct PendingApproval {
 /// Internal storage for current pending approval
 #[derive(Debug, Clone)]
 struct CurrentPending {
-    /// Whether a response has been sent
-    #[allow(dead_code)]
-    responded: bool,
+    /// Whether a response has been sent (reserved for future use)
+    _responded: bool,
 }
 
 /// TUI-based approval capability
@@ -97,7 +96,7 @@ impl ApprovalCapability for TuiApprovalCapability {
         
         // Store request info in current (without sender)
         *self.current.lock().await = Some(CurrentPending {
-            responded: false,
+            _responded: false,
         });
         
         // Send to UI

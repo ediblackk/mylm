@@ -319,6 +319,7 @@ impl Clone for ChunkPool {
 
 /// Worker handle for managing a chunk worker's lifecycle
 #[derive(Debug)]
+#[cfg(test)]
 pub struct ChunkWorkerHandle {
     /// Worker ID
     pub worker_id: WorkerId,
@@ -328,6 +329,8 @@ pub struct ChunkWorkerHandle {
     shutdown_tx: mpsc::Sender<()>,
 }
 
+
+#[cfg(test)]
 impl ChunkWorkerHandle {
     /// Create a new worker handle
     pub fn new(worker_id: WorkerId, chunk: FileChunk) -> (Self, mpsc::Receiver<()>) {
@@ -349,12 +352,15 @@ impl ChunkWorkerHandle {
 }
 
 /// Builder for creating chunk workers
+#[cfg(test)]
 pub struct ChunkWorkerBuilder {
     file_path: PathBuf,
     chunk: FileChunk,
     content: String,
 }
 
+
+#[cfg(test)]
 impl ChunkWorkerBuilder {
     /// Create a new worker builder
     pub fn new(file_path: PathBuf, chunk: FileChunk, content: String) -> Self {

@@ -27,7 +27,7 @@ mod example {
     use futures::Stream;
 
     /// Example: Production runtime with real LLM and terminal approval
-    #[allow(dead_code)]
+    
     fn create_production_runtime() -> AgentRuntime {
         // In real usage:
         // let llm_client = Arc::new(LlmClient::new(config).unwrap());
@@ -39,7 +39,7 @@ mod example {
     }
 
     /// Example: Testing runtime with auto-approval
-    #[allow(dead_code)]
+    
     fn create_test_runtime() -> AgentRuntime {
         use crate::agent::runtime::core::{
             LLMCapability, Capability, RuntimeContext, LLMError,

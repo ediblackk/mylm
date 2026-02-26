@@ -353,6 +353,47 @@ impl AgentSessionFactory {
         self.create_session("worker").await
     }
     
+    /// Create a resumable session for the default (main) profile
+    /// 
+    /// This creates a new session while also loading the previous session's data
+    /// (chat history, metadata) from disk. The returned SessionData can be used
+    /// by the UI to restore the conversation history.
+    /// 
+    /// # Returns
+    /// A tuple of (session, Option<SessionData>) where SessionData contains
+    /// the previous session's history for UI restoration.
+    pub async fn create_resumable_session(
+        &self,
+    ) -> Result<
+        (
+            AgencySession<
+                Planner,
+                ContractRuntime,
+                InMemoryTransport,
+            >,
+            Option<crate::agent::session::persistence::SessionData>,
+        ),
+        FactoryError,
+    > {
+        use crate::agent::session::persistence::SessionPersistence;
+        
+        let profile = self.config.active_profile.clone();
+        crate::info_log!("[FACTORY] Creating resumable session for profile: {}", profile);
+        
+        // Try to load previous session data for UI restoration
+        let session_data = SessionPersistence::load_latest_data().await;
+        if session_data.is_some() {
+            crate::info_log!("[FACTORY] Found previous session data to restore");
+        } else {
+            crate::info_log!("[FACTORY] No previous session data found, starting fresh");
+        }
+        
+        // Create new session (core state is always fresh)
+        let session = self.create_session(&profile).await?;
+        
+        Ok((session, session_data))
+    }
+    
     /// Create a worker session with specific configuration
     ///
     /// Applies worker-specific settings including:

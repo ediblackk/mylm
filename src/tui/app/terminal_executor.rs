@@ -18,11 +18,13 @@ use crate::tui::app::state::AppStateContainer;
 /// 
 /// This executor gets screen content from the App's vt100 parser.
 /// Command execution falls back to std::process::Command for reliability.
+/// Note: Reserved for future use
 #[allow(dead_code)]
 pub struct TuiTerminalExecutor {
     /// Function to get current screen content from the App
     get_screen_fn: Arc<dyn Fn() -> Result<String, String> + Send + Sync>,
 }
+
 
 #[allow(dead_code)]
 impl TuiTerminalExecutor {
@@ -40,6 +42,7 @@ impl TuiTerminalExecutor {
     /// 
     /// The App must remain alive for the lifetime of the executor.
     /// This uses a weak reference pattern to avoid circular dependencies.
+    #[allow(dead_code)]
     pub fn from_app(app: Arc<Mutex<AppStateContainer>>) -> Self {
         let screen_app = Arc::clone(&app);
         

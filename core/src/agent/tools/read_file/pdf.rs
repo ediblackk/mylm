@@ -79,6 +79,9 @@ fn is_encrypted(content: &[u8]) -> bool {
 /// Extract text with page markers
 /// 
 /// Returns text with embedded page markers like "\n--- Page N ---\n"
+/// 
+/// Note: Reserved for future use - page-aware PDF extraction
+#[allow(dead_code)]
 pub async fn extract_text_with_pages(path: &Path) -> Result<String, ReadError> {
     let path = path.to_path_buf();
     
@@ -90,6 +93,9 @@ pub async fn extract_text_with_pages(path: &Path) -> Result<String, ReadError> {
 }
 
 /// Synchronous extraction with page markers
+/// 
+/// Note: Reserved for future use
+#[allow(dead_code)]
 fn extract_text_with_pages_sync(path: &Path) -> Result<String, ReadError> {
     // pdf-extract doesn't give us page-by-page control easily
     // So we extract all text and then post-process to add page markers
@@ -220,6 +226,7 @@ fn find_matching_paren(s: &str, start: usize) -> Option<usize> {
 /// 
 /// Takes extracted text and formats it with virtual line numbers
 /// based on page numbers for consistent chunking
+#[cfg(test)]
 pub fn pdf_text_to_lines(text: &str, pages: Option<usize>) -> String {
     let mut result = String::new();
     
@@ -247,8 +254,10 @@ pub fn pdf_text_to_lines(text: &str, pages: Option<usize>) -> String {
 /// 
 /// TODO: Implement vision model integration for extracting content from
 /// diagrams, charts, and scanned images within PDFs
+#[allow(dead_code)]
 pub struct VisionModelStub;
 
+#[allow(dead_code)]
 impl VisionModelStub {
     /// Extract images from PDF pages
     /// 
@@ -272,8 +281,6 @@ impl VisionModelStub {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
-    use tokio::fs;
     
     // Note: These tests require actual PDF files
     // We create minimal PDF-like content for basic tests

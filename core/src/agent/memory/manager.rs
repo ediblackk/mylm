@@ -30,7 +30,7 @@ impl Default for MemoryMode {
 /// Unified memory manager for agent
 pub struct AgentMemoryManager {
     vector_store: Arc<VectorStore>,
-    #[allow(dead_code)]
+    
     journal: Option<Arc<tokio::sync::Mutex<Journal>>>,
     config: MemoryConfig,
     mode: MemoryMode,

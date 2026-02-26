@@ -412,7 +412,7 @@ pub fn show_worker_llm_settings_menu(_config: &Config) -> Result<WorkerLLMSettin
 /// APPLICATION SETTINGS MENU
 /// ============================================================================
 
-pub fn show_application_settings_menu(config: &Config) -> Result<ApplicationSettingsChoice> {
+pub fn show_application_settings_menu(_config: &Config) -> Result<ApplicationSettingsChoice> {
     print!("\x1B[2J\x1B[1;1H");
     
     println!("\n{}", Style::new().bold().apply_to("Application Settings"));
@@ -1942,8 +1942,6 @@ pub fn set_sandbox_directory() -> Result<()> {
 
 /// Toggle sandbox for main agent
 pub fn toggle_sandbox_for_main() -> Result<()> {
-    use std::path::PathBuf;
-    
     print!("\x1B[2J\x1B[1;1H");
     
     println!("\n{}", Style::new().bold().apply_to("🔒 Sandbox for Main Agent"));

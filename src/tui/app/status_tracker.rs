@@ -44,6 +44,7 @@ pub enum StatusInfo {
     AwaitingApproval { tool: String, #[allow(dead_code)] args: String },
 }
 
+
 #[allow(dead_code)]
 impl StatusInfo {
     /// Get a human-readable status message
@@ -79,11 +80,13 @@ impl StatusInfo {
     }
 
     /// Check if this is an error status
+    #[allow(dead_code)]
     pub fn is_error(&self) -> bool {
         matches!(self, StatusInfo::Error { .. })
     }
 
     /// Check if this is an executing status
+    #[allow(dead_code)]
     pub fn is_executing(&self) -> bool {
         matches!(self, StatusInfo::Executing { .. })
     }
@@ -99,6 +102,7 @@ pub struct StatusTracker {
     /// Recent error message (cleared on new activity)
     last_error: Option<String>,
 }
+
 
 #[allow(dead_code)]
 impl StatusTracker {
@@ -295,6 +299,7 @@ impl StatusTracker {
     }
 
     /// Get the current status message
+    #[allow(dead_code)]
     pub fn message(&self) -> String {
         self.current_status.message()
     }
@@ -305,16 +310,19 @@ impl StatusTracker {
     }
 
     /// Get the last error message if any
+    #[allow(dead_code)]
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }
 
     /// Get elapsed time since last activity
+    #[allow(dead_code)]
     pub fn idle_duration(&self) -> Duration {
         self.last_activity.elapsed()
     }
 
     /// Clear error status (call when user acknowledges error)
+    #[allow(dead_code)]
     pub fn clear_error(&mut self) {
         if matches!(self.current_status, StatusInfo::Error { .. }) {
             self.current_status = StatusInfo::Idle;
@@ -322,6 +330,7 @@ impl StatusTracker {
     }
 
     /// Force set a specific status (for manual overrides)
+    #[allow(dead_code)]
     pub fn set_status(&mut self, status: StatusInfo) {
         self.current_status = status;
         self.last_activity = Instant::now();

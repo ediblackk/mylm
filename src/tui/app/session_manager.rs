@@ -17,6 +17,7 @@ pub struct SessionManager {
     _save_task: tokio::task::JoinHandle<()>,
 }
 
+#[allow(dead_code)]
 impl SessionManager {
     /// Create a new SessionManager.
     /// 
@@ -32,7 +33,7 @@ impl SessionManager {
     ///      b) Rename to final: sessions_dir/join(format!("session_{}.json", session.id))
     ///      c) Also update latest.json (atomic rename as well)
     ///    - Handles errors gracefully (logs but doesn't panic)
-    #[allow(dead_code)]
+    
     pub fn new() -> Self {
         let (save_sender, mut save_receiver) = mpsc::channel::<Session>(1);
         let sessions_dir = Self::resolve_sessions_dir();
@@ -98,7 +99,7 @@ impl SessionManager {
     /// Non-blocking, fire-and-forget. The session is cloned and sent to the
     /// background task via channel.
     /// Reserved for future use (currently using set_current_session instead)
-    #[allow(dead_code)]
+    
     pub async fn save_session_async(&self, session: &Session) {
         let session_clone = session.clone();
         if let Err(e) = self.save_sender.send(session_clone).await {
@@ -109,7 +110,7 @@ impl SessionManager {
     /// Set the current session.
     /// Stores in self.current_session (using RwLock for interior mutability)
     /// and triggers an immediate save via the channel.
-    #[allow(dead_code)]
+    
     pub fn set_current_session(&self, session: Session) {
         // Update current session
         if let Ok(mut guard) = self.current_session.try_write() {
@@ -129,7 +130,7 @@ impl SessionManager {
     
     /// Get the current session (cloned).
     /// Reserved for future use
-    #[allow(dead_code)]
+    
     pub async fn get_current_session(&self) -> Option<Session> {
         let guard = self.current_session.read().await;
         guard.clone()
@@ -137,7 +138,7 @@ impl SessionManager {
     
     /// Load the latest session from latest.json.
     /// Async method - can be called from sync context via tokio::runtime::Handle::current().block_on()
-    #[allow(dead_code)]
+    
     pub async fn load_latest() -> Option<Session> {
         let sessions_dir = Self::resolve_sessions_dir();
         let latest_path = sessions_dir.join("latest.json");
@@ -166,7 +167,7 @@ impl SessionManager {
     /// Load all sessions from the sessions directory.
     /// Scans for files matching "session_*.json", excludes "latest.json".
     /// Deserializes each and returns sorted by timestamp descending.
-    #[allow(dead_code)]
+    
     pub fn load_sessions() -> Vec<Session> {
         let sessions_dir = Self::resolve_sessions_dir();
         let mut sessions: Vec<Session> = Vec::new();
@@ -221,7 +222,7 @@ impl SessionManager {
     /// Deletes session_{id}.json and any associated temp files.
     /// Returns Result<(), std::io::Error> for caller to handle.
     /// Reserved for future session management UI
-    #[allow(dead_code)]
+    
     pub async fn delete_session(id: &str) -> Result<(), std::io::Error> {
         let sessions_dir = Self::resolve_sessions_dir();
         let session_path = sessions_dir.join(format!("session_{}.json", id));
@@ -261,7 +262,7 @@ impl SessionManager {
     }
     
     /// Save session to disk atomically: write to temp file, then rename.
-    #[allow(dead_code)]
+    
     async fn save_session_atomic(dir: &PathBuf, session: &Session) -> Result<(), std::io::Error> {
         let temp_path = dir.join(format!("session_{}.tmp", session.id));
         let final_path = dir.join(format!("session_{}.json", session.id));
@@ -280,7 +281,7 @@ impl SessionManager {
     }
     
     /// Update latest.json atomically: write to temp file, then rename.
-    #[allow(dead_code)]
+    
     async fn update_latest_atomic(dir: &PathBuf, session: &Session) -> Result<(), std::io::Error> {
         let temp_path = dir.join("latest.tmp");
         let final_path = dir.join("latest.json");

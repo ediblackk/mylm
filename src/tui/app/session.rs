@@ -123,7 +123,7 @@ impl SessionMonitor {
     }
 
     /// Add usage from a single LLM interaction
-    #[allow(dead_code)]
+    
     pub fn add_usage(&mut self, usage: &TokenUsage, input_price_1m: f64, output_price_1m: f64) {
         self.stats.input_tokens += usage.prompt_tokens;
         self.stats.output_tokens += usage.completion_tokens;

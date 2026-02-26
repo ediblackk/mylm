@@ -85,9 +85,8 @@ where
     /// Runtime for executing decisions
     runtime: AgentRuntime,
     
-    /// Configuration
-    #[allow(dead_code)]
-    config: SessionConfig,
+    /// Configuration (stored for future use)
+    _config: SessionConfig,
     
     /// Memory manager for long-term storage
     memory_manager: Option<Arc<AgentMemoryManager>>,
@@ -126,7 +125,7 @@ where
             engine,
             state,
             runtime,
-            config,
+            _config: config,
             memory_manager: None,
             persistence: Some(SessionPersistence::new()),
             session_id: uuid::Uuid::new_v4().to_string(),
@@ -151,7 +150,7 @@ where
             engine,
             state,
             runtime,
-            config: session_config,
+            _config: session_config,
             memory_manager: None,
             persistence: Some(SessionPersistence::from_config(memory_config)),
             session_id: uuid::Uuid::new_v4().to_string(),
@@ -175,7 +174,7 @@ where
             engine,
             state,
             runtime,
-            config,
+            _config: config,
             memory_manager: Some(memory_manager),
             persistence: Some(persistence),
             session_id: uuid::Uuid::new_v4().to_string(),
@@ -212,7 +211,7 @@ where
             engine,
             state,
             runtime,
-            config,
+            _config: config,
             memory_manager,
             persistence: Some(SessionPersistence::new()),
             session_id: persisted.id,
