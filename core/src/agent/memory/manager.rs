@@ -736,7 +736,8 @@ impl MemoryProvider for AgentMemoryProvider {
         crate::info_log!("[MEMORY_PROVIDER] Got {} hot memories", hot_memories.len());
         
         // 2. Semantic memory: relevant memories based on user query
-        let semantic_memories = manager.search_memories(user_message, 10).await.unwrap_or_default();
+        let semantic_limit = manager.config().semantic_search_limit;
+        let semantic_memories = manager.search_memories(user_message, semantic_limit).await.unwrap_or_default();
         crate::info_log!("[MEMORY_PROVIDER] Got {} semantic matches", semantic_memories.len());
         
         crate::debug_log!("[MEMORY_PROVIDER] Hot memories: {}, Semantic matches: {}", 

@@ -405,6 +405,12 @@ pub struct MemoryConfig {
     pub embedding_model: String,
     /// Memories to include in prompt (hot memory limit)
     pub context_window: usize,
+    /// Semantic search results limit (for proactive context injection)
+    #[serde(default = "default_semantic_search_limit")]
+    pub semantic_search_limit: usize,
+    /// Tool search results limit (when model explicitly uses memory tool)
+    #[serde(default = "default_tool_search_limit")]
+    pub tool_search_limit: usize,
     /// Custom storage path (None = use default)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_path: Option<std::path::PathBuf>,
@@ -415,6 +421,9 @@ pub struct MemoryConfig {
     #[serde(default)]
     pub incognito: bool,
 }
+
+fn default_semantic_search_limit() -> usize { 10 }
+fn default_tool_search_limit() -> usize { 5 }
 
 fn default_true() -> bool {
     true
@@ -428,6 +437,8 @@ impl Default for MemoryConfig {
             semantic_search: true,
             embedding_model: "default".to_string(),
             context_window: 5,
+            semantic_search_limit: default_semantic_search_limit(),
+            tool_search_limit: default_tool_search_limit(),
             storage_path: None,
             autosave: true,
             incognito: false,

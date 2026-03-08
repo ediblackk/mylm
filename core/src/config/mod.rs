@@ -46,7 +46,7 @@ pub use unified::{
     Config,
     ProfileConfig, ResolvedProfile, WebSearchConfig,
     ProviderConfig, ProviderType,
-    AppConfig, FeatureConfig, PaCoReConfig, Theme,
+    AppConfig, FeatureConfig, MemorySettings, PaCoReConfig, Theme,
 };
 
 // Re-exports from manager

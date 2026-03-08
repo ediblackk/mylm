@@ -70,6 +70,34 @@ pub enum Theme {
     Light,
 }
 
+/// Memory settings for context injection
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemorySettings {
+    /// Hot memory limit: recent memories to include in prompt
+    #[serde(default = "default_memory_context_window")]
+    pub context_window: usize,
+    /// Semantic search results to include
+    #[serde(default = "default_memory_semantic_limit")]
+    pub semantic_search_limit: usize,
+    /// Tool search results limit
+    #[serde(default = "default_memory_tool_limit")]
+    pub tool_search_limit: usize,
+}
+
+fn default_memory_context_window() -> usize { 5 }
+fn default_memory_semantic_limit() -> usize { 10 }
+fn default_memory_tool_limit() -> usize { 5 }
+
+impl Default for MemorySettings {
+    fn default() -> Self {
+        Self {
+            context_window: default_memory_context_window(),
+            semantic_search_limit: default_memory_semantic_limit(),
+            tool_search_limit: default_memory_tool_limit(),
+        }
+    }
+}
+
 /// Feature toggles
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureConfig {
@@ -80,6 +108,10 @@ pub struct FeatureConfig {
     /// Enable memory/vector store
     #[serde(default = "default_true")]
     pub memory: bool,
+
+    /// Memory context injection settings
+    #[serde(default)]
+    pub memory_settings: MemorySettings,
 
     /// Enable worker delegation
     #[serde(default = "default_true")]
@@ -103,6 +135,7 @@ impl Default for FeatureConfig {
         Self {
             web_search: false,
             memory: true,
+            memory_settings: MemorySettings::default(),
             workers: true,
             telemetry: false,
             auto_approve_safe: false,

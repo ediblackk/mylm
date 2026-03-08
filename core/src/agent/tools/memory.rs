@@ -24,12 +24,18 @@ use serde::Deserialize;
 /// Memory tool for storing and retrieving memories
 pub struct MemoryTool {
     store: Arc<VectorStore>,
+    search_limit: usize,
 }
 
 impl MemoryTool {
-    /// Create a new memory tool
+    /// Create a new memory tool with default search limit
     pub fn new(store: Arc<VectorStore>) -> Self {
-        Self { store }
+        Self { store, search_limit: 5 }
+    }
+    
+    /// Create a new memory tool with custom search limit
+    pub fn with_search_limit(store: Arc<VectorStore>, limit: usize) -> Self {
+        Self { store, search_limit: limit }
     }
     
     /// Parse and execute memory command
@@ -231,7 +237,7 @@ impl MemoryTool {
             });
         }
         
-        match self.store.search_memory(query, 5).await {
+        match self.store.search_memory(query, self.search_limit).await {
             Ok(memories) => {
                 if memories.is_empty() {
                     Ok(ToolResult::Success {

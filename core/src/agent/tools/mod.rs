@@ -156,9 +156,15 @@ impl ToolRegistry {
         self
     }
     
-    /// Enable memory tool with a VectorStore
+    /// Enable memory tool with a VectorStore (default search limit)
     pub fn with_memory(mut self, store: Arc<VectorStore>) -> Self {
         self.memory = Some(MemoryTool::new(store));
+        self
+    }
+    
+    /// Enable memory tool with a VectorStore and custom search limit
+    pub fn with_memory_and_limit(mut self, store: Arc<VectorStore>, search_limit: usize) -> Self {
+        self.memory = Some(MemoryTool::with_search_limit(store, search_limit));
         self
     }
     
@@ -282,8 +288,8 @@ impl ToolRegistry {
         if self.memory.is_some() {
             descriptions.push(ToolDescription {
                 name: "memory",
-                description: "Store or search long-term memories",
-                usage: "{\"a\": \"memory\", \"i\": {\"action\": \"add\", \"content\": \"<content>\"}} or {\"a\": \"memory\", \"i\": {\"action\": \"search\", \"query\": \"<query>\"}}",
+                description: "Store or search long-term memories. CRITICAL: Use EXACT JSON format shown",
+                usage: "Add: {\"a\": \"memory\", \"i\": {\"add\": \"User prefers dark mode\"}} | Search: {\"a\": \"memory\", \"i\": {\"search\": \"dark mode preference\"}}",
             });
         }
         

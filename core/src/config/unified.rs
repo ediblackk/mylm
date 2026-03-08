@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-pub use super::app::{AppConfig, FeatureConfig, PaCoReConfig, Theme};
+pub use super::app::{AppConfig, FeatureConfig, MemorySettings, PaCoReConfig, Theme};
 pub use super::profile::{ProfileConfig, ResolvedProfile, WebSearchConfig};
 pub use super::provider::{ProviderConfig, ProviderType};
 

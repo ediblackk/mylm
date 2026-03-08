@@ -241,6 +241,26 @@ pub enum OutputEvent {
         /// Segment ID for recovery
         segment_id: String,
     },
+    
+    /// Memory was added to the vector store
+    MemoryAdded {
+        /// Brief description of what was remembered
+        content_preview: String,
+        /// Category ID if assigned
+        category_id: Option<String>,
+        /// Memory ID in the store
+        memory_id: Option<i64>,
+    },
+    
+    /// Memory was retrieved from the vector store
+    MemoryRetrieved {
+        /// The search query used
+        query: String,
+        /// Number of memories found
+        result_count: usize,
+        /// Previews of retrieved memories
+        memory_previews: Vec<String>,
+    },
 }
 
 /// Session result
@@ -841,9 +861,56 @@ where
                                 // Send OutputEvents for observations that UI needs to display
                                 for (intent_id, obs) in &observations {
                                     match obs {
-                                        Observation::ToolCompleted { result, .. } => {
+                                        Observation::ToolCompleted { tool, result, .. } => {
                                             let output = match result {
-                                                crate::agent::types::events::ToolResult::Success { output, .. } => output.clone(),
+                                                crate::agent::types::events::ToolResult::Success { output, structured, .. } => {
+                                                    // Emit memory-specific events for UI visualization
+                                                    if tool == "memory" {
+                                                        if let Some(structured) = structured {
+                                                            if let Some(action) = structured.get("action").and_then(|v| v.as_str()) {
+                                                                match action {
+                                                                    "add" => {
+                                                                        let content = structured.get("content")
+                                                                            .and_then(|v| v.as_str())
+                                                                            .unwrap_or("Memory saved")
+                                                                            .to_string();
+                                                                        let _ = self.output_tx.send(OutputEvent::MemoryAdded {
+                                                                            content_preview: content.chars().take(100).collect(),
+                                                                            category_id: None,
+                                                                            memory_id: None,
+                                                                        });
+                                                                    }
+                                                                    "search" => {
+                                                                        let query = structured.get("query")
+                                                                            .and_then(|v| v.as_str())
+                                                                            .unwrap_or("Search")
+                                                                            .to_string();
+                                                                        let results = structured.get("results")
+                                                                            .and_then(|v| v.as_array())
+                                                                            .map(|arr| arr.len())
+                                                                            .unwrap_or(0);
+                                                                        let previews = structured.get("results")
+                                                                            .and_then(|v| v.as_array())
+                                                                            .map(|arr| {
+                                                                                arr.iter()
+                                                                                    .take(3)
+                                                                                    .filter_map(|m| m.get("content").and_then(|c| c.as_str()).map(|s| s.chars().take(50).collect()))
+                                                                                    .collect()
+                                                                            })
+                                                                            .unwrap_or_default();
+                                                                        let _ = self.output_tx.send(OutputEvent::MemoryRetrieved {
+                                                                            query,
+                                                                            result_count: results,
+                                                                            memory_previews: previews,
+                                                                        });
+                                                                    }
+                                                                    _ => {}
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    output.clone()
+                                                }
                                                 crate::agent::types::events::ToolResult::Error { message, .. } => format!("Error: {}", message),
                                                 crate::agent::types::events::ToolResult::Cancelled => "Cancelled".to_string(),
                                             };
