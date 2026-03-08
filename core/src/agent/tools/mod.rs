@@ -10,6 +10,7 @@ pub mod list_files;
 pub mod git;
 pub mod web_search;
 pub mod memory;
+pub mod notes;
 pub mod delegate;
 pub mod scratchpad;
 pub mod worker_shell;
@@ -23,6 +24,7 @@ pub use list_files::ListFilesTool;
 pub use git::{GitStatusTool, GitLogTool, GitDiffTool};
 pub use web_search::{WebSearchTool, WebSearchConfig, SearchProvider};
 pub use memory::MemoryTool;
+pub use notes::NotesTool;
 pub use delegate::DelegateTool;
 pub use scratchpad::{ScratchpadTool, create_shared_scratchpad, SharedScratchpad};
 pub use worker_shell::{WorkerShellTool, WorkerShellPermissions, EscalationRequest, EscalationResponse};
@@ -48,6 +50,7 @@ pub struct ToolRegistry {
     git_diff: GitDiffTool,
     web_search: WebSearchTool,
     memory: Option<MemoryTool>,
+    notes: NotesTool,
     terminal: Arc<dyn TerminalExecutor>,
     /// Delegate tool for spawning workers (optional, requires initialization)
     delegate: Option<Arc<DelegateTool>>,
@@ -78,6 +81,7 @@ impl ToolRegistry {
             git_diff: GitDiffTool::new(),
             web_search: WebSearchTool::new(),
             memory: None,
+            notes: NotesTool::new(),
             terminal: Arc::new(DefaultTerminalExecutor::new()),
             delegate: None,
             scratchpad: None,
@@ -101,6 +105,7 @@ impl ToolRegistry {
             git_diff: GitDiffTool::new(),
             web_search: WebSearchTool::new(),
             memory: None,
+            notes: NotesTool::new(),
             terminal: Arc::new(DefaultTerminalExecutor::new()),
             delegate: None,
             scratchpad: None,
@@ -179,6 +184,7 @@ impl ToolRegistry {
             "git_diff" => Some(&self.git_diff),
             "web_search" => Some(&self.web_search),
             "memory" => self.memory.as_ref().map(|m| m as &dyn ToolCapability),
+            "notes" => Some(&self.notes),
             "delegate" => self.delegate.as_ref().map(|d| d.as_ref() as &dyn ToolCapability),
             "scratchpad" => self.scratchpad.as_ref().map(|s| s as &dyn ToolCapability),
             "commonboard" => self.commonboard.as_ref().map(|c| c as &dyn ToolCapability),
@@ -203,6 +209,7 @@ impl ToolRegistry {
             "git_log".to_string(),
             "git_diff".to_string(),
             "web_search".to_string(),
+            "notes".to_string(),
         ];
         if self.memory.is_some() {
             tools.push("memory".to_string());
@@ -264,6 +271,11 @@ impl ToolRegistry {
                 name: "web_search",
                 description: "Search the web for information",
                 usage: "{\"a\": \"web_search\", \"i\": {\"query\": \"<search>\"}}",
+            },
+            ToolDescription {
+                name: "notes",
+                description: "Access user's quick notes for context and reminders",
+                usage: "{\"a\": \"notes\", \"i\": {\"action\": \"read\"}} or {\"a\": \"notes\", \"i\": {\"action\": \"search\", \"query\": \"<search>\"}}",
             },
         ];
         

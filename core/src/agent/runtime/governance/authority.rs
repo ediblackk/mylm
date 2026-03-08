@@ -190,6 +190,16 @@ impl WorkerPermissions {
             "shutdown *".to_string(),
             "reboot *".to_string(),
             ":(){:|:&};:".to_string(), // Fork bomb
+            // Windows equivalents
+            "format C:*".to_string(),
+            "format C: *".to_string(),
+            "format c:*".to_string(),
+            "format c: *".to_string(),
+            "diskpart *".to_string(),
+            "restart-computer*".to_string(),
+            "stop-computer*".to_string(),
+            "shutdown /s*".to_string(),
+            "shutdown /r*".to_string(),
         ]
     }
 

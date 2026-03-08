@@ -111,32 +111,32 @@ pub async fn forward_output_events(
     }
 }
 
-/// Example frontend usage (React/TypeScript):
-/// 
-/// ```typescript
-/// import { invoke } from '@tauri-apps/api/core';
-/// import { listen } from '@tauri-apps/api/event';
-/// 
-/// // Start session
-/// await invoke('mylm_start_session', { resume: true });
-/// 
-/// // Listen for events
-/// listen('mylm-event', (event) => {
-///   const outputEvent = JSON.parse(event.payload);
-///   switch (outputEvent.type) {
-///     case 'ResponseChunk':
-///       appendToChat(outputEvent.content);
-///       break;
-///     case 'ToolExecuting':
-///       showToolStatus(outputEvent.tool);
-///       break;
-///     // ... handle other events
-///   }
-/// });
-/// 
-/// // Send message
-/// await invoke('mylm_send_user_message', { 
-///   sessionId: 'current',
-///   text: 'Hello MyLM' 
-/// });
-/// ```
+// Example frontend usage (React/TypeScript):
+// 
+// ```typescript
+// import { invoke } from '@tauri-apps/api/core';
+// import { listen } from '@tauri-apps/api/event';
+//
+// // Start session
+// await invoke('mylm_start_session', { resume: true });
+//
+// // Listen for events
+// listen('mylm-event', (event) => {
+//   const outputEvent = JSON.parse(event.payload);
+//   switch (outputEvent.type) {
+//     case 'ResponseChunk':
+//       appendToChat(outputEvent.content);
+//       break;
+//     case 'ToolExecuting':
+//       showToolStatus(outputEvent.tool);
+//       break;
+//     // ... handle other events
+//   }
+// });
+//
+// // Send message
+// await invoke('mylm_send_user_message', { 
+//   sessionId: 'current',
+//   text: 'Hello MyLM' 
+// });
+// ```

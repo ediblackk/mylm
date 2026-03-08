@@ -67,15 +67,33 @@ impl TerminalExecutor for DefaultTerminalExecutor {
         let output_result = if let Some(timeout_duration) = timeout {
             tokio_timeout(
                 timeout_duration,
+                async {
+                    if cfg!(target_os = "windows") {
+                        Command::new("cmd")
+                            .args(["/C", &command])
+                            .output()
+                            .await
+                    } else {
+                        Command::new("sh")
+                            .args(["-c", &command])
+                            .output()
+                            .await
+                    }
+                }
+            ).await
+        } else {
+            let result = if cfg!(target_os = "windows") {
+                Command::new("cmd")
+                    .args(["/C", &command])
+                    .output()
+                    .await
+            } else {
                 Command::new("sh")
                     .args(["-c", &command])
                     .output()
-            ).await
-        } else {
-            match Command::new("sh")
-                .args(["-c", &command])
-                .output()
-                .await {
+                    .await
+            };
+            match result {
                 Ok(output) => Ok(Ok(output)),
                 Err(e) => Ok(Err(e)),
             }

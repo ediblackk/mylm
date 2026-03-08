@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use tokio::sync::broadcast;
 use std::time::Instant;
 use futures::StreamExt;
+use tokio::time::{timeout, Duration};
 
 use crate::agent::types::intents::{Intent, ExitReason};
 use crate::agent::types::graph::IntentGraph;
@@ -347,30 +348,30 @@ impl ContractRuntime {
                 if let Some(ref output_tx) = self.output_tx {
                     // Clone request for potential fallback
                     let req_clone = req.clone();
+                    
+                    crate::info_log!("[RUNTIME] Creating LLM stream...");
                     let mut stream = self.llm.complete_stream(&ctx, req);
                     let mut full_content = String::new();
                     let mut stream_failed = false;
                     let mut stream_error = String::new();
                     let mut accumulated_usage: Option<crate::agent::types::events::TokenUsage> = None;
                     
-                    crate::info_log!("[RUNTIME] Starting LLM stream...");
+                    crate::info_log!("[RUNTIME] Starting LLM stream polling (60s timeout)...");
                     let mut chunk_count = 0;
-                    while let Some(chunk_result) = stream.next().await {
+                    let stream_timeout = Duration::from_secs(60);
+                    let stream_start = Instant::now();
+                    
+                    while let Ok(Some(chunk_result)) = timeout(stream_timeout, stream.next()).await {
                         match chunk_result {
                             Ok(chunk) => {
-                                // Skip logging empty keep-alive chunks
-                                if !chunk.content.is_empty() {
-                                    // crate::debug_log!("[RUNTIME] Got chunk: len={}, is_final={}", chunk.content.len(), chunk.is_final);
-                                }
+                                crate::debug_log!("[RUNTIME] Got chunk: is_final={}, content_len={}", chunk.is_final, chunk.content.len());
                                 if chunk.is_final {
-                                    // Capture usage from final chunk
                                     accumulated_usage = chunk.usage;
                                     break;
                                 }
                                 if !chunk.content.is_empty() {
                                     chunk_count += 1;
                                     full_content.push_str(&chunk.content);
-                                    // Emit streaming chunk
                                     if let Err(e) = output_tx.send(OutputEvent::ResponseChunk {
                                         content: chunk.content.clone(),
                                     }) {
@@ -384,6 +385,14 @@ impl ContractRuntime {
                                 stream_error = e.message;
                                 break;
                             }
+                        }
+                        
+                        // Check overall timeout
+                        if stream_start.elapsed() > stream_timeout {
+                            crate::error_log!("[RUNTIME] Stream timeout after 60s");
+                            stream_failed = true;
+                            stream_error = "Timeout: LLM stream took too long".to_string();
+                            break;
                         }
                     }
                     

@@ -69,6 +69,16 @@ impl Planner {
         self.approval_policy = policy;
         self
     }
+    
+    /// Initialize the planner with conversation history
+    /// 
+    /// This is used when restoring a session from persisted state.
+    /// The history is added to the agent's state without triggering any responses.
+    pub fn with_history(mut self, history: Vec<Message>) -> Self {
+        self.state.history = history;
+        crate::info_log!("[PLANNER] Initialized with {} messages from history", self.state.history.len());
+        self
+    }
 }
 
 impl Default for Planner {

@@ -282,7 +282,8 @@ impl LlmClient {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            let filename = format!("/tmp/mylm_context_bloat_{}_{}.txt", agent_type.to_lowercase(), timestamp);
+            let temp_dir = std::env::temp_dir();
+            let filename = temp_dir.join(format!("mylm_context_bloat_{}_{}.txt", agent_type.to_lowercase(), timestamp));
             
             let mut content = format!("Context Bloat Debug Log\n");
             content.push_str(&format!("========================\n"));
@@ -313,14 +314,14 @@ impl LlmClient {
                 crate::error_log!("[{}] {} Failed to write context debug file: {}", agent_type, job_info, e);
             } else {
                 crate::error_log!("[{}] {} Context bloat detected! Debug log written to: {}", 
-                    agent_type, job_info, filename);
+                    agent_type, job_info, filename.display());
             }
             
             // If exceeds max_context, return error immediately
             if estimated_input_tokens > max_context {
                 return Err(anyhow::anyhow!(
                     "Context limit exceeded: estimated {} tokens > max {} tokens. Debug log: {}",
-                    estimated_input_tokens, max_context, filename
+                    estimated_input_tokens, max_context, filename.display()
                 ));
             }
         }

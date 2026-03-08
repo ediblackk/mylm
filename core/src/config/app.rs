@@ -22,6 +22,10 @@ pub struct AppConfig {
     /// Theme
     #[serde(default)]
     pub theme: Theme,
+
+    /// Onboarding completed flag
+    #[serde(default)]
+    pub onboarding_completed: bool,
 }
 
 impl Default for AppConfig {
@@ -31,16 +35,25 @@ impl Default for AppConfig {
             shell: default_shell(),
             editor: default_editor(),
             theme: Theme::default(),
+            onboarding_completed: false,
         }
     }
 }
 
 fn default_shell() -> String {
-    std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+    if cfg!(target_os = "windows") {
+        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+    } else {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+    }
 }
 
 fn default_editor() -> String {
-    std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string())
+    if cfg!(target_os = "windows") {
+        std::env::var("EDITOR").unwrap_or_else(|_| "notepad".to_string())
+    } else {
+        std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string())
+    }
 }
 
 fn default_true() -> bool {

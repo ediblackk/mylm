@@ -63,11 +63,17 @@ impl TerminalExecutor for TuiTerminalExecutor {
         
         // Execute using std::process::Command for reliability
         // In the future, this could use the PTY for true shared session
-        let output = tokio::process::Command::new("sh")
-            .args(["-c", &command])
-            .output()
-            .await
-            .map_err(|e| format!("Failed to execute command: {}", e))?;
+        let output = if cfg!(target_os = "windows") {
+            tokio::process::Command::new("cmd")
+                .args(["/C", &command])
+                .output()
+                .await
+        } else {
+            tokio::process::Command::new("sh")
+                .args(["-c", &command])
+                .output()
+                .await
+        }.map_err(|e| format!("Failed to execute command: {}", e))?;
         
         let mut result = String::new();
         

@@ -149,6 +149,7 @@ pub enum UserInput {
 /// These events are serialized for transport to the UI layer (e.g., Tauri).
 /// All variants must be serializable for IPC.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "PascalCase")]
 pub enum OutputEvent {
     /// Agent is thinking/processing
     Thinking { intent_id: IntentId },

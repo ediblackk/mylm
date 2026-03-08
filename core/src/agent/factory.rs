@@ -166,12 +166,14 @@ impl AgentSessionFactory {
     /// 
     /// # Arguments
     /// * `profile_name` - Name of the profile to use (e.g., "default", "worker")
+    /// * `initial_history` - Optional conversation history to seed the session with (for resuming sessions)
     /// 
     /// # Returns
     /// A fully configured `AgencySession` ready to run
     pub async fn create_session(
         &self,
         profile_name: &str,
+        initial_history: Option<Vec<crate::agent::cognition::kernel::Message>>,
     ) -> Result<
         AgencySession<
             Planner,
@@ -256,17 +258,28 @@ impl AgentSessionFactory {
         use crate::config::agent::MemoryConfig;
         use crate::agent::memory::AgentMemoryProvider;
         crate::info_log!("[FACTORY] features.memory = {}", self.config.features.memory);
+        
+        // Use Javi's memory path for consistency with Tauri frontend
+        let javi_memory_path = dirs::config_dir()
+            .map(|d| d.join("javi").join("memory"))
+            .or_else(|| dirs::data_dir().map(|d| d.join("javi").join("memory")));
+        
         let memory_config = if self.config.features.memory {
             MemoryConfig {
                 enabled: true,
+                storage_path: javi_memory_path,
                 ..MemoryConfig::default()
             }
         } else {
             MemoryConfig {
                 enabled: false,
+                storage_path: javi_memory_path,
                 ..MemoryConfig::default()
             }
         };
+        
+        crate::info_log!("[FACTORY] Memory storage path: {:?}", memory_config.storage_path);
+        
         let memory_manager = if memory_config.enabled {
             crate::info_log!("[FACTORY] Creating memory manager...");
             match AgentMemoryManager::new(memory_config).await {
@@ -310,8 +323,18 @@ impl AgentSessionFactory {
         
         // Step 10: Create planner directly with dynamic tools
         // NOTE: Memory is now handled at runtime layer via Intent::Remember
-        let kernel = Planner::new()
+        let mut kernel_builder = Planner::new()
             .with_tool_descriptions(tool_descriptions);
+        
+        // Seed with initial history if provided (for session resumption)
+        if let Some(history) = initial_history {
+            if !history.is_empty() {
+                crate::info_log!("[FACTORY] Seeding session with {} messages from history", history.len());
+                kernel_builder = kernel_builder.with_history(history);
+            }
+        }
+        
+        let kernel = kernel_builder;
         
         // Step 11: Create in-memory transport
         let transport = InMemoryTransport::new(100);
@@ -336,7 +359,25 @@ impl AgentSessionFactory {
         FactoryError,
     > {
         let profile = self.config.active_profile.clone();
-        self.create_session(&profile).await
+        self.create_session(&profile, None).await
+    }
+    
+    /// Create a session for the default (main) profile with initial history
+    /// 
+    /// This is used when resuming a session from persisted state.
+    pub async fn create_default_session_with_history(
+        &self,
+        history: Vec<crate::agent::cognition::kernel::Message>,
+    ) -> Result<
+        AgencySession<
+            Planner,
+            ContractRuntime,
+            InMemoryTransport,
+        >,
+        FactoryError,
+    > {
+        let profile = self.config.active_profile.clone();
+        self.create_session(&profile, Some(history)).await
     }
     
     /// Create a session for the worker profile
@@ -350,18 +391,18 @@ impl AgentSessionFactory {
         >,
         FactoryError,
     > {
-        self.create_session("worker").await
+        self.create_session("worker", None).await
     }
     
     /// Create a resumable session for the default (main) profile
     /// 
     /// This creates a new session while also loading the previous session's data
-    /// (chat history, metadata) from disk. The returned SessionData can be used
-    /// by the UI to restore the conversation history.
+    /// (chat history, metadata) from disk. The session is seeded with the previous
+    /// conversation history so the agent has full context.
     /// 
     /// # Returns
     /// A tuple of (session, Option<SessionData>) where SessionData contains
-    /// the previous session's history for UI restoration.
+    /// the previous session's metadata for UI restoration.
     pub async fn create_resumable_session(
         &self,
     ) -> Result<
@@ -382,14 +423,23 @@ impl AgentSessionFactory {
         
         // Try to load previous session data for UI restoration
         let session_data = SessionPersistence::load_latest_data().await;
-        if session_data.is_some() {
+        
+        // Convert session data history to kernel messages for seeding
+        let initial_history: Option<Vec<crate::agent::cognition::kernel::Message>> = 
+            session_data.as_ref().map(|data| {
+                data.history.iter().map(|m| {
+                    crate::agent::cognition::kernel::Message::new(&m.role, &m.content)
+                }).collect()
+            });
+        
+        if initial_history.is_some() {
             crate::info_log!("[FACTORY] Found previous session data to restore");
         } else {
             crate::info_log!("[FACTORY] No previous session data found, starting fresh");
         }
         
-        // Create new session (core state is always fresh)
-        let session = self.create_session(&profile).await?;
+        // Create new session with initial history seeded
+        let session = self.create_session(&profile, initial_history).await?;
         
         Ok((session, session_data))
     }

@@ -127,6 +127,7 @@ impl TerminalContext {
     }
 
     /// Get directory listing with detailed information
+    #[cfg(unix)]
     fn get_directory_listing(path: &PathBuf) -> Result<String> {
         use std::fs;
         use std::os::unix::fs::MetadataExt;
@@ -174,7 +175,53 @@ impl TerminalContext {
         Ok(entries.join("\n"))
     }
 
+    /// Get directory listing with detailed information (Windows version)
+    #[cfg(windows)]
+    fn get_directory_listing(path: &PathBuf) -> Result<String> {
+        use std::fs;
+        use chrono::{DateTime, Local};
+
+        let mut entries = Vec::new();
+
+        match fs::read_dir(path) {
+            Ok(read_dir) => {
+                for entry in read_dir.filter_map(|e| e.ok()) {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let metadata = entry.metadata().ok();
+                    
+                    let (size, modified) = if let Some(m) = metadata {
+                        let size = m.len();
+                        let modified: DateTime<Local> = m.modified()
+                            .map(DateTime::from)
+                            .unwrap_or_else(|_| DateTime::from(std::time::SystemTime::UNIX_EPOCH));
+                        (size, modified.format("%b %d %H:%M").to_string())
+                    } else {
+                        (0, "unknown".to_string())
+                    };
+
+                    let file_type = if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) { "<DIR>" } else { "" };
+                    
+                    entries.push(format!(
+                        "{:>10} {:>12} {}",
+                        file_type,
+                        if size > 0 { format!("{}", size) } else { "".to_string() },
+                        name
+                    ));
+                }
+            }
+            Err(e) => return Ok(format!("Error reading directory: {}", e)),
+        }
+
+        if entries.is_empty() {
+            return Ok("(Directory is empty)".to_string());
+        }
+
+        entries.sort();
+        Ok(entries.join("\n"))
+    }
+
     /// Get command history from the shell
+    #[cfg(unix)]
     fn get_shell_history() -> Result<Vec<String>> {
         // Try to get history from bash or zsh
         let output = Command::new("history")
@@ -209,7 +256,15 @@ impl TerminalContext {
         Ok(history)
     }
 
+    /// Get command history from the shell (Windows stub)
+    #[cfg(windows)]
+    fn get_shell_history() -> Result<Vec<String>> {
+        // Not available on Windows
+        Ok(Vec::new())
+    }
+
     /// Get shell history from history file
+    #[cfg(unix)]
     fn get_file_based_history() -> Result<Vec<String>> {
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let history_files = vec![
@@ -235,7 +290,30 @@ impl TerminalContext {
         Ok(Vec::new())
     }
 
+    /// Get shell history from history file (Windows version)
+    #[cfg(windows)]
+    fn get_file_based_history() -> Result<Vec<String>> {
+        // Try to get PowerShell history
+        let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("C:\\"));
+        let ps_history = home_dir.join("AppData/Roaming/Microsoft/Windows/PowerShell/PSReadLine/ConsoleHost_history.txt");
+        
+        if ps_history.exists() {
+            if let Ok(content) = std::fs::read_to_string(&ps_history) {
+                let commands: Vec<String> = content
+                    .lines()
+                    .rev()
+                    .take(50)
+                    .map(|s| s.to_string())
+                    .collect();
+                return Ok(commands);
+            }
+        }
+        
+        Ok(Vec::new())
+    }
+
     /// Get running processes
+    #[cfg(unix)]
     fn get_processes() -> Result<Vec<ProcessInfo>> {
         let output = Command::new("ps")
             .args(["aux", "--no-headers"])
@@ -269,7 +347,15 @@ impl TerminalContext {
         Ok(processes)
     }
 
+    /// Get running processes (Windows stub)
+    #[cfg(windows)]
+    fn get_processes() -> Result<Vec<ProcessInfo>> {
+        // Not implemented on Windows - would need tasklist parsing
+        Ok(Vec::new())
+    }
+
     /// Get network connections
+    #[cfg(unix)]
     fn get_network_connections() -> Result<Vec<NetworkInfo>> {
         let output = Command::new("ss")
             .args(["-tuln", "-p"])
@@ -304,6 +390,13 @@ impl TerminalContext {
             .collect();
 
         Ok(connections)
+    }
+
+    /// Get network connections (Windows stub)
+    #[cfg(windows)]
+    fn get_network_connections() -> Result<Vec<NetworkInfo>> {
+        // Not implemented on Windows - would need netstat parsing
+        Ok(Vec::new())
     }
 
     /// Check if currently running inside a tmux session

@@ -221,9 +221,19 @@ pub struct Message {
     /// Content of the message
     pub content: String,
     /// Pre-calculated token count
+    #[serde(default = "default_token_count")]
     pub token_count: usize,
     /// Byte size of the content (for API limit enforcement)
+    #[serde(default = "default_byte_size")]
     pub byte_size: usize,
+}
+
+fn default_token_count() -> usize {
+    0
+}
+
+fn default_byte_size() -> usize {
+    0
 }
 
 impl Message {

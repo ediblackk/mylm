@@ -39,7 +39,8 @@ pub struct PersistedSession {
     /// Session creation timestamp
     pub timestamp: DateTime<Utc>,
     /// Session update timestamp
-    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
     /// Chat/conversation history
     pub history: Vec<Message>,
     /// Session metadata (stats, preview, etc.)
@@ -126,7 +127,7 @@ impl Default for PersistedSession {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             timestamp: now,
-            updated_at: now,
+            updated_at: Some(now),
             history: Vec::new(),
             metadata: SessionMetadata::default(),
             agent_state: None,
@@ -370,6 +371,7 @@ impl SessionPersistence {
     /// Returns sessions sorted by timestamp (most recent first)
     pub fn load_all() -> Vec<PersistedSession> {
         let sessions_dir = Self::resolve_sessions_dir();
+        info!("[SessionPersistence] Loading sessions from: {:?}", sessions_dir);
         let mut sessions: Vec<PersistedSession> = Vec::new();
         
         let entries = match std::fs::read_dir(&sessions_dir) {
@@ -380,6 +382,7 @@ impl SessionPersistence {
             }
         };
         
+        let mut file_count = 0;
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
@@ -390,6 +393,7 @@ impl SessionPersistence {
                 
                 // Match session_*.json pattern
                 if file_name.starts_with("session_") && file_name.ends_with(".json") {
+                    file_count += 1;
                     match std::fs::read_to_string(&path) {
                         Ok(content) => {
                             match serde_json::from_str(&content) {
@@ -409,6 +413,7 @@ impl SessionPersistence {
         
         // Sort by timestamp descending (most recent first)
         sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        info!("[SessionPersistence] Loaded {} sessions from {} files", sessions.len(), file_count);
         sessions
     }
     
@@ -474,6 +479,7 @@ impl SessionPersistence {
         // Try XDG_DATA_DIR first via dirs crate
         if let Some(mut data_dir) = dirs::data_dir() {
             data_dir.push("mylm/sessions");
+            info!("[SessionPersistence] Using data_dir: {:?}", data_dir);
             return data_dir;
         }
         
@@ -481,33 +487,53 @@ impl SessionPersistence {
         if let Some(home) = dirs::home_dir() {
             let mut fallback = home;
             fallback.push(".local/share/mylm/sessions");
+            info!("[SessionPersistence] Using fallback dir: {:?}", fallback);
             return fallback;
         }
         
         // Last resort: current directory (shouldn't happen in practice)
+        info!("[SessionPersistence] Using current dir as last resort");
         PathBuf::from("./sessions")
     }
     
     /// Save session to disk atomically: write to temp file, then rename
     async fn save_session_atomic(dir: &PathBuf, session: &PersistedSession) -> Result<(), std::io::Error> {
+        // Ensure directory exists
+        if let Err(e) = tokio::fs::create_dir_all(dir).await {
+            error!("[SessionPersistence] Failed to create directory {:?}: {}", dir, e);
+            return Err(e);
+        }
+        
         let temp_path = dir.join(format!("session_{}.tmp", session.id));
         let final_path = dir.join(format!("session_{}.json", session.id));
+        
+        info!("[SessionPersistence] Saving session {} to {:?}", session.id, final_path);
         
         // Serialize session to JSON
         let json = serde_json::to_string_pretty(session)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         
         // Write to temp file
-        tokio::fs::write(&temp_path, json).await?;
+        if let Err(e) = tokio::fs::write(&temp_path, json).await {
+            error!("[SessionPersistence] Failed to write temp file {:?}: {}", temp_path, e);
+            return Err(e);
+        }
         
         // Atomic rename
-        tokio::fs::rename(&temp_path, &final_path).await?;
+        if let Err(e) = tokio::fs::rename(&temp_path, &final_path).await {
+            error!("[SessionPersistence] Failed to rename {:?} to {:?}: {}", temp_path, final_path, e);
+            return Err(e);
+        }
         
+        info!("[SessionPersistence] Successfully saved session {} to {:?}", session.id, final_path);
         Ok(())
     }
     
     /// Update latest.json atomically: write to temp file, then rename
     async fn update_latest_atomic(dir: &PathBuf, session: &PersistedSession) -> Result<(), std::io::Error> {
+        // Ensure directory exists
+        tokio::fs::create_dir_all(dir).await?;
+        
         let temp_path = dir.join("latest.tmp");
         let final_path = dir.join("latest.json");
         
@@ -589,7 +615,7 @@ impl SessionBuilder {
         PersistedSession {
             id: self.id,
             timestamp: now,
-            updated_at: now,
+            updated_at: Some(now),
             history: self.history,
             metadata: self.metadata,
             agent_state: None,
