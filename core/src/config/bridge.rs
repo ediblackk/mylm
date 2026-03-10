@@ -105,6 +105,7 @@ fn provider_type_to_llm_provider(pt: &ProviderType) -> Result<LlmProvider, Bridg
         ProviderType::Ollama => Ok(LlmProvider::OpenAiCompatible),
         ProviderType::OpenRouter => Ok(LlmProvider::OpenAiCompatible),
         ProviderType::Kimi => Ok(LlmProvider::MoonshotKimi),
+        ProviderType::InceptionLabs => Ok(LlmProvider::OpenAiCompatible),
         ProviderType::Custom => Ok(LlmProvider::OpenAiCompatible),
     }
 }

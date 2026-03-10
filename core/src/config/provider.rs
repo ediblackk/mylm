@@ -62,6 +62,36 @@ impl ProviderConfig {
             timeout_secs: default_timeout(),
         }
     }
+
+    /// Create Google Gemini provider config
+    pub fn gemini(api_key: String) -> Self {
+        Self {
+            provider_type: ProviderType::Google,
+            base_url: "https://generativelanguage.googleapis.com".to_string(),
+            api_key: Some(api_key),
+            default_model: "gemini-1.5-flash".to_string(),
+            models: vec![
+                "gemini-1.5-flash".to_string(),
+                "gemini-1.5-flash-8b".to_string(),
+                "gemini-1.5-pro".to_string(),
+            ],
+            timeout_secs: default_timeout(),
+        }
+    }
+
+    /// Create Inception Labs provider config
+    pub fn inception(api_key: String) -> Self {
+        Self {
+            provider_type: ProviderType::InceptionLabs,
+            base_url: "https://api.inceptionlabs.ai/v1".to_string(),
+            api_key: Some(api_key),
+            default_model: "mercury-2".to_string(),
+            models: vec![
+                "mercury-2".to_string(),
+            ],
+            timeout_secs: default_timeout(),
+        }
+    }
 }
 
 /// Provider type enumeration
@@ -73,6 +103,7 @@ pub enum ProviderType {
     Ollama,
     OpenRouter,
     Kimi,
+    InceptionLabs,
     Custom,
 }
 

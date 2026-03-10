@@ -38,6 +38,12 @@ pub enum Provider {
     /// Env var: KIMI_API_KEY or MYLM_API_KEY
     Kimi,
 
+    /// Inception Labs (Mercury models)
+    ///
+    /// Default URL: https://api.inceptionlabs.ai/v1
+    /// Env var: INCEPTION_API_KEY or MYLM_API_KEY
+    Inceptionlabs,
+
     /// Custom provider (user-specified URL)
     ///
     /// Requires explicit base_url configuration.
@@ -201,6 +207,7 @@ impl Provider {
             Provider::Ollama => "http://localhost:11434/v1".to_string(),
             Provider::Openrouter => "https://openrouter.ai/api/v1".to_string(),
             Provider::Kimi => "https://api.moonshot.cn/v1".to_string(),
+            Provider::Inceptionlabs => "https://api.inceptionlabs.ai/v1".to_string(),
             Provider::Custom => "".to_string(),
         }
     }

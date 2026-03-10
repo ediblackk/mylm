@@ -65,6 +65,52 @@ fn extract_text_sync(path: &Path) -> Result<String, ReadError> {
     })
 }
 
+/// Extract text content per page from a PDF file
+/// 
+/// # Arguments
+/// * `path` - Path to the PDF file
+/// 
+/// # Returns
+/// A vector of strings, where each element is the text of a single page
+pub async fn extract_pages(path: &Path) -> Result<Vec<String>, ReadError> {
+    let path = path.to_path_buf();
+    
+    tokio::task::spawn_blocking(move || {
+        extract_pages_sync(&path)
+    })
+    .await
+    .map_err(|e| ReadError::PdfExtractionError(format!("Task panicked: {}", e)))?
+}
+
+/// Synchronous PDF extraction per page
+fn extract_pages_sync(path: &Path) -> Result<Vec<String>, ReadError> {
+    // First check if file is readable
+    let content = std::fs::read(path)
+        .map_err(|e| ReadError::AccessError(format!("Cannot read PDF: {}", e)))?;
+    
+    if is_encrypted(&content) {
+        return Err(ReadError::PdfEncrypted);
+    }
+    
+    // Suppress stderr during extraction
+    let _print_gag = gag::Gag::stdout().ok();
+    let _stderr_gag = gag::Gag::stderr().ok();
+    
+    pdf_extract::extract_text_by_pages(path).map_err(|e| {
+        let error_str = e.to_string();
+        let error_lower = error_str.to_lowercase();
+        if error_lower.contains("password") || 
+           error_lower.contains("encrypt") || 
+           error_lower.contains("decrypt") {
+            ReadError::PdfEncrypted
+        } else {
+            ReadError::PdfExtractionError(format!(
+                "Failed to extract PDF pages: {}", error_str
+            ))
+        }
+    })
+}
+
 /// Check if PDF content appears to be encrypted
 /// 
 /// Looks for encryption markers in the PDF header/trailer
@@ -226,7 +272,6 @@ fn find_matching_paren(s: &str, start: usize) -> Option<usize> {
 /// 
 /// Takes extracted text and formats it with virtual line numbers
 /// based on page numbers for consistent chunking
-#[cfg(test)]
 pub fn pdf_text_to_lines(text: &str, pages: Option<usize>) -> String {
     let mut result = String::new();
     

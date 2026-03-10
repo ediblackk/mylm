@@ -43,6 +43,7 @@ impl std::str::FromStr for LlmProvider {
             "openai" | "ollama" | "lmstudio" | "local" | "openrouter" | "custom" => Ok(LlmProvider::OpenAiCompatible),
             "google" | "gemini" | "google-ai" | "google-generativeai" => Ok(LlmProvider::GoogleGenerativeAi),
             "moonshot" | "kimi" => Ok(LlmProvider::MoonshotKimi),
+            "inception" | "inceptionlabs" => Ok(LlmProvider::OpenAiCompatible),
             _ => Err(format!("Unknown LLM provider: {}", s)),
         }
     }
@@ -180,8 +181,10 @@ impl LlmClient {
         
         let agent_type = if self.is_worker { "worker" } else { "main" };
         
-        // Create logs directory if it doesn't exist
-        let logs_dir = std::path::PathBuf::from("mylm/logs");
+        // Create logs directory in proper data location (not CWD to avoid Tauri watcher issues)
+        let logs_dir = dirs::data_dir()
+            .map(|d| d.join("mylm").join("logs"))
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp/mylm/logs"));
         if let Err(e) = std::fs::create_dir_all(&logs_dir) {
             crate::error_log!("[LLM_CLIENT] Failed to create logs directory: {}", e);
             return;
@@ -561,16 +564,13 @@ impl LlmClient {
         let body = OpenAiRequest {
             model: self.config.model.clone(),
             messages: &request.messages,
-            max_completion_tokens: request.max_tokens, // Use the request's max_tokens (may be adjusted by chat())
+            max_completion_tokens: request.max_tokens,
             stream: Some(false),
-            tools: request.tools.as_ref().map(|t| t.iter().map(|tool| OpenAiTool {
-                type_: tool.type_.clone(),
-                function: OpenAiFunction {
-                    name: tool.function.name.clone(),
-                    description: tool.function.description.clone(),
-                    parameters: tool.function.parameters.clone(),
-                },
-            }).collect()),
+            // Do NOT send native API tool definitions.
+            // Tool descriptions are embedded in the system prompt as JSON-format instructions.
+            // Sending tools here causes some models (Claude-family, Hermes, etc.) to activate
+            // their native XML tool-calling format, which breaks our ShortKey JSON parser.
+            tools: None,
         };
 
         // Serialize body for request and logging
@@ -866,16 +866,13 @@ impl LlmClient {
         let body = OpenAiRequest {
             model: self.config.model.clone(),
             messages: &request.messages,
-            max_completion_tokens: request.max_tokens, // Use the request's max_tokens (may be adjusted by chat())
+            max_completion_tokens: request.max_tokens,
             stream: Some(true),
-            tools: request.tools.as_ref().map(|t| t.iter().map(|tool| OpenAiTool {
-                type_: tool.type_.clone(),
-                function: OpenAiFunction {
-                    name: tool.function.name.clone(),
-                    description: tool.function.description.clone(),
-                    parameters: tool.function.parameters.clone(),
-                },
-            }).collect()),
+            // Do NOT send native API tool definitions.
+            // Tool descriptions are embedded in the system prompt as JSON-format instructions.
+            // Sending tools here causes some models (Claude-family, Hermes, etc.) to activate
+            // their native XML tool-calling format, which breaks our ShortKey JSON parser.
+            tools: None,
         };
 
         let http_client = self.http_client.clone();
@@ -986,17 +983,203 @@ impl LlmClient {
         })
     }
 
-    /// Gemini streaming chat
-    
+    /// Gemini streaming chat using Server-Sent Events (SSE)
     fn chat_stream_gemini<'a>(
         &'a self,
-        _request: &'a ChatRequest,
+        request: &'a ChatRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send + 'a>> {
-        // Gemini API streaming is more complex, return a simple message
         Box::pin(async_stream::try_stream! {
-            yield StreamEvent::Content(
-                "Streaming for Gemini is not yet implemented. Use non-streaming mode.".to_string(),
+            // Convert messages to Gemini format (same as non-streaming)
+            let mut contents: Vec<GeminiContent> = Vec::new();
+            let mut system_parts = Vec::new();
+
+            for m in &request.messages {
+                let content = m.content.trim();
+                if content.is_empty() && m.tool_calls.is_none() {
+                    continue;
+                }
+
+                match m.role.as_str() {
+                    "system" => {
+                        system_parts.push(GeminiPart { text: m.content.clone() });
+                    }
+                    _ => {
+                        let role = match m.role.as_str() {
+                            "assistant" => "model",
+                            "user" | "tool" => "user",
+                            _ => "user",
+                        };
+
+                        if let Some(last) = contents.last_mut() {
+                            if last.role == role {
+                                if let Some(first_part) = last.parts.first_mut() {
+                                    first_part.text.push_str("\n\n");
+                                    first_part.text.push_str(&m.content);
+                                } else {
+                                    last.parts.push(GeminiPart { text: m.content.clone() });
+                                }
+                                continue;
+                            }
+                        }
+                        
+                        contents.push(GeminiContent {
+                            role: role.to_string(),
+                            parts: vec![GeminiPart { text: m.content.clone() }],
+                        });
+                    }
+                }
+            }
+
+            // Gemini API Requirement: contents must start with a "user" role
+            while !contents.is_empty() && contents[0].role != "user" {
+                contents.remove(0);
+            }
+
+            // Add system prompt from config if present
+            if let Some(sys_prompt) = &self.config.system_prompt {
+                system_parts.insert(0, GeminiPart { text: sys_prompt.clone() });
+            }
+
+            let system_instruction_text = if system_parts.is_empty() {
+                None
+            } else {
+                Some(system_parts.iter().map(|p| p.text.as_str()).collect::<Vec<_>>().join("\n\n"))
+            };
+
+            // Prepend system instruction to first user message
+            if let (Some(sys_text), Some(first_msg)) = (&system_instruction_text, contents.first_mut()) {
+                if first_msg.role == "user" {
+                    let original_text = first_msg.parts[0].text.clone();
+                    first_msg.parts[0].text = format!("SYSTEM INSTRUCTIONS:\n{}\n\nUSER MESSAGE:\n{}", sys_text, original_text);
+                }
+            }
+
+            let system_instruction = system_instruction_text.map(|text| GeminiContent {
+                role: "system".to_string(),
+                parts: vec![GeminiPart { text }],
+            });
+
+            let base_url = sanitize_base_url(&self.config.base_url, "Base URL")?;
+            let api_key = self.config.api_key.as_deref().unwrap_or("");
+            
+            // Use streaming endpoint with alt=sse
+            let url = format!(
+                "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
+                base_url.trim_end_matches('/'),
+                self.config.model,
+                api_key
             );
+
+            let body = GeminiRequest {
+                contents,
+                system_instruction,
+                generation_config: Some(GeminiGenerationConfig {
+                    max_output_tokens: self.config.max_tokens,
+                    temperature: self.config.temperature,
+                }),
+            };
+
+            let response = self
+                .http_client
+                .post(&url)
+                .header(CONTENT_TYPE, "application/json")
+                .json(&body)
+                .send()
+                .await
+                .context("Failed to send streaming request to Gemini API")?;
+
+            let status = response.status();
+            // Parse SSE stream (only if success - error case returns early)
+            let mut stream = if status.is_success() {
+                response.bytes_stream()
+            } else {
+                let error_text = response.text().await.unwrap_or_default();
+                Err(anyhow::anyhow!("Gemini API error ({}): {}", status, error_text))?;
+                unreachable!()
+            };
+            let mut buffer = String::new();
+
+            while let Some(chunk_result) = stream.next().await {
+                let chunk = chunk_result.context("Failed to read stream chunk")?;
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                // Process complete lines
+                while let Some(newline_pos) = buffer.find('\n') {
+                    let line = buffer[..newline_pos].to_string();
+                    buffer = buffer[newline_pos + 1..].to_string();
+
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    // Parse SSE data lines
+                    if let Some(data_str) = line.strip_prefix("data: ") {
+                        let data_str = data_str.trim();
+                        
+                        // Skip [DONE] marker if present
+                        if data_str == "[DONE]" {
+                            continue;
+                        }
+
+                        // Parse the JSON chunk
+                        match serde_json::from_str::<serde_json::Value>(data_str) {
+                            Ok(chunk_data) => {
+                                // Extract text using optional chaining pattern
+                                let text_chunk = chunk_data
+                                    .get("candidates")
+                                    .and_then(|c| c.as_array())
+                                    .and_then(|arr| arr.first())
+                                    .and_then(|c| c.get("content"))
+                                    .and_then(|content| content.get("parts"))
+                                    .and_then(|parts| parts.as_array())
+                                    .and_then(|arr| arr.first())
+                                    .and_then(|part| part.get("text"))
+                                    .and_then(|t| t.as_str());
+
+                                if let Some(text) = text_chunk {
+                                    if !text.is_empty() {
+                                        yield StreamEvent::Content(text.to_string());
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                crate::debug_log!("[GEMINI_STREAM] Failed to parse chunk: {} | Raw: {}", e, data_str);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Process any remaining data in buffer
+            if !buffer.trim().is_empty() {
+                let line = buffer.trim();
+                if let Some(data_str) = line.strip_prefix("data: ") {
+                    let data_str = data_str.trim();
+                    if data_str != "[DONE]" {
+                        if let Ok(chunk_data) = serde_json::from_str::<serde_json::Value>(data_str) {
+                            let text_chunk = chunk_data
+                                .get("candidates")
+                                .and_then(|c| c.as_array())
+                                .and_then(|arr| arr.first())
+                                .and_then(|c| c.get("content"))
+                                .and_then(|content| content.get("parts"))
+                                .and_then(|parts| parts.as_array())
+                                .and_then(|arr| arr.first())
+                                .and_then(|part| part.get("text"))
+                                .and_then(|t| t.as_str());
+
+                            if let Some(text) = text_chunk {
+                                if !text.is_empty() {
+                                    yield StreamEvent::Content(text.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            yield StreamEvent::Done;
         })
     }
 

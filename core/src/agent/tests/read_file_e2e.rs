@@ -83,7 +83,7 @@ async fn test_e2e_large_file_chunking() {
     let content = chunk.repeat(repetitions);
     fs::write(&file_path, content).await.unwrap();
     
-    let chunk_pool = Arc::new(ChunkPool::new("test", 5));
+    let chunk_pool = Arc::new(ChunkPool::new("test", 5, 8192));
     let tool = ReadFileTool::new(Arc::clone(&chunk_pool), None);
     
     let call = ToolCall::new("read_file", serde_json::json!(file_path.to_str().unwrap()));
@@ -162,7 +162,7 @@ async fn test_e2e_search_files() {
 /// Test ChunkPool worker management
 #[tokio::test]
 async fn test_e2e_chunk_pool_management() {
-    let pool = Arc::new(ChunkPool::new("test", 3));
+    let pool = Arc::new(ChunkPool::new("test", 3, 8192));
     
     // Initially no workers
     assert_eq!(pool.worker_count().await, 0);

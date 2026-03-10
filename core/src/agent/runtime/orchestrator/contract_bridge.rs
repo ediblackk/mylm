@@ -364,7 +364,7 @@ impl ContractRuntime {
                     while let Ok(Some(chunk_result)) = timeout(stream_timeout, stream.next()).await {
                         match chunk_result {
                             Ok(chunk) => {
-                                crate::debug_log!("[RUNTIME] Got chunk: is_final={}, content_len={}", chunk.is_final, chunk.content.len());
+                                // crate::debug_log!("[RUNTIME] Got chunk: is_final={}, content_len={}", chunk.is_final, chunk.content.len());
                                 if chunk.is_final {
                                     accumulated_usage = chunk.usage;
                                     break;

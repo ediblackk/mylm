@@ -95,19 +95,9 @@ impl LlmClientCapability {
             system_parts.push(req.context.system_prompt.clone());
         }
         
-        // Add tools section
-        if !req.context.available_tools.is_empty() {
-            let mut tools_section = "=== AVAILABLE TOOLS ===\n".to_string();
-            for tool in &req.context.available_tools {
-                if let Some(usage) = &tool.usage {
-                    tools_section.push_str(&format!("- {}: {} (Usage: {})\n", tool.name, tool.description, usage));
-                } else {
-                    tools_section.push_str(&format!("- {}: {}\n", tool.name, tool.description));
-                }
-            }
-            tools_section.push_str("\nUse these tools with the Short-Key JSON format: {\"a\": \"tool_name\", \"i\": {...}}");
-            system_parts.push(tools_section);
-        }
+        // Note: Tool descriptions are embedded in the main system prompt (system.rs).
+        // We do NOT re-inject available_tools here — doing so causes models like Hermes/Mixtral
+        // to activate XML tool-calling format, which breaks our ShortKey JSON parser.
         
         // Combine all system parts
         if !system_parts.is_empty() {
@@ -139,11 +129,15 @@ impl LlmClientCapability {
     
     /// Prepare context with size enforcement
     /// 
-    /// 1. Converts Intent history to ContextManager format
-    /// 2. Calls prepare_context() for pruning/condensation
-    /// 3. Returns sized messages ready for LLM API
-    /// 4. Logs metrics for debugging
+    /// 1. Builds complete system prompt INCLUDING memory context
+    /// 2. Adds system prompt as first message in history
+    /// 3. Calls prepare_context() for pruning/condensation (respects token limits)
+    /// 4. Returns sized messages ready for LLM API
     /// 
+    /// CRITICAL: Memory context is built BEFORE pruning so it's included in
+    /// token limit calculations. This prevents context overflow when memory
+    /// contains large content (e.g., PDF chunks).
+    ///
     /// # Errors
     /// Returns LLMError if context exceeds limits even after pruning
     async fn prepare_sized_context(
@@ -152,15 +146,78 @@ impl LlmClientCapability {
     ) -> Result<Vec<ChatMessage>, LLMError> {
         let mut cm = self.context_manager.lock().await;
         
-        // Convert Intent messages to ContextManager format
-        // and update the context manager's history
-        let history: Vec<crate::conversation::manager::Message> = req.context.history
-            .iter()
-            .map(|m| crate::conversation::manager::Message::new(&m.role, &m.content))
-            .collect();
+        // === STEP 1: Build system prompt WITH memory BEFORE pruning ===
+        let mut system_parts: Vec<String> = vec![];
         
-        // Set history in context manager
-        cm.set_history(&history.iter().map(|m| m.to_chat_message()).collect::<Vec<_>>());
+        // Add extra system messages first
+        for msg in &req.extra_system_messages {
+            if !msg.is_empty() {
+                system_parts.push(msg.clone());
+            }
+        }
+        
+        // Inject memory context BEFORE pruning (critical fix)
+        if let Some(ref provider) = self.memory_provider {
+            let canonical_history: Vec<crate::conversation::manager::Message> = req.context.history
+                .iter()
+                .map(|m| m.clone().into())
+                .collect();
+            
+            let memory_context = provider.build_context(
+                &canonical_history,
+                &req.context.scratchpad,
+                &req.context.system_prompt
+            ).await;
+            
+            if !memory_context.is_empty() {
+                crate::debug_log!("[LLM] Injecting {} bytes of memory context", memory_context.len());
+                system_parts.push(memory_context);
+            }
+        }
+        
+        // Add main system prompt
+        if !req.context.system_prompt.is_empty() {
+            system_parts.push(req.context.system_prompt.clone());
+        }
+        
+        // Note: Tool descriptions are embedded in the main system prompt (system.rs).
+        // We do NOT re-inject available_tools here — doing so causes models like Hermes/Mixtral
+        // to activate XML tool-calling format, which breaks our ShortKey JSON parser.
+        
+        // Combine system parts into single system message
+        let system_message = if !system_parts.is_empty() {
+            Some(ChatMessage::system(system_parts.join("\n\n")))
+        } else {
+            None
+        };
+        
+        // === STEP 2: Build full message list including system message ===
+        let mut full_messages: Vec<ChatMessage> = vec![];
+        
+        // System message FIRST (if any)
+        if let Some(sys_msg) = system_message {
+            full_messages.push(sys_msg);
+        }
+        
+        // Add conversation history
+        for msg in &req.context.history {
+            let chat_msg = match msg.role.as_str() {
+                "user" => ChatMessage::user(msg.content.clone()),
+                "assistant" => ChatMessage::assistant(msg.content.clone()),
+                "system" => ChatMessage::system(msg.content.clone()),
+                "tool" => ChatMessage::user(msg.content.clone()),
+                _ => ChatMessage::user(msg.content.clone()),
+            };
+            full_messages.push(chat_msg);
+        }
+        
+        // Add scratchpad
+        if !req.context.scratchpad.is_empty() {
+            full_messages.push(ChatMessage::user(req.context.scratchpad.clone()));
+        }
+        
+        // === STEP 3: Set full history in context manager and prune ===
+        cm.set_history(&full_messages);
         
         // Get pre-pruning metrics
         let (before_tokens, max_tokens) = cm.get_cached_token_usage();
@@ -171,9 +228,7 @@ impl LlmClientCapability {
             before_tokens, before_bytes, max_tokens, max_bytes
         );
         
-        // Prepare context (prunes/condenses if needed)
-        // Note: We pass None for llm_client to avoid condensation for now
-        // This keeps the logic simple - just pruning
+        // Prune context (now includes memory in token count!)
         let pruned = match cm.prepare_context(None).await {
             Ok(msgs) => msgs,
             Err(e) => {
@@ -194,70 +249,12 @@ impl LlmClientCapability {
             before_bytes.saturating_sub(after_bytes)
         );
         
-        // Build final messages from pruned context
-        let mut messages = vec![];
-        
-        // 1. Build system prompt (same logic as build_messages_from_context)
-        let mut system_parts: Vec<String> = vec![];
-        
-        for msg in &req.extra_system_messages {
-            if !msg.is_empty() {
-                system_parts.push(msg.clone());
-            }
-        }
-        
-        if let Some(ref provider) = self.memory_provider {
-            // Convert history from intents::Message (deprecated) to canonical Message
-            let canonical_history: Vec<crate::conversation::manager::Message> = req.context.history
-                .iter()
-                .map(|m| m.clone().into())
-                .collect();
-            
-            let memory_context = provider.build_context(
-                &canonical_history,
-                &req.context.scratchpad,
-                &req.context.system_prompt
-            ).await;
-            
-            if !memory_context.is_empty() {
-                system_parts.push(memory_context);
-            }
-        }
-        
-        if !req.context.system_prompt.is_empty() {
-            system_parts.push(req.context.system_prompt.clone());
-        }
-        
-        if !req.context.available_tools.is_empty() {
-            let mut tools_section = "=== AVAILABLE TOOLS ===\n".to_string();
-            for tool in &req.context.available_tools {
-                if let Some(usage) = &tool.usage {
-                    tools_section.push_str(&format!("- {}: {} (Usage: {})\n", tool.name, tool.description, usage));
-                } else {
-                    tools_section.push_str(&format!("- {}: {}\n", tool.name, tool.description));
-                }
-            }
-            tools_section.push_str("\nUse these tools with the Short-Key JSON format: {\"a\": \"tool_name\", \"i\": {...}}");
-            system_parts.push(tools_section);
-        }
-        
-        if !system_parts.is_empty() {
-            let full_system_prompt = system_parts.join("\n\n");
-            messages.push(ChatMessage::system(full_system_prompt));
-        }
-        
-        // 2. Add PRUNED conversation history (not raw history)
-        for chat_msg in pruned {
-            messages.push(chat_msg);
-        }
-        
-        // 3. Add scratchpad
-        if !req.context.scratchpad.is_empty() {
-            messages.push(ChatMessage::user(req.context.scratchpad.clone()));
-        }
+        // === STEP 4: Return pruned messages ===
+        // The system message with memory is now part of pruned messages
+        // and respects the token limit
         
         // Final size check - fail fast if still too large
-        let total_bytes: usize = messages.iter()
+        let total_bytes: usize = pruned.iter()
             .map(|m| m.content.len())
             .sum();
         
@@ -268,7 +265,8 @@ impl LlmClientCapability {
             )));
         }
         
-        Ok(messages)
+        // Return pruned messages (system message with memory is included)
+        Ok(pruned)
     }
 }
 

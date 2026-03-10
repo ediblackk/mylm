@@ -196,7 +196,7 @@ impl SessionPersistence {
                                 pending_session = Some(session);
                             }
                             None => {
-                                info!("[SessionPersistence] Save channel closed, exiting background task");
+                                // Channel closed - normal shutdown, no need to log
                                 break;
                             }
                         }
@@ -213,14 +213,10 @@ impl SessionPersistence {
                             // Save session to disk atomically
                             if let Err(e) = Self::save_session_atomic(&sessions_dir_clone, &session).await {
                                 error!("[SessionPersistence] Failed to save session {}: {}", session.id, e);
-                            } else {
-                                // Update latest.json atomically
-                                if let Err(e) = Self::update_latest_atomic(&sessions_dir_clone, &session).await {
-                                    error!("[SessionPersistence] Failed to update latest.json: {}", e);
-                                } else {
-                                    info!("[SessionPersistence] Saved session {}", session.id);
-                                }
+                            } else if let Err(e) = Self::update_latest_atomic(&sessions_dir_clone, &session).await {
+                                error!("[SessionPersistence] Failed to update latest.json: {}", e);
                             }
+                            // Success case intentionally not logged - saves are too frequent
                         }
                     }
                 }
@@ -371,7 +367,8 @@ impl SessionPersistence {
     /// Returns sessions sorted by timestamp (most recent first)
     pub fn load_all() -> Vec<PersistedSession> {
         let sessions_dir = Self::resolve_sessions_dir();
-        info!("[SessionPersistence] Loading sessions from: {:?}", sessions_dir);
+        // Session loading is too frequent to log at info level
+        // tracing::debug!("[SessionPersistence] Loading sessions from: {:?}", sessions_dir);
         let mut sessions: Vec<PersistedSession> = Vec::new();
         
         let entries = match std::fs::read_dir(&sessions_dir) {
@@ -382,7 +379,6 @@ impl SessionPersistence {
             }
         };
         
-        let mut file_count = 0;
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
@@ -393,7 +389,6 @@ impl SessionPersistence {
                 
                 // Match session_*.json pattern
                 if file_name.starts_with("session_") && file_name.ends_with(".json") {
-                    file_count += 1;
                     match std::fs::read_to_string(&path) {
                         Ok(content) => {
                             match serde_json::from_str(&content) {
@@ -413,7 +408,8 @@ impl SessionPersistence {
         
         // Sort by timestamp descending (most recent first)
         sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        info!("[SessionPersistence] Loaded {} sessions from {} files", sessions.len(), file_count);
+        // Session loading is too frequent to log at info level
+        // tracing::debug!("[SessionPersistence] Loaded {} sessions from {} files", sessions.len(), file_count);
         sessions
     }
     
@@ -479,7 +475,8 @@ impl SessionPersistence {
         // Try XDG_DATA_DIR first via dirs crate
         if let Some(mut data_dir) = dirs::data_dir() {
             data_dir.push("mylm/sessions");
-            info!("[SessionPersistence] Using data_dir: {:?}", data_dir);
+            // Path resolution is too frequent to log - only log errors
+            // info!("[SessionPersistence] Using data_dir: {:?}", data_dir);
             return data_dir;
         }
         
@@ -487,28 +484,34 @@ impl SessionPersistence {
         if let Some(home) = dirs::home_dir() {
             let mut fallback = home;
             fallback.push(".local/share/mylm/sessions");
-            info!("[SessionPersistence] Using fallback dir: {:?}", fallback);
+            // Path resolution is too frequent to log - only log errors
+            // info!("[SessionPersistence] Using fallback dir: {:?}", fallback);
             return fallback;
         }
         
         // Last resort: current directory (shouldn't happen in practice)
-        info!("[SessionPersistence] Using current dir as last resort");
+        warn!("[SessionPersistence] Using current dir as last resort - XDG_DATA_DIR and HOME not set");
         PathBuf::from("./sessions")
     }
     
     /// Save session to disk atomically: write to temp file, then rename
     async fn save_session_atomic(dir: &PathBuf, session: &PersistedSession) -> Result<(), std::io::Error> {
-        // Ensure directory exists
-        if let Err(e) = tokio::fs::create_dir_all(dir).await {
-            error!("[SessionPersistence] Failed to create directory {:?}: {}", dir, e);
-            return Err(e);
-        }
-        
         let temp_path = dir.join(format!("session_{}.tmp", session.id));
         let final_path = dir.join(format!("session_{}.json", session.id));
         
-        info!("[SessionPersistence] Saving session {} to {:?}", session.id, final_path);
+        // Ensure parent directory exists BEFORE any file operations
+        if let Some(parent) = final_path.parent() {
+            if !parent.exists() {
+                if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                    error!("[SessionPersistence] Failed to create session directory {:?}: {}", parent, e);
+                    return Err(e);
+                }
+            }
+        }
         
+        // Session save started - too frequent for info level
+        // tracing::debug!("[SessionPersistence] Saving session {} to {:?}", session.id, final_path);
+
         // Serialize session to JSON
         let json = serde_json::to_string_pretty(session)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -525,18 +528,26 @@ impl SessionPersistence {
             return Err(e);
         }
         
-        info!("[SessionPersistence] Successfully saved session {} to {:?}", session.id, final_path);
+        // Session save completed - logged at caller level
+        // tracing::debug!("[SessionPersistence] Successfully saved session {} to {:?}", session.id, final_path);
         Ok(())
     }
     
     /// Update latest.json atomically: write to temp file, then rename
     async fn update_latest_atomic(dir: &PathBuf, session: &PersistedSession) -> Result<(), std::io::Error> {
-        // Ensure directory exists
-        tokio::fs::create_dir_all(dir).await?;
-        
         let temp_path = dir.join("latest.tmp");
         let final_path = dir.join("latest.json");
         
+        // Ensure parent directory exists BEFORE any file operations
+        if let Some(parent) = final_path.parent() {
+            if !parent.exists() {
+                if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                    error!("[SessionPersistence] Failed to create latest.json directory {:?}: {}", parent, e);
+                    return Err(e);
+                }
+            }
+        }
+
         // Serialize session to JSON
         let json = serde_json::to_string_pretty(session)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;

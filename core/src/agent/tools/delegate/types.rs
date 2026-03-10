@@ -2,11 +2,11 @@
 
 use crate::agent::runtime::orchestrator::commonbox::JobId;
 use crate::agent::types::events::WorkerId;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 
 /// Worker configuration - each worker gets a specific task and tool set
-#[derive(Deserialize, Clone, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct WorkerConfig {
     /// Unique identifier (e.g., "models", "handlers")
     pub id: String,
@@ -42,7 +42,7 @@ pub struct WorkerConfig {
 }
 
 /// Delegate tool arguments
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct DelegateArgs {
     /// Shared context for all workers
     #[serde(default)]

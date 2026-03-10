@@ -126,6 +126,7 @@ impl Config {
                     Provider::Ollama => ProviderType::Ollama,
                     Provider::Openrouter => ProviderType::OpenRouter,
                     Provider::Kimi => ProviderType::Kimi,
+                    Provider::Inceptionlabs => ProviderType::InceptionLabs,
                     Provider::Custom => ProviderType::Custom,
                 },
                 base_url: provider.base_url.clone(),

@@ -7,7 +7,7 @@ use crate::agent::runtime::core::{Capability, ToolCapability};
 use crate::agent::runtime::core::RuntimeContext;
 use crate::agent::runtime::core::ToolError;
 use crate::agent::runtime::tools::{
-    ShellTool, ReadFileTool, WriteFileTool, ListFilesTool, ChunkPool,
+    ShellTool, ReadFileTool, WriteFileTool, ListFilesTool, 
     GitStatusTool, GitLogTool, GitDiffTool, WebSearchTool, MemoryTool,
     ScratchpadTool, WorkerShellTool, WorkerShellPermissions, EscalationRequest, EscalationResponse,
 };
@@ -84,8 +84,7 @@ impl RestrictedToolRegistry {
             },
             
             read_file: if allowed_set.contains("read_file") {
-                let pool = Arc::new(ChunkPool::new("worker", 3));
-                Some(ReadFileTool::new(pool, None))
+                Some(ReadFileTool::simple())
             } else {
                 None
             },

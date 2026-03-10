@@ -499,6 +499,14 @@ async fn handle_agent_event(
             // Store segment ID for potential recovery
             mylm_core::debug_log!("[AGENT_EVENT] Pruned segment ID: {}", segment_id);
         }
+        
+        OutputEvent::MemoryAdded { content_preview, .. } => {
+            mylm_core::info_log!("[AGENT_EVENT] Memory added: {}...", content_preview);
+        }
+        
+        OutputEvent::MemoryRetrieved { query, result_count, .. } => {
+            mylm_core::info_log!("[AGENT_EVENT] Memory retrieved: {} results for '{}'", result_count, query);
+        }
     }
 }
 

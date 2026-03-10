@@ -146,6 +146,7 @@ impl ResolvedProfile {
             Some(super::ProviderType::Ollama) => "http://localhost:11434/v1".to_string(),
             Some(super::ProviderType::OpenRouter) => "https://openrouter.ai/api/v1".to_string(),
             Some(super::ProviderType::Kimi) => "https://api.moonshot.cn/v1".to_string(),
+            Some(super::ProviderType::InceptionLabs) => "https://api.inceptionlabs.ai/v1".to_string(),
             Some(super::ProviderType::Custom) | None => "https://api.openai.com/v1".to_string(),
         }
     }

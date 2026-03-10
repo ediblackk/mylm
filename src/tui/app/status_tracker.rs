@@ -290,6 +290,18 @@ impl StatusTracker {
                 // Just update activity timestamp
                 self.last_activity = Instant::now();
             }
+            
+            OutputEvent::MemoryAdded { content_preview, .. } => {
+                // Memory added - informational only
+                self.last_activity = Instant::now();
+                mylm_core::debug_log!("[STATUS_TRACKER] Memory added: {}", content_preview);
+            }
+            
+            OutputEvent::MemoryRetrieved { query, result_count, .. } => {
+                // Memory retrieved - informational only
+                self.last_activity = Instant::now();
+                mylm_core::debug_log!("[STATUS_TRACKER] Memory retrieved: {} results for '{}'", result_count, query);
+            }
         }
     }
 

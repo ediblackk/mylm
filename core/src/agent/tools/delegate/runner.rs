@@ -6,14 +6,6 @@
 //! - Session execution (run loop)
 //! - Idle loop and query processing
 //! - Cleanup and completion
-//!
-//! It does NOT handle creation - that's in creator.rs
-//!
-//! NOTE:
-//! Worker query processing is currently a stub.
-//! Queries are acknowledged but not executed through a cognitive loop.
-//! The worker session is consumed during initial objective execution.
-//! Proper implementation requires re-entrant session or dedicated query session.
 
 use super::types::{SpawnedWorker, WorkerConfig};
 use super::filter::WorkerEventFilter;
@@ -28,7 +20,7 @@ use crate::memory::store::sanitize_memory_content;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 use tokio::time::timeout;
 
 /// Spawn a single worker - COORDINATION entry point
@@ -356,9 +348,14 @@ pub async fn run_worker_session(
             crate::info_log!("Worker [{}] now idle, waiting for routed queries", config.id);
             
             // Idle loop: process routed queries
+            // The session is kept alive and queries are fed via submit_input
             let mut query_count = 0;
             let mut action_count = 0;
             const MAX_ACTIONS: usize = 100; // Stall after 100 actions to prevent runaway
+            const QUERY_TIMEOUT_SECS: u64 = 60; // Max time to wait for query response
+            
+            // Channel for receiving query responses from the session
+            let (query_response_tx, mut query_response_rx) = mpsc::channel::<(String, String)>(10);
             
             loop {
                 // Stall detection: check action limit
@@ -379,13 +376,11 @@ pub async fn run_worker_session(
                 
                 if queries.is_empty() {
                     // No queries - wait a bit and check again
-                    // In a real implementation, this would use a notification mechanism
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     
                     // Check if we should terminate (e.g., after some timeout or signal)
-                    // For now, terminate after being idle with no queries
                     query_count += 1;
-                    if query_count > 50 { // 5 seconds of idle
+                    if query_count > 300 { // 30 seconds of idle (300 * 100ms)
                         crate::info_log!("Worker [{}] idle timeout, completing", config.id);
                         break;
                     }
@@ -405,28 +400,139 @@ pub async fn run_worker_session(
                         continue;
                     }
                     
-                    // TODO: Proper query routing not yet implemented.
-                    // Current behavior: acknowledge receipt but do not execute cognitive processing.
-                    // The worker session was consumed during initial objective execution.
-                    // Implementing query routing requires either:
-                    //   1. Re-entrant session architecture, or
-                    //   2. Dedicated per-query session spawn
-                    let response = format!(
-                        "Query received but not processed (routing not implemented): {}",
-                        query.query
-                    );
+                    // Send the query to the session via submit_input
+                    let query_msg = if let Some(ref ctx) = query.context {
+                        format!("{}\n\nContext: {}", query.query, ctx)
+                    } else {
+                        query.query.clone()
+                    };
                     
-                    // Submit result
-                    let _ = commonbox.submit_query_result(
-                        &job_id,
-                        query.id,
-                        crate::agent::runtime::orchestrator::commonbox::JobResult(serde_json::json!(response))
-                    ).await;
+                    crate::info_log!("Worker [{}] submitting query to session ({} bytes)", config.id, query_msg.len());
+                    
+                    if let Err(e) = session.submit_input(UserInput::Message(query_msg)).await {
+                        crate::error_log!("Worker [{}] failed to submit query: {}", config.id, e);
+                        
+                        // Submit error as query result
+                        let error_result = crate::agent::runtime::orchestrator::commonbox::JobResult(
+                            serde_json::json!({
+                                "error": format!("Failed to submit query: {}", e),
+                                "query_id": query.id,
+                            })
+                        );
+                        let _ = commonbox.submit_query_result(&job_id, query.id.clone(), error_result).await;
+                        
+                        // Transition back to idle
+                        if let Err(e) = commonbox.idle_job(&job_id).await {
+                            crate::error_log!("Worker [{}] failed to return to idle: {}", config.id, e);
+                        }
+                        continue;
+                    }
+                    
+                    // Wait for response from session output
+                    // We'll monitor output events to capture the LLM response
+                    let query_id = query.id.clone();
+                    let response_tx = query_response_tx.clone();
+                    let output_rx = session.subscribe_output();
+                    
+                    // Spawn a task to capture the response
+                    let response_capture = tokio::spawn(async move {
+                        let mut output_rx = output_rx;
+                        let mut response_chunks = Vec::new();
+                        let mut response_complete = false;
+                        
+                        // Wait up to QUERY_TIMEOUT_SECS for response
+                        let deadline = tokio::time::Instant::now() + Duration::from_secs(QUERY_TIMEOUT_SECS);
+                        
+                        while tokio::time::Instant::now() < deadline && !response_complete {
+                            match tokio::time::timeout(Duration::from_millis(100), output_rx.recv()).await {
+                                Ok(Ok(event)) => {
+                                    match event {
+                                        OutputEvent::ResponseChunk { content } => {
+                                            response_chunks.push(content);
+                                        }
+                                        OutputEvent::ResponseComplete { .. } => {
+                                            response_complete = true;
+                                        }
+                                        OutputEvent::Error { message } => {
+                                            // Return error as response
+                                            let _ = response_tx.send((query_id.clone(), format!("Error: {}", message))).await;
+                                            return;
+                                        }
+                                        _ => {} // Ignore other events
+                                    }
+                                }
+                                Ok(Err(_)) => {
+                                    // Channel closed
+                                    break;
+                                }
+                                Err(_) => {
+                                    // Timeout on this iteration, continue if not complete
+                                    continue;
+                                }
+                            }
+                        }
+                        
+                        // Send the collected response
+                        let full_response = response_chunks.join("");
+                        let _ = response_tx.send((query_id, full_response)).await;
+                    });
+                    
+                    // Wait for the response capture task to complete
+                    let query_result = match timeout(Duration::from_secs(QUERY_TIMEOUT_SECS + 5), response_capture).await {
+                        Ok(Ok(_)) => {
+                            // Try to receive the captured response
+                            match timeout(Duration::from_secs(1), query_response_rx.recv()).await {
+                                Ok(Some((_, response))) => {
+                                    crate::info_log!("Worker [{}] received response ({} bytes)", config.id, response.len());
+                                    crate::agent::runtime::orchestrator::commonbox::JobResult(
+                                        serde_json::json!({
+                                            "response": response,
+                                            "query_id": query.id,
+                                        })
+                                    )
+                                }
+                                _ => {
+                                    crate::warn_log!("Worker [{}] response channel closed or timeout", config.id);
+                                    crate::agent::runtime::orchestrator::commonbox::JobResult(
+                                        serde_json::json!({
+                                            "error": "Failed to capture response",
+                                            "query_id": query.id,
+                                        })
+                                    )
+                                }
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            crate::error_log!("Worker [{}] response capture task failed: {}", config.id, e);
+                            crate::agent::runtime::orchestrator::commonbox::JobResult(
+                                serde_json::json!({
+                                    "error": format!("Response capture failed: {}", e),
+                                    "query_id": query.id,
+                                })
+                            )
+                        }
+                        Err(_) => {
+                            crate::warn_log!("Worker [{}] response capture timeout", config.id);
+                            crate::agent::runtime::orchestrator::commonbox::JobResult(
+                                serde_json::json!({
+                                    "error": "Response timeout",
+                                    "query_id": query.id,
+                                })
+                            )
+                        }
+                    };
+                    
+                    // Submit result to commonbox
+                    if let Err(e) = commonbox.submit_query_result(&job_id, query.id, query_result).await {
+                        crate::error_log!("Worker [{}] failed to submit query result: {}", config.id, e);
+                    }
                     
                     // Transition back to idle
                     if let Err(e) = commonbox.idle_job(&job_id).await {
                         crate::error_log!("Worker [{}] failed to return to idle: {}", config.id, e);
                     }
+                    
+                    crate::info_log!("Worker [{}] completed query processing", config.id);
                 }
             }
             

@@ -71,7 +71,6 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::Duration;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
 
 use crate::agent::cognition::kernel::{GraphEngine};
 use crate::agent::runtime::core::{AgencyRuntimeError, AgencyRuntime};
@@ -349,11 +348,6 @@ where
     #[allow(dead_code)]
     memory_manager: Option<std::sync::Arc<crate::agent::memory::AgentMemoryManager>>,
     
-    // Chunk pool for managing persistent file chunk workers
-    // The session owns this, tools hold references to it
-    
-    chunk_pool: Option<std::sync::Arc<crate::agent::tools::ChunkPool>>,
-    
     // INVARIANT: Transport identity check - ensures transport is never swapped
     
     transport_instance_id: u64,
@@ -387,10 +381,10 @@ where
         output_tx: broadcast::Sender<OutputEvent>,
         memory_manager: Option<std::sync::Arc<crate::agent::memory::AgentMemoryManager>>,
     ) -> Self {
-        Self::new_full(kernel, runtime, transport, output_tx, memory_manager, None)
+        Self::new_full(kernel, runtime, transport, output_tx, memory_manager)
     }
     
-    /// Create a new session with both memory manager and chunk pool
+    /// Create a new session with memory manager
     /// 
     /// This is the full constructor that allows passing all optional components.
     /// The session owns these components and keeps them alive for its lifetime.
@@ -400,7 +394,6 @@ where
         transport: T, 
         output_tx: broadcast::Sender<OutputEvent>,
         memory_manager: Option<std::sync::Arc<crate::agent::memory::AgentMemoryManager>>,
-        chunk_pool: Option<std::sync::Arc<crate::agent::tools::ChunkPool>>,
     ) -> Self {
         let (input_tx, input_rx) = mpsc::channel(100);
         let transport_instance_id = transport.instance_id();
@@ -422,7 +415,6 @@ where
             consecutive_errors: 0,
             max_consecutive_errors: 3,
             memory_manager,
-            chunk_pool,
             transport_instance_id,
         }
     }
@@ -441,11 +433,6 @@ where
         self.transport.instance_id()
     }
     
-    /// Get a reference to the chunk pool (if configured)
-    pub fn chunk_pool(&self) -> Option<&Arc<crate::agent::tools::ChunkPool>> {
-        self.chunk_pool.as_ref()
-    }
-
     /// Generate next event ID
     fn next_event_id(&self) -> EventId {
         let id = self.next_event_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

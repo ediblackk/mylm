@@ -12,7 +12,7 @@ use crate::agent::{
     runtime::orchestrator::orchestrator::AgencySession,
     runtime::orchestrator::ContractRuntime,
     runtime::capabilities::InMemoryTransport,
-    tools::{ToolRegistry, DelegateTool, ChunkPool},
+    tools::{ToolRegistry, DelegateTool},
     runtime::core::terminal::TerminalExecutor,
     runtime::core::ApprovalCapability,
     runtime::core::LLMCapability,
@@ -192,15 +192,9 @@ impl AgentSessionFactory {
         // (needed for both runtime and delegate tool)
         let (output_tx, _) = tokio::sync::broadcast::channel(100);
         
-        // Step 4: Create ChunkPool for large file reading
-        // Get max_persistent_workers from agent config (default 5)
-        let agent_config = crate::config::agent::AgentConfig::load();
-        let max_persistent_workers = agent_config.workers.max_persistent_workers;
-        let session_id = uuid::Uuid::new_v4().to_string();
-        let chunk_pool = Arc::new(ChunkPool::new(&session_id, max_persistent_workers));
-        crate::info_log!("[FACTORY] Created chunk pool with max {} workers for session {}", max_persistent_workers, session_id);
+        crate::info_log!("[FACTORY] Creating session for profile: {}", profile_name);
         
-        // Step 5: Create memory manager FIRST (before tool registry, so memory tool can use it)
+        // Step 4: Create memory manager FIRST (before tool registry, so memory tool can use it)
         use crate::config::agent::MemoryConfig;
         use crate::agent::memory::AgentMemoryProvider;
         crate::info_log!("[FACTORY] features.memory = {}", self.config.features.memory);
@@ -252,45 +246,66 @@ impl AgentSessionFactory {
             None
         };
         
-        // Step 6: Create ToolRegistry with chunk pool and memory (if available)
-        let mut tool_registry = ToolRegistry::with_chunk_pool(Arc::clone(&chunk_pool));
+        // Step 5: Create ToolRegistry with basic tools
+        let tool_registry = ToolRegistry::new();
         
-        // Add memory tool if memory manager is available
-        if let Some(ref mm) = memory_manager {
+        // Step 5a: Add memory tool if memory manager is available
+        let tool_registry = if let Some(ref mm) = memory_manager {
             crate::info_log!("[FACTORY] Enabling memory tool");
-            tool_registry = tool_registry.with_memory_and_limit(
+            tool_registry.with_memory_and_limit(
                 Arc::clone(mm.vector_store()),
                 memory_settings.tool_search_limit
-            );
-        }
+            )
+        } else {
+            tool_registry
+        };
         
-        // Step 6a: Add scratchpad tool for agent-local persistent notes
-        let scratchpad = crate::agent::tools::ScratchpadTool::new_standalone();
-        tool_registry = tool_registry.with_scratchpad(scratchpad);
+        // Step 5b: Add scratchpad tool for agent-local persistent notes
+        let tool_registry = tool_registry.with_scratchpad(crate::agent::tools::ScratchpadTool::new_standalone());
         
-        // Step 6b: Add search_files tool for full-text file search
-        // Note: with_search_files returns Result, so we need to handle it carefully
-        let search_result = ToolRegistry::with_chunk_pool(Arc::clone(&chunk_pool))
-            .with_scratchpad(crate::agent::tools::ScratchpadTool::new_standalone())
-            .with_search_files(None);
-        
-        tool_registry = match search_result {
+        // Step 5c: Add search_files tool for full-text file search
+        let tool_registry = match tool_registry.with_search_files(None) {
             Ok(registry_with_search) => {
                 crate::info_log!("[FACTORY] Enabled search_files tool");
-                // Re-add memory if it was enabled
-                if let Some(ref mm) = memory_manager {
-                    registry_with_search.with_memory(Arc::clone(mm.vector_store()))
-                } else {
-                    registry_with_search
-                }
+                registry_with_search
             }
             Err(e) => {
                 crate::warn_log!("[FACTORY] Failed to enable search_files: {}", e);
-                tool_registry
+                // Start fresh with a new registry since the old one was consumed
+                let fresh = ToolRegistry::new();
+                // Re-add memory if it was enabled
+                if let Some(ref mm) = memory_manager {
+                    fresh.with_memory_and_limit(
+                        Arc::clone(mm.vector_store()),
+                        memory_settings.tool_search_limit
+                    )
+                } else {
+                    fresh
+                }.with_scratchpad(crate::agent::tools::ScratchpadTool::new_standalone())
             }
         };
         
-        // Step 6c: Add delegate tool if commonbox is configured (enables worker spawning)
+        // Step 5d: Add document worker tools (query_file, query_chunk_worker, close_file)
+        // These tools enable the agent to process large documents using chunk workers
+        let tool_registry = {
+            use crate::agent::tools::ChunkWorkerRegistry;
+            // Get worker context window from config (default to half of main context window)
+            let worker_context_window = self.config
+                .profiles
+                .get(profile_name)
+                .map(|p| p.context_window / 2)
+                .unwrap_or(8192);
+            let worker_registry = Arc::new(ChunkWorkerRegistry::new());
+            crate::info_log!("[FACTORY] Enabling document worker tools (query_file, query_chunk_worker, close_file)");
+            tool_registry.with_document_workers(
+                worker_registry,
+                Arc::clone(&llm_client),
+                worker_context_window,
+                crate::agent::runtime::orchestrator::OutputSender::Broadcast(output_tx.clone()),
+            )
+        };
+        
+        // Step 5e: Add delegate tool if commonbox is configured (enables worker spawning)
         let tool_registry = if let Some(ref commonbox) = self.commonbox {
             crate::info_log!("[FACTORY] Enabling delegate tool for worker spawning");
             
@@ -306,10 +321,12 @@ impl AgentSessionFactory {
             // Create delegate tool with output sender for worker events
             let delegate = DelegateTool::new(
                 Arc::clone(commonbox),
-                worker_factory,
+                worker_factory.clone(),
             ).with_output_sender(crate::agent::runtime::orchestrator::OutputSender::Broadcast(output_tx.clone()));
             
-            // Add delegate to existing registry (which already has memory, scratchpad, search_files)
+            crate::info_log!("[FACTORY] Configured delegate tool for worker spawning");
+            
+            // Add delegate to existing registry (which already has memory, scratchpad, search_files, document_workers)
             tool_registry.with_delegate(Arc::new(delegate))
         } else {
             tool_registry
@@ -321,31 +338,31 @@ impl AgentSessionFactory {
             .collect();
         crate::info_log!("[FACTORY] Available tools: {:?}", tool_descriptions.iter().map(|d| &d.name).collect::<Vec<_>>());
         
-        // Step 7: Create memory provider wrapper if manager exists (for runtime layer Intent::Remember)
+        // Step 6: Create memory provider wrapper if manager exists (for runtime layer Intent::Remember)
         let memory_provider: Option<Arc<dyn crate::agent::memory::MemoryProvider>> = memory_manager
             .as_ref()
             .map(|mm| Arc::new(AgentMemoryProvider::new(Arc::clone(mm))) as Arc<dyn crate::agent::memory::MemoryProvider>);
         
-        // Step 8: Create ContractRuntime with LLM client, tools, memory provider, and output sender
+        // Step 7: Create ContractRuntime with LLM client, tools, memory provider, and output sender
         let mut runtime = self.create_runtime(llm_client.clone(), Arc::new(tool_registry), memory_provider)
             .with_output_sender(output_tx.clone());
         
-        // Step 9: Attach terminal executor if provided
+        // Step 8: Attach terminal executor if provided
         if let Some(ref terminal) = self.terminal {
             crate::info_log!("[FACTORY] Attaching terminal executor to runtime");
             runtime = runtime.with_terminal(Arc::clone(terminal));
         }
         
-        // Step 10: Attach approval capability if provided
+        // Step 9: Attach approval capability if provided
         if let Some(ref approval) = self.approval {
             crate::info_log!("[FACTORY] Attaching approval capability to runtime");
             runtime = runtime.with_approval(Arc::clone(approval));
         }
         
-        // Step 11: Create kernel config from profile
+        // Step 10: Create kernel config from profile
         let _kernel_config = config_to_kernel_config(&self.config, profile_name)?;
         
-        // Step 12: Create planner directly with dynamic tools
+        // Step 11: Create planner directly with dynamic tools
         // NOTE: Memory tool is now available for explicit memory operations via ToolRegistry
         let mut kernel_builder = Planner::new()
             .with_tool_descriptions(tool_descriptions);
@@ -360,13 +377,13 @@ impl AgentSessionFactory {
         
         let kernel = kernel_builder;
         
-        // Step 13: Create in-memory transport
+        // Step 12: Create in-memory transport
         let transport = InMemoryTransport::new(100);
         
-        // Step 14: Assemble the session with shared output channel, memory manager, and chunk pool
-        // CRITICAL: memory_manager and chunk_pool are passed to session which owns them for its lifetime
+        // Step 13: Assemble the session with shared output channel, memory manager
+        // CRITICAL: memory_manager is passed to session which owns it for its lifetime
         // The runtime's MemoryProvider and tools hold references - this ensures the Arcs stay alive
-        let session = AgencySession::new_full(kernel, runtime, transport, output_tx, memory_manager, Some(chunk_pool));
+        let session = AgencySession::new_with_memory(kernel, runtime, transport, output_tx, memory_manager);
         
         Ok(session)
     }
@@ -405,6 +422,9 @@ impl AgentSessionFactory {
     }
     
     /// Create a session for the worker profile
+    /// 
+    /// Workers do NOT get memory injection to avoid context pollution and save tokens.
+    /// They focus purely on their assigned objective.
     pub async fn create_worker_session(
         &self,
     ) -> Result<
@@ -415,7 +435,38 @@ impl AgentSessionFactory {
         >,
         FactoryError,
     > {
-        self.create_session("worker", None).await
+        crate::info_log!("[FACTORY] Creating worker session without memory");
+        
+        // Use worker profile for LLM config but don't use create_session 
+        // to avoid memory injection
+        let llm_config = config_to_llm_config(&self.config, "worker")
+            .map_err(FactoryError::Config)?;
+        let llm_client = Arc::new(LlmClient::new(llm_config)?);
+        
+        // Create a simple tool registry for workers - no memory
+        let tool_registry = ToolRegistry::new()
+            .with_scratchpad(crate::agent::tools::ScratchpadTool::new_standalone());
+        
+        // Create runtime WITHOUT memory provider
+        let (output_tx, _): (tokio::sync::broadcast::Sender<crate::agent::runtime::orchestrator::OutputEvent>, _) = tokio::sync::broadcast::channel(100);
+        let mut runtime = self.create_runtime(llm_client.clone(), Arc::new(tool_registry), None)
+            .with_output_sender(output_tx.clone());
+        
+        // Attach terminal if available
+        if let Some(ref terminal) = self.terminal {
+            runtime = runtime.with_terminal(Arc::clone(terminal));
+        }
+        
+        // Create kernel
+        let kernel = Planner::new();
+        
+        // Create transport
+        let transport = InMemoryTransport::new(100);
+        
+        // Assemble session WITHOUT memory manager
+        let session = AgencySession::new_with_memory(kernel, runtime, transport, output_tx, None);
+        
+        Ok(session)
     }
     
     /// Create a resumable session for the default (main) profile

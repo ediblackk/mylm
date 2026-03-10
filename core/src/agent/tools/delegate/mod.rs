@@ -230,7 +230,11 @@ Received: {}"#,
         let mut spawned = Vec::new();
         let mut errors = Vec::new();
         
+        crate::info_log!("[DELEGATE] Spawning {} workers...", args.workers.len());
+        
         for (index, config) in args.workers.iter().enumerate() {
+            crate::info_log!("[DELEGATE] Spawning worker {}/{}: {}", index + 1, args.workers.len(), config.id);
+            
             match spawn_worker(
                 config,
                 &args.shared_context,
@@ -240,10 +244,18 @@ Received: {}"#,
                 self.factory.clone(),
                 self.output_tx.clone(),
             ).await {
-                Ok(worker) => spawned.push(worker),
-                Err(e) => errors.push(format!("Failed to spawn worker '{}': {}", config.id, e)),
+                Ok(worker) => {
+                    crate::info_log!("[DELEGATE] Worker {} spawned successfully (job_id: {})", config.id, worker.job_id);
+                    spawned.push(worker);
+                }
+                Err(e) => {
+                    crate::error_log!("[DELEGATE] Failed to spawn worker '{}': {}", config.id, e);
+                    errors.push(format!("Failed to spawn worker '{}': {}", config.id, e));
+                }
             }
         }
+        
+        crate::info_log!("[DELEGATE] Spawned {}/{} workers successfully", spawned.len(), args.workers.len());
         
         // Build result
         let worker_infos: Vec<_> = spawned.iter()

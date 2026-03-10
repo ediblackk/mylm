@@ -47,7 +47,7 @@ impl ReadArgs {
         self
     }
     
-    /// Set number of lines to read (max 1000, validated later)
+    /// Set number of lines to read (max 10000, validated later)
     pub fn with_n_lines(mut self, n: usize) -> Self {
         self.n_lines = Some(n);
         self
@@ -75,8 +75,8 @@ impl ReadArgs {
             if n == 0 {
                 return Err(ReadError::InvalidArgument("n_lines must be greater than 0".to_string()));
             }
-            if n > 1000 {
-                return Err(ReadError::InvalidArgument("n_lines cannot exceed 1000".to_string()));
+            if n > thresholds::MAX_LINES {
+                return Err(ReadError::InvalidArgument(format!("n_lines cannot exceed {}", thresholds::MAX_LINES)));
             }
         }
         
@@ -123,8 +123,17 @@ pub enum FileFormat {
     /// Markdown file
     Markdown,
     
+    /// CSV file
+    Csv,
+    
+    /// XML file
+    Xml,
+    
     /// PDF document
     Pdf,
+    
+    /// Microsoft Word document
+    Docx,
     
     /// Unknown or binary format
     Unknown,
@@ -135,25 +144,41 @@ impl FileFormat {
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_lowercase().as_str() {
             "txt" | "rs" | "js" | "ts" | "py" | "java" | "go" | "c" | "cpp" | "h" | "hpp" |
-            "json" | "xml" | "yaml" | "yml" | "toml" | "ini" | "conf" | "config" |
+            "json" | "yaml" | "yml" | "toml" | "ini" | "conf" | "config" |
             "sh" | "bash" | "zsh" | "fish" |
             "html" | "htm" | "css" | "scss" | "sass" | "less" |
             "sql" | "graphql" | "proto" |
             "log" | "md"  => Self::Text,
             "markdown" => Self::Markdown,
+            "csv" => Self::Csv,
+            "xml" | "xhtml" | "svg" => Self::Xml,
             "pdf" => Self::Pdf,
+            "docx" | "doc" => Self::Docx,
             _ => Self::Unknown,
         }
     }
     
     /// Check if format supports line-based chunking
     pub fn supports_chunking(&self) -> bool {
-        matches!(self, Self::Text | Self::Markdown)
+        matches!(self, Self::Text | Self::Markdown | Self::Csv | Self::Xml)
     }
     
     /// Check if format requires special extraction
     pub fn requires_extraction(&self) -> bool {
-        matches!(self, Self::Pdf)
+        matches!(self, Self::Pdf | Self::Docx)
+    }
+    
+    /// Get human-readable name for the format
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Markdown => "markdown",
+            Self::Csv => "csv",
+            Self::Xml => "xml",
+            Self::Pdf => "pdf",
+            Self::Docx => "docx",
+            Self::Unknown => "unknown",
+        }
     }
 }
 
@@ -326,11 +351,11 @@ pub enum ReadError {
 
 /// Size thresholds for reading strategies (in bytes)
 pub mod thresholds {
-    /// Small file limit: ~2.5K tokens - direct read
-    pub const SMALL_FILE: usize = 10_000;
+    /// Small file limit: ~50K tokens - direct read
+    pub const SMALL_FILE: usize = 200_000;
     
-    /// Medium file limit: ~25K tokens - direct with warning
-    pub const MEDIUM_FILE: usize = 100_000;
+    /// Medium file limit: ~125K tokens - direct with warning
+    pub const MEDIUM_FILE: usize = 500_000;
     
     /// Chunk size target: ~12.5K tokens per worker
     pub const CHUNK_SIZE: usize = 50_000;
@@ -339,7 +364,10 @@ pub mod thresholds {
     pub const LARGE_FILE: usize = 1_000_000;
     
     /// Maximum direct read size (with warning)
-    pub const MAX_DIRECT: usize = 100_000;
+    pub const MAX_DIRECT: usize = 500_000;
+    
+    /// Maximum lines per partial read request
+    pub const MAX_LINES: usize = 10_000;
 }
 
 /// Token estimation utilities

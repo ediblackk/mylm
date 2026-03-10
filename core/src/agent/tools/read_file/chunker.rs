@@ -43,6 +43,191 @@ pub fn compute_chunks(file_size: usize, line_count: usize) -> Vec<FileChunk> {
     chunks
 }
 
+/// Configuration for token-aware chunking
+#[derive(Debug, Clone)]
+pub struct TokenChunkConfig {
+    /// Worker LLM context window size (in tokens)
+    pub worker_context_window: usize,
+    /// Percentage of context window to use for content (0.0 - 1.0)
+    /// Default: 0.75 (75%) - leaves room for system prompt, tools, etc.
+    pub utilization_ratio: f32,
+    /// Overlap between chunks in tokens
+    /// Default: 2500 tokens - provides context awareness
+    pub overlap_tokens: usize,
+    /// Minimum chunk size in tokens (avoid tiny chunks)
+    pub min_chunk_tokens: usize,
+}
+
+impl Default for TokenChunkConfig {
+    fn default() -> Self {
+        Self {
+            worker_context_window: 8192,  // Default to 8K context
+            utilization_ratio: 0.75,      // 75% for content
+            overlap_tokens: 2500,         // 2.5K token overlap
+            min_chunk_tokens: 500,        // Minimum 500 tokens per chunk
+        }
+    }
+}
+
+impl TokenChunkConfig {
+    /// Create config from worker profile's context window
+    #[cfg(test)]
+    pub fn for_worker_context(context_window: usize) -> Self {
+        Self {
+            worker_context_window: context_window,
+            ..Default::default()
+        }
+    }
+    
+    /// Calculate effective chunk size (content budget per chunk)
+    pub fn effective_chunk_size(&self) -> usize {
+        let effective = (self.worker_context_window as f32 * self.utilization_ratio) as usize;
+        effective.max(self.min_chunk_tokens)
+    }
+    
+    /// Calculate step size (how much to advance between chunks)
+    pub fn step_size(&self) -> usize {
+        let effective = self.effective_chunk_size();
+        // Step = effective size - overlap, but ensure we make progress
+        (effective.saturating_sub(self.overlap_tokens)).max(self.min_chunk_tokens)
+    }
+}
+
+/// Result of token-aware chunking
+#[derive(Debug, Clone)]
+pub struct TokenChunkResult {
+    /// The chunks
+    pub chunks: Vec<FileChunk>,
+    /// Total tokens in document
+    pub _total_tokens: usize,
+    /// Tokens per chunk (target)
+    pub _tokens_per_chunk: usize,
+    /// Overlap in tokens
+    pub _overlap_tokens: usize,
+}
+
+/// Computes chunks based on token budget and worker context window
+/// 
+/// This is the smart chunking algorithm that:
+/// 1. Estimates total tokens in the document
+/// 2. Calculates optimal chunk size based on worker's context window (75% for overhead)
+/// 3. Adds overlap between chunks for context awareness
+/// 4. Returns chunks that fit within worker LLM constraints
+/// 
+/// # Arguments
+/// * `file_size` - Total file size in bytes
+/// * `line_count` - Total number of lines
+/// * `config` - Token chunking configuration (includes worker context window)
+/// 
+/// # Returns
+/// TokenChunkResult with chunks and metadata
+pub fn compute_chunks_with_tokens(
+    file_size: usize,
+    line_count: usize,
+    config: &TokenChunkConfig,
+) -> TokenChunkResult {
+    if line_count == 0 {
+        return TokenChunkResult {
+            chunks: vec![],
+            _total_tokens: 0,
+            _tokens_per_chunk: 0,
+            _overlap_tokens: 0,
+        };
+    }
+    
+    // Estimate total tokens (1 token ≈ 4 bytes)
+    let total_tokens = file_size / 4;
+    
+    // Calculate effective chunk size and step
+    let effective_chunk_tokens = config.effective_chunk_size();
+    let step_tokens = config.step_size();
+    
+    // Convert tokens to lines
+    let avg_bytes_per_line = file_size / line_count;
+    let avg_tokens_per_line = avg_bytes_per_line.max(1) / 4;
+    
+    let lines_per_chunk = (effective_chunk_tokens / avg_tokens_per_line.max(1)).max(10);
+    let lines_per_step = (step_tokens / avg_tokens_per_line.max(1)).max(5);
+    
+    let mut chunks = Vec::new();
+    let mut current_line = 1usize;
+    let mut chunk_id = 0usize;
+    
+    while current_line <= line_count {
+        let end_line = (current_line + lines_per_chunk - 1).min(line_count);
+        let estimated_bytes = (end_line - current_line + 1) * avg_bytes_per_line;
+        
+        chunks.push(FileChunk::new(
+            chunk_id,
+            current_line,
+            end_line,
+            estimated_bytes,
+        ));
+        
+        // Advance by step size (creating overlap)
+        current_line = (current_line + lines_per_step).min(end_line + 1);
+        
+        // Break if we've reached the end
+        if current_line > line_count {
+            break;
+        }
+        
+        chunk_id += 1;
+        
+        // Safety limit: prevent too many chunks
+        if chunk_id >= 100 {
+            crate::warn_log!("[Chunker] Reached maximum chunk limit (100), consolidating remaining content");
+            // Create one final chunk for all remaining lines
+            if current_line <= line_count {
+                let final_bytes = (line_count - current_line + 1) * avg_bytes_per_line;
+                chunks.push(FileChunk::new(
+                    chunk_id,
+                    current_line,
+                    line_count,
+                    final_bytes,
+                ));
+            }
+            break;
+        }
+    }
+    
+    TokenChunkResult {
+        chunks,
+        _total_tokens: total_tokens,
+        _tokens_per_chunk: effective_chunk_tokens,
+        _overlap_tokens: config.overlap_tokens,
+    }
+}
+
+/// Determine optimal chunk configuration for a file
+/// 
+/// Analyzes the file and returns a TokenChunkConfig optimized for:
+/// - The worker LLM's context window (from profile)
+/// - The file size (larger files may need different overlap strategy)
+pub fn determine_chunk_config(
+    file_size: usize,
+    worker_context_window: usize,
+) -> TokenChunkConfig {
+    // For very large files, slightly reduce overlap to limit total chunks
+    let overlap = if file_size > 1_000_000 {
+        // Files > 1MB: use smaller overlap to keep chunk count manageable
+        2000
+    } else if file_size > 500_000 {
+        // Files 500KB-1MB: moderate overlap
+        2250
+    } else {
+        // Smaller files: full overlap for better context
+        2500
+    };
+    
+    TokenChunkConfig {
+        worker_context_window,
+        utilization_ratio: 0.75,
+        overlap_tokens: overlap,
+        min_chunk_tokens: 500,
+    }
+}
+
 /// Count lines in a file efficiently
 pub async fn count_lines(path: &Path) -> Result<usize, ReadError> {
     let file = File::open(path).await
@@ -385,5 +570,107 @@ mod tests {
         assert_eq!(determine_strategy(50_000), ReadStrategy::Direct);
         assert_eq!(determine_strategy(500_000), ReadStrategy::Chunked);
         assert_eq!(determine_strategy(2_000_000), ReadStrategy::Search);
+    }
+    
+    #[test]
+    fn test_token_chunk_config() {
+        // Default config
+        let config = TokenChunkConfig::default();
+        assert_eq!(config.worker_context_window, 8192);
+        assert_eq!(config.utilization_ratio, 0.75);
+        assert_eq!(config.overlap_tokens, 2500);
+        assert_eq!(config.min_chunk_tokens, 500);
+        
+        // Effective chunk size: 8192 * 0.75 = 6144
+        assert_eq!(config.effective_chunk_size(), 6144);
+        
+        // Step size: 6144 - 2500 = 3644
+        assert_eq!(config.step_size(), 3644);
+        
+        // For worker context
+        let config = TokenChunkConfig::for_worker_context(32000);
+        assert_eq!(config.worker_context_window, 32000);
+        assert_eq!(config.effective_chunk_size(), 24000); // 32000 * 0.75
+    }
+    
+    #[test]
+    fn test_compute_chunks_with_tokens_small_file() {
+        // Small file: 1000 lines, 50KB
+        let config = TokenChunkConfig::for_worker_context(8192);
+        let result = compute_chunks_with_tokens(50_000, 1000, &config);
+        
+        // Should create chunks that fit in worker context
+        assert!(!result.chunks.is_empty());
+        assert_eq!(result.total_tokens, 12_500); // 50KB / 4
+        assert_eq!(result.tokens_per_chunk, 6144); // 8192 * 0.75
+        
+        // First chunk should start at line 1
+        assert_eq!(result.chunks[0].line_start, 1);
+        // Last chunk should end at line 1000
+        assert_eq!(result.chunks.last().unwrap().line_end, 1000);
+    }
+    
+    #[test]
+    fn test_compute_chunks_with_tokens_large_file() {
+        // Large file: 10000 lines, 500KB (simulating your PDF scenario)
+        let config = TokenChunkConfig::for_worker_context(8192);
+        let result = compute_chunks_with_tokens(500_000, 10_000, &config);
+        
+        // 500KB = ~125K tokens
+        assert_eq!(result.total_tokens, 125_000);
+        
+        // With 6144 tokens per chunk and 2500 overlap, step = 3644
+        // Expected chunks: 125000 / 3644 ≈ 35 chunks
+        // But we limit to 100 max
+        assert!(result.chunks.len() > 1);
+        assert!(result.chunks.len() <= 100);
+        
+        // Verify overlap: consecutive chunks should overlap
+        if result.chunks.len() > 1 {
+            let first_end = result.chunks[0].line_end;
+            let second_start = result.chunks[1].line_start;
+            // Second chunk should start before first ends (overlap)
+            assert!(second_start <= first_end);
+        }
+    }
+    
+    #[test]
+    fn test_compute_chunks_with_tokens_large_context() {
+        // Large context window (128K) should create fewer, bigger chunks
+        let config = TokenChunkConfig::for_worker_context(128_000);
+        let result = compute_chunks_with_tokens(500_000, 10_000, &config);
+        
+        // 128K * 0.75 = 96K tokens per chunk
+        assert_eq!(result.tokens_per_chunk, 96_000);
+        
+        // Should have fewer chunks than with 8K context
+        assert!(result.chunks.len() <= 10);
+    }
+    
+    #[test]
+    fn test_determine_chunk_config() {
+        // Small file (< 500KB)
+        let config = determine_chunk_config(400_000, 8192);
+        assert_eq!(config.overlap_tokens, 2500);
+        
+        // Medium file (500KB - 1MB)
+        let config = determine_chunk_config(750_000, 8192);
+        assert_eq!(config.overlap_tokens, 2250);
+        
+        // Large file (> 1MB)
+        let config = determine_chunk_config(2_000_000, 8192);
+        assert_eq!(config.overlap_tokens, 2000);
+        
+        // Context window is preserved
+        assert_eq!(config.worker_context_window, 8192);
+    }
+    
+    #[test]
+    fn test_empty_file_chunks() {
+        let config = TokenChunkConfig::default();
+        let result = compute_chunks_with_tokens(0, 0, &config);
+        
+        assert!(result.chunks.is_empty());
+        assert_eq!(result.total_tokens, 0);
     }
 }

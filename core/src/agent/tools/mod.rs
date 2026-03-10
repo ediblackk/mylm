@@ -6,6 +6,7 @@
 pub mod shell;
 pub mod read_file;
 pub mod write_file;
+pub mod edit_csv;
 pub mod list_files;
 pub mod git;
 pub mod web_search;
@@ -16,10 +17,12 @@ pub mod scratchpad;
 pub mod worker_shell;
 pub mod commonboard;
 pub mod search_files;
+pub mod document_workers;
 
 pub use shell::ShellTool;
-pub use read_file::{ReadFileTool, ChunkPool};
+pub use read_file::ReadFileTool;
 pub use write_file::WriteFileTool;
+pub use edit_csv::EditCsvTool;
 pub use list_files::ListFilesTool;
 pub use git::{GitStatusTool, GitLogTool, GitDiffTool};
 pub use web_search::{WebSearchTool, WebSearchConfig, SearchProvider};
@@ -30,6 +33,7 @@ pub use scratchpad::{ScratchpadTool, create_shared_scratchpad, SharedScratchpad}
 pub use worker_shell::{WorkerShellTool, WorkerShellPermissions, EscalationRequest, EscalationResponse};
 pub use commonboard::CommonboardTool;
 pub use search_files::SearchFilesTool;
+pub use document_workers::{QueryFileTool, QueryChunkTool, CloseFileTool, ChunkWorkerRegistry};
 
 use std::sync::Arc;
 use std::path::Path;
@@ -44,6 +48,7 @@ pub struct ToolRegistry {
     shell: ShellTool,
     read_file: ReadFileTool,
     write_file: WriteFileTool,
+    edit_csv: EditCsvTool,
     list_files: ListFilesTool,
     git_status: GitStatusTool,
     git_log: GitLogTool,
@@ -60,6 +65,10 @@ pub struct ToolRegistry {
     commonboard: Option<CommonboardTool>,
     /// Search tool for full-text file search (optional)
     search_files: Option<SearchFilesTool>,
+    /// Document worker tools for active chunk processing (optional)
+    query_file: Option<QueryFileTool>,
+    query_chunk_worker: Option<QueryChunkTool>,
+    close_file: Option<CloseFileTool>,
 }
 
 impl ToolRegistry {
@@ -75,6 +84,7 @@ impl ToolRegistry {
             shell: ShellTool::new(),
             read_file: ReadFileTool::simple(),
             write_file: WriteFileTool::new(),
+            edit_csv: EditCsvTool::new(),
             list_files: ListFilesTool::new(),
             git_status: GitStatusTool::new(),
             git_log: GitLogTool::new(),
@@ -87,30 +97,9 @@ impl ToolRegistry {
             scratchpad: None,
             commonboard: None,
             search_files: None,
-        }
-    }
-    
-    /// Create a new tool registry with a chunk pool for large file reading
-    /// 
-    /// The chunk pool manages persistent workers for chunked file reading.
-    /// This allows follow-up queries to already-analyzed file chunks.
-    pub fn with_chunk_pool(chunk_pool: Arc<ChunkPool>) -> Self {
-        Self {
-            shell: ShellTool::new(),
-            read_file: ReadFileTool::new(Arc::clone(&chunk_pool), None),
-            write_file: WriteFileTool::new(),
-            list_files: ListFilesTool::new(),
-            git_status: GitStatusTool::new(),
-            git_log: GitLogTool::new(),
-            git_diff: GitDiffTool::new(),
-            web_search: WebSearchTool::new(),
-            memory: None,
-            notes: NotesTool::new(),
-            terminal: Arc::new(DefaultTerminalExecutor::new()),
-            delegate: None,
-            scratchpad: None,
-            commonboard: None,
-            search_files: None,
+            query_file: None,
+            query_chunk_worker: None,
+            close_file: None,
         }
     }
     
@@ -168,9 +157,23 @@ impl ToolRegistry {
         self
     }
     
-    /// Get a reference to the read_file tool (for chunk pool access)
-    pub fn read_file_tool(&self) -> &ReadFileTool {
-        &self.read_file
+    /// Enable document worker tools with registry and LLM client
+    pub fn with_document_workers(
+        mut self,
+        registry: Arc<ChunkWorkerRegistry>,
+        llm_client: Arc<crate::provider::LlmClient>,
+        worker_context_window: usize,
+        output_tx: crate::agent::runtime::orchestrator::OutputSender,
+    ) -> Self {
+        self.query_file = Some(QueryFileTool::new(
+            Arc::clone(&registry),
+            llm_client.clone(),
+            worker_context_window,
+            output_tx,
+        ));
+        self.query_chunk_worker = Some(QueryChunkTool::new(Arc::clone(&registry)));
+        self.close_file = Some(CloseFileTool::new(registry));
+        self
     }
     
     /// Get a reference to the terminal executor
@@ -184,6 +187,7 @@ impl ToolRegistry {
             "shell" => Some(&self.shell),
             "read_file" | "cat" => Some(&self.read_file),
             "write_file" => Some(&self.write_file),
+            "edit_csv" => Some(&self.edit_csv),
             "list_files" | "ls" | "list_dir" => Some(&self.list_files),
             "git_status" => Some(&self.git_status),
             "git_log" => Some(&self.git_log),
@@ -195,6 +199,9 @@ impl ToolRegistry {
             "scratchpad" => self.scratchpad.as_ref().map(|s| s as &dyn ToolCapability),
             "commonboard" => self.commonboard.as_ref().map(|c| c as &dyn ToolCapability),
             "search_files" => self.search_files.as_ref().map(|s| s as &dyn ToolCapability),
+            "query_file" => self.query_file.as_ref().map(|q| q as &dyn ToolCapability),
+            "query_chunk_worker" => self.query_chunk_worker.as_ref().map(|q| q as &dyn ToolCapability),
+            "close_file" => self.close_file.as_ref().map(|c| c as &dyn ToolCapability),
             _ => None,
         }
     }
@@ -210,6 +217,7 @@ impl ToolRegistry {
             "shell".to_string(),
             "read_file".to_string(),
             "write_file".to_string(),
+            "edit_csv".to_string(),
             "list_files".to_string(),
             "git_status".to_string(),
             "git_log".to_string(),
@@ -232,6 +240,15 @@ impl ToolRegistry {
         if self.search_files.is_some() {
             tools.push("search_files".to_string());
         }
+        if self.query_file.is_some() {
+            tools.push("query_file".to_string());
+        }
+        if self.query_chunk_worker.is_some() {
+            tools.push("query_chunk_worker".to_string());
+        }
+        if self.close_file.is_some() {
+            tools.push("close_file".to_string());
+        }
         tools
     }
 
@@ -245,13 +262,18 @@ impl ToolRegistry {
             },
             ToolDescription {
                 name: "read_file",
-                description: "Read file contents. Supports partial reads (line_offset, n_lines) and automatic chunking for large files",
-                usage: r#"Simple: {"a": "read_file", "i": {"path": "<path>"}} | Partial: {"a": "read_file", "i": {"path": "<path>", "line_offset": 1, "n_lines": 100}} | Large file: {"a": "read_file", "i": {"path": "<path>", "strategy": "chunked"}}"#,
+                description: "Read file contents. DO NOT use this tool for files the user uploaded. Only use for quick, small code reading or specific line checks.",
+                usage: r#"Small file: {"a": "read_file", "i": {"path": "<path>"}} | Partial: {"a": "read_file", "i": {"path": "<path>", "line_offset": 1, "n_lines": 100}}"#,
             },
             ToolDescription {
                 name: "write_file",
                 description: "Write content to file",
                 usage: "{\"a\": \"write_file\", \"i\": {\"path\": \"<path>\", \"content\": \"<content>\"}}",
+            },
+            ToolDescription {
+                name: "edit_csv",
+                description: "Edit CSV files with structured operations (update, delete, insert, update_where)",
+                usage: "Update cell: {\"a\": \"edit_csv\", \"i\": {\"path\": \"<path>\", \"operation\": \"update\", \"row\": 1, \"column\": \"Name\", \"value\": \"New\"}} | Update where: {\"a\": \"edit_csv\", \"i\": {\"path\": \"<path>\", \"operation\": \"update_where\", \"where\": {\"column\": \"Status\", \"equals\": \"inactive\"}, \"column\": \"Status\", \"value\": \"active\"}}",
             },
             ToolDescription {
                 name: "list_files",
@@ -322,6 +344,30 @@ impl ToolRegistry {
                 name: "search_files",
                 description: "Full-text search across indexed files",
                 usage: "{\"a\": \"search_files\", \"i\": {\"query\": \"function main\"}} or {\"a\": \"search_files\", \"i\": {\"query\": \"TODO\", \"path_filter\": \"src/\"}}",
+            });
+        }
+        
+        if self.query_file.is_some() {
+            descriptions.push(ToolDescription {
+                name: "query_file",
+                description: "ALWAYS use this tool to process user-uploaded files or large documents. It splits the document into chunks, spawns sandboxed LLM workers for each chunk to prevent overwhelming context, and returns a summary plus chunk IDs for follow-ups.",
+                usage: r#"Process file: {"a": "query_file", "i": {"file_path": "large_document.pdf", "prompt": "Summarize the key points"}}"#,
+            });
+        }
+        
+        if self.query_chunk_worker.is_some() {
+            descriptions.push(ToolDescription {
+                name: "query_chunk_worker",
+                description: "Send a query to a specific chunk worker after using query_file. Use this for follow-up questions about specific chunks",
+                usage: r#"Query specific chunk: {"a": "query_chunk_worker", "i": {"chunk_id": "document_chunk_0", "prompt": "What does this section say about error handling?"}}"#,
+            });
+        }
+        
+        if self.close_file.is_some() {
+            descriptions.push(ToolDescription {
+                name: "close_file",
+                description: "Clean up chunk workers for a file when done. Call this to free memory after finishing analysis",
+                usage: r#"Close file workers: {"a": "close_file", "i": {"file_name": "large_document.pdf"}}"#,
             });
         }
         

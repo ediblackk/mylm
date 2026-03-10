@@ -26,6 +26,15 @@ pub struct AppConfig {
     /// Onboarding completed flag
     #[serde(default)]
     pub onboarding_completed: bool,
+    /// STT model path
+    pub stt_model_path: Option<String>,
+    /// TTS model path
+    pub tts_model_path: Option<String>,
+    /// STT language (e.g., "en", "ro", "de")
+    pub stt_language: Option<String>,
+
+    /// TTS Engine
+    pub tts_engine: TtsEngine,
 }
 
 impl Default for AppConfig {
@@ -36,6 +45,10 @@ impl Default for AppConfig {
             editor: default_editor(),
             theme: Theme::default(),
             onboarding_completed: false,
+            stt_model_path: None,
+            tts_model_path: None,
+            stt_language: None,
+            tts_engine: TtsEngine::default(),
         }
     }
 }
@@ -68,6 +81,15 @@ pub enum Theme {
     Default,
     Dark,
     Light,
+}
+
+/// TTS Engine
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TtsEngine {
+    #[default]
+    Native,
+    Piper,
 }
 
 /// Memory settings for context injection

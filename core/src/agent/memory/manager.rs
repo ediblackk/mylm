@@ -728,6 +728,23 @@ impl MemoryProvider for AgentMemoryProvider {
         crate::info_log!("[MEMORY_PROVIDER] Getting context for message: '{}'", 
             &user_message[..user_message.len().min(50)]);
         
+        // SKIP semantic search for file upload messages to avoid endless loops
+        // When user uploads files, the message contains file paths which are not meaningful
+        // for memory search and can cause the agent to loop searching memory instead of
+        // using query_file to analyze the uploaded files.
+        let is_file_upload = user_message.contains("I've uploaded the following file") 
+            || user_message.contains("uploaded the following file(s)");
+        
+        if is_file_upload {
+            crate::info_log!("[MEMORY_PROVIDER] File upload detected, skipping semantic search to avoid loop");
+            // Only return hot memories (recent activity) for file uploads
+            let hot_memories = manager.get_hot_memories_configured().await.unwrap_or_default();
+            if hot_memories.is_empty() {
+                return String::new();
+            }
+            return AgentMemoryManager::format_memories_for_prompt(&hot_memories);
+        }
+        
         // Async implementation - no block_in_place needed
         crate::info_log!("[MEMORY_PROVIDER] Fetching hot memories and semantic search...");
         
