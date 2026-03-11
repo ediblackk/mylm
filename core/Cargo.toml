@@ -13,9 +13,9 @@ async-trait = "0.1"
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls-native-roots"], default-features = false }
 sysinfo = "0.30"
 config = "0.14"
-lancedb = "0.23"
+lancedb = { version = "0.23", optional = true }
 fastembed = "5.7"
-lance-arrow = "1.0"
+# lance-arrow removed - using lancedb re-exports
 arrow-array = "56.2"
 arrow-schema = "56.2"
 git2 = "0.19"
@@ -58,6 +58,10 @@ tantivy = "0.25"
 
 # Redirect stderr to suppress pdf-extract warnings
 gag = "1.0"
+
+[features]
+default = ["vector-db"]
+vector-db = ["lancedb"]
 
 [dev-dependencies]
 tempfile = "3.0"
