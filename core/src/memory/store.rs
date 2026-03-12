@@ -604,7 +604,8 @@ impl VectorStore {
         let created_at_array = Int64Array::from(vec![created_at]);
         
         let flat_embeddings = Float32Array::from(embedding);
-        let embedding_array = FixedSizeListArray::try_new(flat_embeddings, 384)?;
+        let field = Arc::new(Field::new("item", DataType::Float32, true));
+        let embedding_array = FixedSizeListArray::try_new(field, 384, Arc::new(flat_embeddings), None)?;
         
         let type_array = StringArray::from(vec![memory_type.to_string()]);
         let session_id_array = StringArray::from(vec![session_id.clone()]);
@@ -1032,7 +1033,8 @@ impl VectorStore {
         let summary_array = StringArray::from(vec![category.summary]);
         let last_updated_array = Int64Array::from(vec![category.last_updated]);
         let flat_embeddings = Float32Array::from(embedding);
-        let embedding_array = FixedSizeListArray::try_new(flat_embeddings, 384)?;
+        let field = Arc::new(Field::new("item", DataType::Float32, true));
+        let embedding_array = FixedSizeListArray::try_new(field, 384, Arc::new(flat_embeddings), None)?;
 
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -1256,7 +1258,8 @@ impl VectorStore {
         let created_at_array = Int64Array::from(vec![created_at]);
         
         let flat_embeddings = Float32Array::from(embedding);
-        let embedding_array = FixedSizeListArray::try_new(flat_embeddings, 384)?;
+        let field = Arc::new(Field::new("item", DataType::Float32, true));
+        let embedding_array = FixedSizeListArray::try_new(field, 384, Arc::new(flat_embeddings), None)?;
         
         let type_array = StringArray::from(vec![existing.r#type.to_string()]);
         let session_id_array = StringArray::from(vec![existing.session_id.clone()]);
