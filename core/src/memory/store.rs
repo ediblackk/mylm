@@ -8,7 +8,7 @@ use chrono::Utc;
 use fastembed::{TextEmbedding, InitOptions, EmbeddingModel};
 use lancedb::query::{ExecutableQuery, QueryBase};
 use lancedb::{connect, Connection, Table};
-use lance_arrow::FixedSizeListArrayExt;
+
 use serde::{Deserialize, Serialize};
 use tokio::task;
 use futures::TryStreamExt;
@@ -604,7 +604,7 @@ impl VectorStore {
         let created_at_array = Int64Array::from(vec![created_at]);
         
         let flat_embeddings = Float32Array::from(embedding);
-        let embedding_array = FixedSizeListArray::try_new_from_values(flat_embeddings, 384)?;
+        let embedding_array = FixedSizeListArray::try_new(flat_embeddings, 384)?;
         
         let type_array = StringArray::from(vec![memory_type.to_string()]);
         let session_id_array = StringArray::from(vec![session_id.clone()]);
@@ -1032,7 +1032,7 @@ impl VectorStore {
         let summary_array = StringArray::from(vec![category.summary]);
         let last_updated_array = Int64Array::from(vec![category.last_updated]);
         let flat_embeddings = Float32Array::from(embedding);
-        let embedding_array = FixedSizeListArray::try_new_from_values(flat_embeddings, 384)?;
+        let embedding_array = FixedSizeListArray::try_new(flat_embeddings, 384)?;
 
         let batch = RecordBatch::try_new(
             schema.clone(),
@@ -1256,7 +1256,7 @@ impl VectorStore {
         let created_at_array = Int64Array::from(vec![created_at]);
         
         let flat_embeddings = Float32Array::from(embedding);
-        let embedding_array = FixedSizeListArray::try_new_from_values(flat_embeddings, 384)?;
+        let embedding_array = FixedSizeListArray::try_new(flat_embeddings, 384)?;
         
         let type_array = StringArray::from(vec![existing.r#type.to_string()]);
         let session_id_array = StringArray::from(vec![existing.session_id.clone()]);
