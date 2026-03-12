@@ -13,7 +13,7 @@ async-trait = "0.1"
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls-native-roots"], default-features = false }
 sysinfo = "0.30"
 config = "0.14"
-lancedb = { version = "0.23", optional = true }
+lancedb = "0.26"
 fastembed = "5.7"
 # lance-arrow removed - using lancedb re-exports
 arrow-array = "56.2"
