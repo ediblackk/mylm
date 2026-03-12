@@ -63,5 +63,17 @@ gag = "1.0"
 default = ["vector-db"]
 vector-db = ["lancedb"]
 
+[profile.dev.package."lancedb"]
+opt-level = 3
+debug = false
+
+[profile.dev.package."arrow-array"]
+opt-level = 3
+debug = false
+
+[profile.dev.package."arrow-schema"]
+opt-level = 3
+debug = false
+
 [dev-dependencies]
 tempfile = "3.0"
