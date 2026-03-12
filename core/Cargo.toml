@@ -59,10 +59,6 @@ tantivy = "0.25"
 # Redirect stderr to suppress pdf-extract warnings
 gag = "1.0"
 
-[features]
-default = ["vector-db"]
-vector-db = ["lancedb"]
-
 [profile.dev.package."lancedb"]
 opt-level = 3
 debug = false
